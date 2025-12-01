@@ -23,26 +23,6 @@ Cada entidad tiene mínimo 3 schemas:
 
 Algunos tienen schemas adicionales:
 4. *WithDetails: Para respuestas enriquecidas con información relacionada
-
-Uso en endpoints:
-----------------
-from schemas import StudentCreate, StudentResponse, StudentUpdate
-
-@app.post("/students/", response_model=StudentResponse)
-def create_student(student: StudentCreate):
-    # student solo tiene campos de creación
-    # respuesta será StudentResponse (sin password)
-    ...
-
-@app.get("/students/{id}", response_model=StudentResponse)
-def get_student(id: str):
-    # respuesta sin password
-    ...
-
-@app.patch("/students/{id}", response_model=StudentResponse)
-def update_student(id: str, student: StudentUpdate):
-    # permite actualización parcial
-    ...
 """
 
 # Student schemas
@@ -75,6 +55,13 @@ from .payment import (
     PaymentWithDetails
 )
 
+# Discount schemas
+from .discount import (
+    DiscountCreate,
+    DiscountResponse,
+    DiscountUpdate
+)
+
 # User schemas
 from .user import (
     UserCreate,
@@ -87,24 +74,24 @@ __all__ = [
     "StudentCreate",
     "StudentResponse",
     "StudentUpdate",
-    
     # Course
     "CourseCreate",
     "CourseResponse",
     "CourseUpdate",
-    
     # Enrollment
     "EnrollmentCreate",
     "EnrollmentResponse",
     "EnrollmentUpdate",
     "EnrollmentWithDetails",
-    
     # Payment
     "PaymentCreate",
     "PaymentResponse",
     "PaymentUpdate",
     "PaymentWithDetails",
-    
+    # Discount
+    "DiscountCreate",
+    "DiscountResponse",
+    "DiscountUpdate",
     # User
     "UserCreate",
     "UserResponse",

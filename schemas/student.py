@@ -139,10 +139,10 @@ class StudentResponse(BaseModel):
     nombre: str
     extension: str
     fecha_nacimiento: datetime
-    foto_url: Optional[str]
+    foto_url: Optional[str] = None
     celular: str
     email: EmailStr
-    domicilio: Optional[str]
+    domicilio: Optional[str] = None
     carrera: str
     es_estudiante_interno: TipoEstudiante
     lista_cursos_ids: List[PyObjectId] = []
@@ -152,10 +152,11 @@ class StudentResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     
-    class Config:
-        allow_population_by_field_name = True
-        arbitrary_types_allowed = True
-        schema_extra = {
+    model_config = {
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True,
+        "from_attributes": True,
+        "json_schema_extra": {
             "example": {
                 "_id": "507f1f77bcf86cd799439011",
                 "registro": "EST-2024-001",
@@ -176,6 +177,7 @@ class StudentResponse(BaseModel):
                 "updated_at": "2024-01-15T10:30:00"
             }
         }
+    }
 
 
 class StudentUpdate(BaseModel):

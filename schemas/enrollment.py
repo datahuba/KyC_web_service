@@ -99,10 +99,12 @@ class EnrollmentResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     
-    class Config:
-        allow_population_by_field_name = True
-        arbitrary_types_allowed = True
-        schema_extra = {
+    
+    model_config = {
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True,
+        "from_attributes": True,
+        "json_schema_extra": {
             "example": {
                 "_id": "507f1f77bcf86cd799439013",
                 "estudiante_id": "507f1f77bcf86cd799439011",
@@ -120,6 +122,7 @@ class EnrollmentResponse(BaseModel):
                 "updated_at": "2024-02-01T10:00:00"
             }
         }
+    }
 
 
 class EnrollmentUpdate(BaseModel):

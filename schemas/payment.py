@@ -117,10 +117,12 @@ class PaymentResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     
-    class Config:
-        allow_population_by_field_name = True
-        arbitrary_types_allowed = True
-        schema_extra = {
+    
+    model_config = {
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True,
+        "from_attributes": True,
+        "json_schema_extra": {
             "example": {
                 "_id": "507f1f77bcf86cd799439014",
                 "inscripcion_id": "507f1f77bcf86cd799439013",
@@ -139,6 +141,7 @@ class PaymentResponse(BaseModel):
                 "updated_at": "2024-02-01T11:00:00"
             }
         }
+    }
 
 
 class PaymentUpdate(BaseModel):
