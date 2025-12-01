@@ -75,6 +75,13 @@ from .payment import (
     PaymentWithDetails
 )
 
+# User schemas
+from .user import (
+    UserCreate,
+    UserResponse,
+    UserUpdate
+)
+
 __all__ = [
     # Student
     "StudentCreate",
@@ -97,4 +104,9 @@ __all__ = [
     "PaymentResponse",
     "PaymentUpdate",
     "PaymentWithDetails",
+    
+    # User
+    "UserCreate",
+    "UserResponse",
+    "UserUpdate",
 ]

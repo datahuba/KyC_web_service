@@ -224,6 +224,9 @@ class Discount(MongoBaseModel):
         """
         return monto * (self.porcentaje / 100)
     
+    class Settings:
+        name = "discounts"
+
     class Config:
         """Configuración y ejemplos de uso"""
         schema_extra = {

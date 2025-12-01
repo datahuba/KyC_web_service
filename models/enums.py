@@ -229,3 +229,16 @@ class TipoEstudiante(str, Enum):
     """
     INTERNO = "interno"
     EXTERNO = "externo"
+
+
+class UserRole(str, Enum):
+    """
+    Roles de usuario para control de acceso (RBAC)
+    
+    Valores:
+    -------
+    - ADMIN: crea estudiantes, cursos, descuentos, enrollments,
+    - SUPERADMIN: crea todo lo anterior y usuarios de tipo admin """
+    ADMIN = "admin"
+    SUPERADMIN = "superadmin"
+

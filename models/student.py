@@ -178,6 +178,9 @@ class Student(MongoBaseModel):
         description="Si el estudiante puede acceder al sistema y realizar acciones"
     )
     
+    class Settings:
+        name = "students"
+
     class Config:
         """Configuración y ejemplo de uso"""
         schema_extra = {

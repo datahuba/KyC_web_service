@@ -301,6 +301,9 @@ class Course(MongoBaseModel):
         """Obtiene el costo de matrícula según el tipo de estudiante"""
         return self.matricula_interno if es_interno else self.matricula_externo
     
+    class Settings:
+        name = "courses"
+
     class Config:
         """Configuración y ejemplo de uso"""
         schema_extra = {

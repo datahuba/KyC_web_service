@@ -3,144 +3,52 @@ Utilidades Base y Tipos Personalizados
 ======================================
 
 Este módulo contiene las clases base y utilidades compartidas por todos los modelos.
-
-Componentes:
------------
-1. PyObjectId: Tipo personalizado para manejar ObjectId de MongoDB con Pydantic
-2. MongoBaseModel: Clase base para todos los documentos de MongoDB
-
-¿Por qué estos componentes?
----------------------------
-- PyObjectId: Pydantic no soporta nativamente ObjectId de MongoDB, necesitamos
-  un tipo personalizado que valide y serialice correctamente los IDs.
-  
-- MongoBaseModel: Todos los documentos en MongoDB necesitan:
-  * Un campo _id (manejado como 'id' en Python)
-  * Timestamps de creación y actualización
-  * Configuración común de serialización
-  
-  Al heredar de esta clase, todos los modelos obtienen estas características
-  automáticamente, evitando duplicación de código.
+Ahora utiliza **Beanie ODM** para integración directa con MongoDB.
 """
 
 from datetime import datetime
-from pydantic import BaseModel, Field
+from typing import Optional
+from pydantic import Field
+from beanie import Document, PydanticObjectId
 from bson import ObjectId
 
+# Mantenemos PyObjectId por compatibilidad con schemas existentes,
+# pero ahora es un alias de PydanticObjectId de Beanie
+PyObjectId = PydanticObjectId
 
-class PyObjectId(ObjectId):
+class MongoBaseModel(Document):
     """
-    Tipo personalizado para ObjectId de MongoDB compatible con Pydantic
+    Modelo base para todos los documentos de MongoDB usando Beanie
     
-    ¿Por qué necesitamos esto?
-    -------------------------
-    MongoDB usa ObjectId como identificador único, pero Pydantic (usado para
-    validación) no lo reconoce nativamente. Esta clase actúa como puente:
+    Características:
+    ---------------
+    1. **Herencia de Beanie**: Provee métodos CRUD (find, create, etc.)
+    2. **Timestamps automáticos**: created_at y updated_at
+    3. **ID automático**: Beanie maneja el _id automáticamente
     
-    1. Valida que las cadenas sean ObjectIds válidos
-    2. Convierte automáticamente entre string y ObjectId
-    3. Permite que Pydantic genere schemas JSON correctos
-    
-    Ejemplo de uso:
-    --------------
-    estudiante_id: PyObjectId = Field(...)
-    # Acepta: "507f1f77bcf86cd799439011" (string)
-    # Convierte a: ObjectId("507f1f77bcf86cd799439011")
-    """
-    
-    @classmethod
-    def __get_validators__(cls):
-        """Registra el validador personalizado con Pydantic"""
-        yield cls.validate
-    
-    @classmethod
-    def validate(cls, v):
-        """
-        Valida que el valor sea un ObjectId válido
-        
-        Args:
-            v: Valor a validar (puede ser string u ObjectId)
-            
-        Returns:
-            ObjectId validado
-            
-        Raises:
-            ValueError: Si el valor no es un ObjectId válido
-        """
-        if not ObjectId.is_valid(v):
-            raise ValueError("ObjectId inválido")
-        return ObjectId(v)
-    
-    @classmethod
-    def __modify_schema__(cls, field_schema):
-        """
-        Modifica el schema JSON para documentación de API
-        
-        Le dice a Pydantic que en el schema JSON, este campo
-        debe aparecer como tipo 'string' en lugar de un tipo complejo
-        """
-        field_schema.update(type="string")
-
-
-class MongoBaseModel(BaseModel):
-    """
-    Modelo base para todos los documentos de MongoDB
-    
-    ¿Por qué heredar de esta clase?
-    -------------------------------
-    Todos los documentos en MongoDB comparten características comunes:
-    
-    1. **Campo _id**: MongoDB requiere un identificador único
-       - En MongoDB se llama '_id'
-       - En Python lo usamos como 'id' (más pythónico)
-       - Se genera automáticamente si no se proporciona
-    
-    2. **Timestamps automáticos**:
-       - created_at: Cuándo se creó el documento (nunca cambia)
-       - updated_at: Última modificación (se actualiza manualmente)
-       - Útil para auditoría y debugging
-    
-    3. **Configuración de serialización**:
-       - Convierte ObjectId a string para JSON
-       - Convierte datetime a ISO 8601 para JSON
-       - Permite usar tanto 'id' como '_id' en el código
-    
-    Ejemplo de herencia:
-    -------------------
+    Uso:
+    ----
     class Student(MongoBaseModel):
         nombre: str
-        email: str
-    
-    # Automáticamente tendrá: id, created_at, updated_at
+        
+        class Settings:
+            name = "students"  # Nombre de la colección
     """
     
-    id: PyObjectId = Field(
-        default_factory=PyObjectId,
-        alias="_id",
-        description="Identificador único del documento en MongoDB"
-    )
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
     
-    created_at: datetime = Field(
-        default_factory=datetime.utcnow,
-        description="Fecha y hora de creación del documento"
-    )
+    async def save(self, *args, **kwargs):
+        """Sobrescribe save para actualizar updated_at"""
+        self.updated_at = datetime.utcnow()
+        return await super().save(*args, **kwargs)
     
-    updated_at: datetime = Field(
-        default_factory=datetime.utcnow,
-        description="Fecha y hora de última actualización"
-    )
-    
-    class Config:
+    class Settings:
         """
-        Configuración de Pydantic para este modelo
+        Configuración por defecto de Beanie
         
-        - allow_population_by_field_name: Permite usar tanto 'id' como '_id'
-        - arbitrary_types_allowed: Permite usar ObjectId (tipo no estándar)
-        - json_encoders: Define cómo convertir tipos especiales a JSON
+        use_state_management: Permite trackear cambios en el modelo
+        validate_on_save: Valida los datos antes de guardar
         """
-        allow_population_by_field_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {
-            ObjectId: str,  # ObjectId → string
-            datetime: lambda v: v.isoformat()  # datetime → ISO 8601
-        }
+        use_state_management = True
+        validate_on_save = True

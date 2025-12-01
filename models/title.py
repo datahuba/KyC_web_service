@@ -23,6 +23,9 @@ class Title(MongoBaseModel):
     numero_titulo: str = Field(..., description="Número del título")
     año_expedicion: str = Field(..., description="Año de expedición")
     tipo_titulo: TipoTitulo = Field(...)
+
+    class Settings:
+        name = "titles"
     
     
     

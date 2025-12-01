@@ -40,3 +40,6 @@ class Payment(MongoBaseModel):
     def rechazar_pago(self):
         self.estado_pago = EstadoPago.RECHAZADO
         self.updated_at = datetime.utcnow()
+
+    class Settings:
+        name = "payments"

@@ -42,3 +42,6 @@ class Enrollment(MongoBaseModel):
         self.total_pagado += monto_pago
         self.saldo_pendiente = max(0, self.total_a_pagar - self.total_pagado)
         self.updated_at = datetime.utcnow()
+
+    class Settings:
+        name = "enrollments"
