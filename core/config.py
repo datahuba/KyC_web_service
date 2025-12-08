@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     ALGORITHM: str =  Field(..., env="ALGORITHM")
     ACCESS_TOKEN_EXPIRE_MINUTES: int =  Field(..., env="ACCESS_TOKEN_EXPIRE_MINUTES")
     
+    # Cloudinary
+    CLOUDINARY_CLOUD_NAME: str = Field(..., env="CLOUDINARY_CLOUD_NAME")
+    CLOUDINARY_API_KEY: str = Field(..., env="CLOUDINARY_API_KEY")
+    CLOUDINARY_API_SECRET: str = Field(..., env="CLOUDINARY_API_SECRET")
+    
     
     model_config = {
         "env_file": ".env",

@@ -67,8 +67,8 @@ class StudentResponse(BaseModel):
     registro: str
     nombre: str
     email: EmailStr
-    carnet: str
-    extension: str
+    carnet: Optional[str] = None
+    extension: Optional[str] = None
     celular: str
     domicilio: Optional[str] = None
     fecha_nacimiento: datetime
