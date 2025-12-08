@@ -7,7 +7,7 @@ Lógica de negocio para estudiantes (Funciones).
 
 from typing import List, Optional
 from models.student import Student
-from schemas.student import StudentCreate, StudentUpdate
+from schemas.student import StudentCreate, StudentUpdateSelf, StudentUpdateAdmin
 from beanie import PydanticObjectId
 
 
@@ -37,23 +37,6 @@ async def create_student(student_in: StudentCreate) -> Student:
     return student
 
 
-async def update_student(
-    student: Student,
-    student_in: StudentUpdate
-) -> Student:
-    """Actualizar estudiante existente"""
-    update_data = student_in.model_dump(exclude_unset=True)
-    
-    # Si se actualiza la contraseña, hashearla
-    if "password" in update_data:
-        from core.security import get_password_hash
-        update_data["password"] = get_password_hash(update_data["password"])
-    
-    for field, value in update_data.items():
-        setattr(student, field, value)
-    
-    await student.save()
-    return student
 
 
 async def delete_student(id: PydanticObjectId) -> Student:

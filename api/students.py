@@ -2,7 +2,7 @@ from typing import List, Any, Union
 from fastapi import APIRouter, Depends, HTTPException
 from models.student import Student
 from models.user import User
-from schemas.student import StudentCreate, StudentResponse, StudentUpdate
+from schemas.student import StudentCreate, StudentResponse, StudentUpdateSelf, StudentUpdateAdmin
 from services import student_service
 from beanie import PydanticObjectId
 from api.dependencies import require_admin, get_current_user
@@ -67,26 +67,33 @@ async def read_student(
 async def update_student(
     *,
     id: PydanticObjectId,
-    student_in: StudentUpdate,
+    student_in: Union[StudentUpdateSelf, StudentUpdateAdmin],
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
     """
     Actualizar estudiante.
     
     Requiere: Autenticación
-    - ADMIN/SUPERADMIN: Pueden actualizar cualquier estudiante
-    - STUDENT: Solo puede actualizar su propio perfil
+    - ADMIN/SUPERADMIN: Pueden actualizar cualquier estudiante (StudentUpdateAdmin)
+    - STUDENT: Solo puede actualizar su propio perfil (StudentUpdateSelf)
     """
     student = await student_service.get_student(id=id)
     if not student:
         raise HTTPException(status_code=404, detail="Estudiante no encontrado")
     
     # Si es estudiante, solo puede actualizar su propio perfil
-    if isinstance(current_user, Student) and current_user.id != id:
-        raise HTTPException(
-            status_code=403,
-            detail="No tienes permiso para actualizar este estudiante"
-        )
+    if isinstance(current_user, Student):
+        if current_user.id != id:
+            raise HTTPException(
+                status_code=403,
+                detail="No tienes permiso para actualizar este estudiante"
+            )
+        # Validar que el estudiante use StudentUpdateSelf
+        if not isinstance(student_in, StudentUpdateSelf):
+            raise HTTPException(
+                status_code=403,
+                detail="Los estudiantes solo pueden usar StudentUpdateSelf"
+            )
     
     student = await student_service.update_student(student=student, student_in=student_in)
     return student

@@ -15,14 +15,11 @@ from .enums import TipoTitulo
 
 class Title(MongoBaseModel):
     """Modelo de Título/Certificado"""
-    
-    estudiante_id: PyObjectId = Field(..., description="ID del estudiante")
-    curso_id: PyObjectId = Field(..., description="ID del curso")
-    
     titulo: str = Field(..., min_length=1, description="Nombre del título")
     numero_titulo: str = Field(..., description="Número del título")
     año_expedicion: str = Field(..., description="Año de expedición")
-    tipo_titulo: TipoTitulo = Field(...)
+    universidad: str = Field(..., description="Universidad que emitió el título")
+    titulo_url: Optional[str] = Field(None,description="URL del Título en Provisión Nacional")
 
     class Settings:
         name = "titles"

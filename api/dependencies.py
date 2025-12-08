@@ -15,15 +15,18 @@ from models.user import User
 from models.student import Student
 from models.enums import UserRole
 
-# Security scheme para JWT
-security = HTTPBearer()
+# Security scheme para JWT (auto_error=False permite bypass en modo desarrollo)
+security = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security)
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
 ) -> Union[User, Student]:
     """
     Obtener el usuario actual desde el token JWT
+    
+    En modo desarrollo (DEVELOPMENT_MODE=true), retorna un usuario admin mock
+    sin requerir autenticación.
     
     Returns:
         User o Student autenticado
@@ -31,6 +34,29 @@ async def get_current_user(
     Raises:
         HTTPException 401: Si el token es inválido o el usuario no existe
     """
+    from core.config import settings
+    
+    # Modo desarrollo: bypass de autenticación
+    if settings.DEVELOPMENT_MODE:
+        # Retornar un usuario SUPERADMIN mock para desarrollo
+        mock_user = User(
+            id=PydanticObjectId("000000000000000000000001"),
+            username="dev_admin",
+            password="mock_password",
+            email="dev@example.com",
+            rol=UserRole.SUPERADMIN,
+            activo=True
+        )
+        return mock_user
+    
+    # Modo producción: autenticación normal
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Se requiere autenticación",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
     token = credentials.credentials
     payload = decode_access_token(token)
     

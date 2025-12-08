@@ -29,7 +29,8 @@ Algunos tienen schemas adicionales:
 from .student import (
     StudentCreate,
     StudentResponse,
-    StudentUpdate
+    StudentUpdateSelf,
+    StudentUpdateAdmin
 )
 
 # Course schemas
@@ -73,7 +74,8 @@ __all__ = [
     # Student
     "StudentCreate",
     "StudentResponse",
-    "StudentUpdate",
+    "StudentUpdateSelf",
+    "StudentUpdateAdmin",
     # Course
     "CourseCreate",
     "CourseResponse",

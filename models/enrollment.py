@@ -7,7 +7,7 @@ Colección MongoDB: enrollments
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from pydantic import Field, validator
 from .base import MongoBaseModel, PyObjectId
 from .enums import EstadoInscripcion, TipoPago, TipoEstudiante
@@ -23,6 +23,11 @@ class Enrollment(MongoBaseModel):
     estado: EstadoInscripcion = Field(default=EstadoInscripcion.ACTIVO)
     es_estudiante_interno: TipoEstudiante = Field(..., description="Tipo al momento de inscripción")
     formulario_inscripcion_url: Optional[str] = Field(None, description="URL del PDF de inscripción")
+    
+    # Documentos de pago y requisitos específicos de esta inscripción
+    comprobante_matricula_url: Optional[str] = Field(None, description="URL del Comprobante de Pago de la Matrícula")
+    comprobante_modulo_url: Optional[str] = Field(None, description="URL del Comprobante de Pago del módulo")
+    requisitos_url: Optional[List[str]] = Field(default_factory=list, description="URLs de requisitos de inscripción (fotocopias simples)")
     
     descuento_personalizado: Optional[float] = Field(None, ge=0, le=100)
     total_a_pagar: float = Field(..., gt=0)

@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "KyC Payment System"
     API_V1_STR: str = "/api/v1"
     DEBUG: bool = False
+    DEVELOPMENT_MODE: bool = Field(default=False, env="DEVELOPMENT_MODE")
     
     # MongoDB
     MONGODB_URL: str = Field(..., env="MONGODB_URL")

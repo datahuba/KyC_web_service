@@ -13,7 +13,7 @@ Schemas incluidos:
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from pydantic import BaseModel, Field, validator
 from models.enums import EstadoInscripcion, TipoPago, TipoEstudiante
 from models.base import PyObjectId
@@ -59,6 +59,11 @@ class EnrollmentCreate(BaseModel):
         description="URL del PDF de inscripción firmado"
     )
     
+    # Documentos
+    comprobante_matricula_url: Optional[str] = Field(None, description="URL Comprobante Matrícula")
+    comprobante_modulo_url: Optional[str] = Field(None, description="URL Comprobante Módulo")
+    requisitos_url: Optional[List[str]] = Field(default_factory=list, description="URLs Requisitos")
+    
     class Config:
         schema_extra = {
             "example": {
@@ -89,6 +94,11 @@ class EnrollmentResponse(BaseModel):
     estado: EstadoInscripcion
     es_estudiante_interno: TipoEstudiante
     formulario_inscripcion_url: Optional[str]
+    
+    # Documentos
+    comprobante_matricula_url: Optional[str] = None
+    comprobante_modulo_url: Optional[str] = None
+    requisitos_url: List[str] = []
     
     descuento_personalizado: Optional[float]
     total_a_pagar: float
@@ -137,6 +147,11 @@ class EnrollmentUpdate(BaseModel):
     
     estado: Optional[EstadoInscripcion] = None
     formulario_inscripcion_url: Optional[str] = None
+    
+    # Documentos
+    comprobante_matricula_url: Optional[str] = None
+    comprobante_modulo_url: Optional[str] = None
+    requisitos_url: Optional[List[str]] = None
     descuento_personalizado: Optional[float] = Field(None, ge=0, le=100)
     total_a_pagar: Optional[float] = Field(None, gt=0)
     total_pagado: Optional[float] = Field(None, ge=0)

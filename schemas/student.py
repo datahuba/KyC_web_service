@@ -6,9 +6,10 @@ Define los schemas Pydantic para operaciones CRUD de estudiantes.
 
 Schemas incluidos:
 -----------------
-1. StudentCreate: Para crear nuevos estudiantes (sin id, sin campos autogenerados)
+1. StudentCreate: Para crear nuevos estudiantes (solo campos esenciales)
 2. StudentResponse: Para mostrar estudiantes (sin password)
-3. StudentUpdate: Para actualizar estudiantes (todos los campos opcionales)
+3. StudentUpdateSelf: Para que estudiantes actualicen su propio perfil
+4. StudentUpdateAdmin: Para que admins actualicen cualquier campo
 """
 
 from datetime import datetime
@@ -16,6 +17,7 @@ from typing import Optional, List
 from pydantic import BaseModel, Field, EmailStr
 from models.enums import TipoEstudiante
 from models.base import PyObjectId
+from models.title import Title
 
 
 class StudentCreate(BaseModel):
@@ -24,94 +26,33 @@ class StudentCreate(BaseModel):
     
     Uso: POST /students/
     
-    ¿Qué incluye?
-    ------------
-    - Datos de autenticación (registro, password)
-    - Información personal (nombre, CI, fecha nacimiento)
-    - Contacto (celular, email, domicilio)
-    - Información académica (carrera, tipo de estudiante)
-    
-    ¿Qué NO incluye?
-    ---------------
-    - id: Se genera automáticamente
-    - fecha_registro: Se asigna al momento de creación
-    - activo: Por defecto es True
-    - lista_cursos_ids: Se llena cuando se inscribe
-    - lista_titulos_ids: Se llena cuando obtiene títulos
-    - created_at, updated_at: Autogenerados
+    Solo incluye los campos esenciales para el registro inicial.
+    Los demás campos pueden ser actualizados posteriormente.
     """
     
-    registro: str = Field(
-        ...,
-        description="Número de registro único del estudiante (usado como username)"
-    )
-    
-    password: str = Field(
-        ...,
-        min_length=4,
-        description="Contraseña (será hasheada antes de guardar)"
-    )
-    
-    nombre: str = Field(
-        ...,
-        min_length=1,
-        max_length=200,
-        description="Nombre completo del estudiante"
-    )
-    
-    extension: str = Field(
-        ...,
-        description="Carnet de identidad o documento de identificación"
-    )
-    
-    fecha_nacimiento: datetime = Field(
-        ...,
-        description="Fecha de nacimiento"
-    )
-    
-    foto_url: Optional[str] = Field(
-        None,
-        description="URL de la foto de perfil"
-    )
-    
-    celular: str = Field(
-        ...,
-        description="Número de celular para notificaciones"
-    )
-    
-    email: EmailStr = Field(
-        ...,
-        description="Correo electrónico"
-    )
-    
-    domicilio: Optional[str] = Field(
-        None,
-        description="Dirección física del estudiante"
-    )
-    
-    carrera: str = Field(
-        ...,
-        description="Carrera de pregrado del estudiante"
-    )
-    
-    es_estudiante_interno: TipoEstudiante = Field(
-        ...,
-        description="Tipo de estudiante: INTERNO o EXTERNO"
-    )
-    
+    registro: str = Field(..., description="Número de registro único del estudiante (usado como username)")
+    password: str = Field(..., min_length=4, description="Contraseña (será hasheada antes de guardar)")
+    nombre: str = Field(..., min_length=1, max_length=200, description="Nombre completo del estudiante")
+    email: EmailStr = Field(..., description="Correo electrónico")
+    carnet: str = Field(..., description="Carnet de identidad")
+    extension: Optional[str] = Field(None, description="Extension del carnet de identidad")
+    celular: str = Field(..., description="Número de celular para notificaciones")
+    domicilio: Optional[str] = Field(None, description="Dirección física del estudiante")
+    fecha_nacimiento: datetime = Field(..., description="Fecha de nacimiento")
+    es_estudiante_interno: TipoEstudiante = Field(..., description="Tipo de estudiante: INTERNO o EXTERNO")
+
     class Config:
         schema_extra = {
             "example": {
-                "registro": "EST-2024-001",
-                "password": "MiPassword123!",
-                "nombre": "Juan Pérez García",
-                "extension": "12345678 LP",
-                "fecha_nacimiento": "1995-05-15T00:00:00",
-                "foto_url": "https://storage.example.com/photos/juan.jpg",
-                "celular": "+591 70123456",
-                "email": "juan.perez@example.com",
-                "domicilio": "Av. Principal #123, La Paz, Bolivia",
-                "carrera": "Ingeniería de Sistemas",
+                "registro": "220005958",
+                "password": "KyC123",
+                "nombre": "Brandon Gonsales Coronado",
+                "email": "bgonsalescoronado@gmail.com",
+                "carnet": "12345678",
+                "extension": "SC",
+                "celular": "60984296",
+                "domicilio": "Av. Internacional #13, Santa Cruz, Bolivia",
+                "fecha_nacimiento": "2002-03-20T00:00:00",
                 "es_estudiante_interno": "interno"
             }
         }
@@ -120,35 +61,29 @@ class StudentCreate(BaseModel):
 class StudentResponse(BaseModel):
     """
     Schema para mostrar información de un estudiante
-    
-    Uso: GET /students/{id}, respuestas de POST/PUT/PATCH
-    
-    ¿Qué incluye?
-    ------------
-    - Todos los campos del estudiante
-    - EXCEPTO: password (seguridad)
-    
-    ¿Por qué excluir password?
-    -------------------------
-    Las contraseñas hasheadas NUNCA deben enviarse al cliente,
-    ni siquiera en formato hash. Es una buena práctica de seguridad.
     """
     
     id: PyObjectId = Field(..., alias="_id")
     registro: str
     nombre: str
+    email: EmailStr
+    carnet: str
     extension: str
+    celular: str
+    domicilio: Optional[str] = None
     fecha_nacimiento: datetime
     foto_url: Optional[str] = None
-    celular: str
-    email: EmailStr
-    domicilio: Optional[str] = None
-    carrera: str
     es_estudiante_interno: TipoEstudiante
-    lista_cursos_ids: List[PyObjectId] = []
-    lista_titulos_ids: List[PyObjectId] = []
-    fecha_registro: datetime
+    
+    # Documentos
+    ci_url: Optional[str] = None
+    afiliacion_url: Optional[str] = None
+    cv_url: Optional[str] = None
+    
+    # Estado y Metadata
     activo: bool
+    lista_cursos_ids: List[PyObjectId] = []
+    titulo: Optional[Title] = None
     created_at: datetime
     updated_at: datetime
     
@@ -159,20 +94,28 @@ class StudentResponse(BaseModel):
         "json_schema_extra": {
             "example": {
                 "_id": "507f1f77bcf86cd799439011",
-                "registro": "EST-2024-001",
-                "nombre": "Juan Pérez García",
-                "extension": "12345678 LP",
-                "fecha_nacimiento": "1995-05-15T00:00:00",
-                "foto_url": "https://storage.example.com/photos/juan.jpg",
-                "celular": "+591 70123456",
-                "email": "juan.perez@example.com",
-                "domicilio": "Av. Principal #123, La Paz, Bolivia",
-                "carrera": "Ingeniería de Sistemas",
+                "registro": "220005958",
+                "nombre": "Brandon Gonsales Coronado",
+                "email": "bgonsalescoronado@gmail.com",
+                "carnet": "12345678",
+                "extension": "SC",
+                "celular": "60984296",
+                "domicilio": "Av. Internacional #13, Santa Cruz, Bolivia",
+                "fecha_nacimiento": "2002-03-20T00:00:00",
+                "foto_url": "https://storage.example.com/photos/brandon.jpg",
                 "es_estudiante_interno": "interno",
-                "lista_cursos_ids": [],
-                "lista_titulos_ids": [],
-                "fecha_registro": "2024-01-15T10:30:00",
                 "activo": True,
+                "lista_cursos_ids": [],
+                "titulo": {
+                    "titulo": "Licenciatura en Ingeniería de Sistemas",
+                    "numero_titulo": "123456",
+                    "año_expedicion": "2020",
+                    "universidad": "Universidad Mayor de San Andrés",
+                    "titulo_url": "https://storage.example.com/titulos/brandon.pdf"
+                },
+                "ci_url": "https://storage.example.com/docs/ci_brandon.pdf",
+                "afiliacion_url": "https://storage.example.com/docs/afiliacion_brandon.pdf",
+                "cv_url": "https://storage.example.com/docs/cv_brandon.pdf",
                 "created_at": "2024-01-15T10:30:00",
                 "updated_at": "2024-01-15T10:30:00"
             }
@@ -180,50 +123,97 @@ class StudentResponse(BaseModel):
     }
 
 
-class StudentUpdate(BaseModel):
+class StudentUpdateSelf(BaseModel):
     """
-    Schema para actualizar un estudiante existente
+    Schema para que un estudiante actualice su propio perfil
     
-    Uso: PATCH /students/{id}
+    Uso: PATCH /students/me o PATCH /students/{id} (si es el mismo estudiante)
     
-    ¿Qué incluye?
-    ------------
-    - Todos los campos son opcionales
-    - Permite actualizaciones parciales
-    - No se puede cambiar: id, fecha_registro, created_at
-    
-    Ejemplo de uso:
-    --------------
-    # Actualizar solo el email
-    {"email": "nuevo@example.com"}
-    
-    # Actualizar nombre y celular
-    {"nombre": "Juan Carlos Pérez", "celular": "+591 71234567"}
-    
-    # Desactivar estudiante
-    {"activo": False}
+    Permite actualizar información personal y documentos,
+    pero NO puede cambiar: registro, activo, lista_cursos_ids, titulo
     """
     
-    registro: Optional[str] = None
     password: Optional[str] = Field(None, min_length=8)
-    nombre: Optional[str] = Field(None, min_length=1, max_length=200)
-    extension: Optional[str] = None
-    fecha_nacimiento: Optional[datetime] = None
-    foto_url: Optional[str] = None
     celular: Optional[str] = None
-    email: Optional[EmailStr] = None
     domicilio: Optional[str] = None
-    carrera: Optional[str] = None
-    es_estudiante_interno: Optional[TipoEstudiante] = None
-    lista_cursos_ids: Optional[List[PyObjectId]] = None
-    lista_titulos_ids: Optional[List[PyObjectId]] = None
-    activo: Optional[bool] = None
+    foto_url: Optional[str] = None
+    ci_url: Optional[str] = None
+    afiliacion_url: Optional[str] = None
+    cv_url: Optional[str] = None
+    titulo: Optional[Title] = None
     
     class Config:
         schema_extra = {
             "example": {
-                "email": "nuevo.email@example.com",
-                "celular": "+591 71234567",
-                "activo": True
+                "password": "NuevaPassword123",
+                "celular": "71234567",
+                "domicilio": "Nueva Dirección #456, La Paz, Bolivia",
+                "foto_url": "https://storage.example.com/photos/nueva_foto.jpg",
+                "ci_url": "https://storage.example.com/docs/ci_actualizado.pdf",
+                "afiliacion_url": "https://storage.example.com/docs/afiliacion_actualizado.pdf",
+                "cv_url": "https://storage.example.com/docs/cv_actualizado.pdf",
+                "titulo": {
+                    "titulo": "Licenciatura en Ingeniería de Sistemas",
+                    "numero_titulo": "123456",
+                    "año_expedicion": "2020",
+                    "universidad": "Universidad Mayor de San Andrés",
+                    "titulo_url": "https://storage.example.com/titulos/brandon.pdf"
+                }
+            }
+        }
+
+
+class StudentUpdateAdmin(BaseModel):
+    """
+    Schema para que un admin actualice cualquier campo de un estudiante
+    
+    Uso: PATCH /students/{id} (solo admins)
+    
+    Permite actualizar todos los campos excepto: id, created_at, updated_at
+    """
+    registro: Optional[str] = None
+    password: Optional[str] = Field(None, min_length=8)
+    nombre: Optional[str] = Field(None, min_length=1, max_length=200)
+    email: Optional[EmailStr] = None
+    carnet: Optional[str] = None
+    extension: Optional[str] = None
+    celular: Optional[str] = None
+    domicilio: Optional[str] = None
+    fecha_nacimiento: Optional[datetime] = None
+    foto_url: Optional[str] = None
+    es_estudiante_interno: Optional[TipoEstudiante] = None
+    ci_url: Optional[str] = None
+    afiliacion_url: Optional[str] = None
+    cv_url: Optional[str] = None
+    activo: Optional[bool] = None
+    lista_cursos_ids: Optional[List[PyObjectId]] = None
+    titulo: Optional[Title] = None
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "registro": "220005959",
+                "password": "NuevaPassword456",
+                "nombre": "Juan Carlos Pérez",
+                "email": "juan.perez@example.com",
+                "carnet": "87654321",
+                "extension": "LP",
+                "celular": "77777777",
+                "domicilio": "Calle Falsa #123, La Paz, Bolivia",
+                "fecha_nacimiento": "1990-01-01T00:00:00",
+                "foto_url": "https://storage.example.com/photos/juan.jpg",
+                "es_estudiante_interno": "externo",
+                "ci_url": "https://storage.example.com/docs/ci_juan.pdf",
+                "afiliacion_url": "https://storage.example.com/docs/afiliacion_juan.pdf",
+                "cv_url": "https://storage.example.com/docs/cv_juan.pdf",
+                "activo": False,
+                "lista_cursos_ids": [],
+                "titulo": {
+                    "titulo": "Licenciatura en Ingeniería de Sistemas",
+                    "numero_titulo": "123456",
+                    "año_expedicion": "2020",
+                    "universidad": "Universidad Mayor de San Andrés",
+                    "titulo_url": "https://storage.example.com/titulos/juan.pdf"
+                }
             }
         }
