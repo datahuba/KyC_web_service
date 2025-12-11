@@ -40,21 +40,18 @@ class Course(MongoBaseModel):
     
     2. PRECIOS PARA ESTUDIANTES INTERNOS:
        - costo_total_interno: Precio total para estudiantes de la U
-       - monto_cuota_interno: Cuánto paga por cuota
-       - matricula_interno: Costo de matrícula
+       - matricula_interno: Costo de matrícula inicial
     
     3. PRECIOS PARA ESTUDIANTES EXTERNOS:
        - costo_total_externo: Precio total para público general
-       - monto_cuota_externo: Cuánto paga por cuota
-       - matricula_externo: Costo de matrícula
+       - matricula_externo: Costo de matrícula inicial
     
     4. ESTRUCTURA DE PAGO:
-       - cantidad_cuotas: En cuántas cuotas se puede pagar
-       - descuento_general: Descuento aplicable a todos
+       - cantidad_cuotas: En cuántas cuotas se puede dividir el pago
+       - descuento_curso: Descuento del curso aplicable a todos
     
     5. INFORMACIÓN ADICIONAL:
        - observacion: Notas especiales del curso
-       - requisitos: Documentos/requisitos para inscribirse
        - inscritos: Lista de estudiantes inscritos
        - fechas: Inicio y fin del curso
     
@@ -75,13 +72,14 @@ class Course(MongoBaseModel):
     --------------------------
     El costo total se divide en:
     1. Matrícula (pago inicial)
-    2. N cuotas (pagos mensuales)
+    2. N cuotas (pagos mensuales calculados automáticamente)
     
     Fórmula:
-        costo_total = matricula + (monto_cuota × cantidad_cuotas)
+        monto_cuota = (costo_total - matricula) / cantidad_cuotas
     
     Ejemplo:
-        5000 Bs = 500 Bs matrícula + (900 Bs × 5 cuotas)
+        5000 Bs total, 500 Bs matrícula, 5 cuotas
+        → Cada cuota = (5000 - 500) / 5 = 900 Bs
     
     ¿Por qué validar los montos?
     ---------------------------
@@ -127,16 +125,10 @@ class Course(MongoBaseModel):
         description="Costo total del curso para estudiantes de la universidad"
     )
     
-    monto_cuota_interno: float = Field(
-        ...,
-        gt=0,
-        description="Monto de cada cuota para estudiantes internos"
-    )
-    
     matricula_interno: float = Field(
         ...,
         ge=0,
-        description="Costo de matrícula para estudiantes internos"
+        description="Costo de matrícula inicial para estudiantes internos"
     )
     
     # ========================================================================
@@ -149,16 +141,10 @@ class Course(MongoBaseModel):
         description="Costo total del curso para estudiantes externos (público general)"
     )
     
-    monto_cuota_externo: float = Field(
-        ...,
-        gt=0,
-        description="Monto de cada cuota para estudiantes externos"
-    )
-    
     matricula_externo: float = Field(
         ...,
         ge=0,
-        description="Costo de matrícula para estudiantes externos"
+        description="Costo de matrícula inicial para estudiantes externos"
     )
     
     # ========================================================================
@@ -171,11 +157,11 @@ class Course(MongoBaseModel):
         description="Número de cuotas en las que se puede dividir el pago"
     )
     
-    descuento_general: Optional[float] = Field(
+    descuento_curso: Optional[float] = Field(
         None,
         ge=0,
         le=100,
-        description="Descuento general aplicable a todos los estudiantes (porcentaje)"
+        description="Descuento del curso aplicable a todos los estudiantes (porcentaje)"
     )
     
     # ========================================================================
@@ -187,10 +173,7 @@ class Course(MongoBaseModel):
         description="Observaciones especiales del curso (ej: 'Se usa cuando tipo_curso es OTRO')"
     )
     
-    requisitos: List[str] = Field(
-        default_factory=list,
-        description="Lista de requisitos o documentos necesarios para inscribirse"
-    )
+
     
     inscritos: List[PyObjectId] = Field(
         default_factory=list,
@@ -224,58 +207,7 @@ class Course(MongoBaseModel):
     # VALIDADORES
     # ========================================================================
     
-    @validator('monto_cuota_interno')
-    def validar_monto_cuota_interno(cls, v, values):
-        """
-        Valida que el monto de cuota interna sea coherente con el costo total
-        
-        ¿Por qué validar?
-        ----------------
-        Previene errores como:
-        - Cuotas que no suman al total
-        - Inconsistencias en los precios
-        - Errores de cálculo manual
-        
-        Fórmula validada:
-            costo_total_interno = matricula_interno + (monto_cuota_interno × cantidad_cuotas)
-        """
-        if 'costo_total_interno' in values and 'cantidad_cuotas' in values:
-            costo_total = values['costo_total_interno']
-            cantidad_cuotas = values['cantidad_cuotas']
-            
-            if 'matricula_interno' in values:
-                costo_total -= values['matricula_interno']
-            
-            # Permitir una pequeña diferencia por redondeo (1 centavo)
-            esperado = costo_total / cantidad_cuotas
-            if abs(v - esperado) > 0.01:
-                raise ValueError(
-                    f"El monto de cuota interno ({v}) no coincide con "
-                    f"(costo_total_interno - matricula_interno) / cantidad_cuotas ({esperado:.2f})"
-                )
-        return v
-    
-    @validator('monto_cuota_externo')
-    def validar_monto_cuota_externo(cls, v, values):
-        """
-        Valida que el monto de cuota externa sea coherente con el costo total
-        
-        Similar al validador interno, pero para precios externos.
-        """
-        if 'costo_total_externo' in values and 'cantidad_cuotas' in values:
-            costo_total = values['costo_total_externo']
-            cantidad_cuotas = values['cantidad_cuotas']
-            
-            if 'matricula_externo' in values:
-                costo_total -= values['matricula_externo']
-            
-            esperado = costo_total / cantidad_cuotas
-            if abs(v - esperado) > 0.01:
-                raise ValueError(
-                    f"El monto de cuota externo ({v}) no coincide con "
-                    f"(costo_total_externo - matricula_externo) / cantidad_cuotas ({esperado:.2f})"
-                )
-        return v
+
     
     # ========================================================================
     # MÉTODOS HELPER
@@ -293,9 +225,15 @@ class Course(MongoBaseModel):
         """
         return self.costo_total_interno if es_interno else self.costo_total_externo
     
-    def get_monto_cuota(self, es_interno: bool) -> float:
-        """Obtiene el monto de cuota según el tipo de estudiante"""
-        return self.monto_cuota_interno if es_interno else self.monto_cuota_externo
+    def calcular_monto_cuota(self, es_interno: bool) -> float:
+        """
+        Calcula el monto de cada cuota según el tipo de estudiante
+        
+        Fórmula: (costo_total - matricula) / cantidad_cuotas
+        """
+        costo_total = self.get_costo_total(es_interno)
+        matricula = self.get_matricula(es_interno)
+        return (costo_total - matricula) / self.cantidad_cuotas
     
     def get_matricula(self, es_interno: bool) -> float:
         """Obtiene el costo de matrícula según el tipo de estudiante"""
@@ -313,15 +251,12 @@ class Course(MongoBaseModel):
                 "tipo_curso": "diplomado",
                 "modalidad": "híbrido",
                 "costo_total_interno": 3000.0,
-                "monto_cuota_interno": 500.0,
                 "matricula_interno": 500.0,
                 "costo_total_externo": 5000.0,
-                "monto_cuota_externo": 900.0,
                 "matricula_externo": 500.0,
                 "cantidad_cuotas": 5,
-                "descuento_general": 10.0,
+                "descuento_curso": 10.0,
                 "observacion": "Incluye certificación internacional",
-                "requisitos": ["Título profesional", "CV actualizado"],
                 "fecha_inicio": "2024-03-01T00:00:00",
                 "fecha_fin": "2024-08-31T00:00:00",
                 "activo": True

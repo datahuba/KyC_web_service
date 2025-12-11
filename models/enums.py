@@ -120,25 +120,27 @@ class EstadoInscripcion(str, Enum):
     Esto permite:
     - Rastrear el progreso del estudiante
     - Generar reportes (cuántos activos, completados, etc.)
-    - Aplicar reglas de negocio (solo activos pueden pagar)
+    - Aplicar reglas de negocio (solo activos pueden asistir a clases)
     
     Valores:
     -------
-    - ACTIVO: Estudiante cursando actualmente
-    - COMPLETADO: Estudiante finalizó el curso exitosamente
+    - PENDIENTE_PAGO: Inscrito pero no ha pagado matrícula
+    - ACTIVO: Pagó matrícula, está cursando
+    - SUSPENDIDO: Atrasado en pagos (puede reactivarse al pagar)
+    - COMPLETADO: Finalizó el curso exitosamente
     - CANCELADO: Inscripción cancelada (abandono o expulsión)
-    - CONGELADO: Temporalmente inactivo (puede reactivarse)
     
     Flujo típico:
     ------------
-    ACTIVO → COMPLETADO (caso exitoso)
-    ACTIVO → ABANDONO (abandono)
-    ACTIVO → CONGELADO (pausa temporal)
+    PENDIENTE_PAGO → ACTIVO (paga matrícula) → COMPLETADO (termina curso)
+                                              → SUSPENDIDO (se atrasa)
+                                              → CANCELADO (abandona)
     """
+    PENDIENTE_PAGO = "pendiente_pago"
     ACTIVO = "activo"
+    SUSPENDIDO = "suspendido"
     COMPLETADO = "completado"
-    ABANDONO = "abandono"
-    CONGELADO = "congelado"
+    CANCELADO = "cancelado"
 
 
 class TipoPago(str, Enum):
@@ -174,23 +176,23 @@ class EstadoPago(str, Enum):
     -------------------------
     Cada pago debe ser revisado y aprobado manualmente:
     1. Estudiante sube voucher → PENDIENTE
-    2. Admin revisa → PAGADO o RECHAZADO
+    2. Admin revisa → APROBADO o RECHAZADO
     
     Valores:
     -------
     - PENDIENTE: Voucher subido, esperando revisión
-    - ACEPTADO: Pago verificado y aprobado
+    - APROBADO: Pago verificado y aprobado
     - RECHAZADO: Voucher inválido o pago no encontrado
     
     Flujo de trabajo:
     ----------------
-    PENDIENTE → ACEPTADO (voucher válido)
+    PENDIENTE → APROBADO (voucher válido)
     PENDIENTE → RECHAZADO (voucher inválido)
     RECHAZADO → PENDIENTE (estudiante sube nuevo voucher)
     """
     PENDIENTE = "pendiente"
     RECHAZADO = "rechazado"
-    ACEPTADO = "aceptado"
+    APROBADO = "aprobado"
 
 
 class TipoTitulo(str, Enum):

@@ -1,21 +1,21 @@
 """
-Schemas de Inscripción
-======================
+Schemas de Inscripción (Enrollment)
+===================================
 
 Define los schemas Pydantic para operaciones CRUD de inscripciones.
 
 Schemas incluidos:
 -----------------
-1. EnrollmentCreate: Para inscribir estudiante a curso
-2. EnrollmentResponse: Para mostrar inscripción
-3. EnrollmentUpdate: Para actualizar inscripción
-4. EnrollmentWithDetails: Para mostrar inscripción con detalles enriquecidos
+1. EnrollmentCreate: Para crear nuevas inscripciones
+2. EnrollmentResponse: Para mostrar inscripciones
+3. EnrollmentUpdate: Para actualizar inscripciones
+4. EnrollmentWithDetails: Para mostrar con datos de Student y Course
 """
 
 from datetime import datetime
-from typing import Optional, List
-from pydantic import BaseModel, Field, validator
-from models.enums import EstadoInscripcion, TipoPago, TipoEstudiante
+from typing import Optional
+from pydantic import BaseModel, Field
+from models.enums import EstadoInscripcion, TipoEstudiante
 from models.base import PyObjectId
 
 
@@ -25,54 +25,38 @@ class EnrollmentCreate(BaseModel):
     
     Uso: POST /enrollments/
     
-    ¿Qué incluye?
-    ------------
-    - IDs del estudiante y curso
-    - Tipo de estudiante (para calcular precio)
-    - Tipo de pago (contado o cuotas)
-    - Descuento personalizado (opcional)
-    
-    ¿Qué NO incluye?
-    ---------------
-    - total_a_pagar: Se calcula automáticamente según tipo de estudiante
-    - total_pagado: Inicia en 0
-    - saldo_pendiente: Se calcula automáticamente
-    - fecha_inscripcion: Se asigna al momento de creación
-    - estado: Por defecto es ACTIVO
+    El sistema calculará automáticamente:
+    - costo_total (desde Course según es_estudiante_interno)
+    - costo_matricula (desde Course)
+    - cantidad_cuotas (desde Course)
+    - descuento_curso_aplicado (desde Course.descuento_curso)
+    - total_a_pagar (aplicando descuentos)
+    - saldo_pendiente (= total_a_pagar al inicio)
     """
     
-    estudiante_id: PyObjectId = Field(..., description="ID del estudiante")
-    curso_id: PyObjectId = Field(..., description="ID del curso")
-    es_estudiante_interno: TipoEstudiante = Field(
+    estudiante_id: PyObjectId = Field(
         ...,
-        description="Tipo de estudiante al momento de inscripción"
+        description="ID del estudiante a inscribir"
     )
-    tipo_pago: TipoPago = Field(..., description="Contado o cuotas")
+    
+    curso_id: PyObjectId = Field(
+        ...,
+        description="ID del curso"
+    )
+    
     descuento_personalizado: Optional[float] = Field(
         None,
         ge=0,
         le=100,
-        description="Descuento adicional personalizado (porcentaje)"
+        description="Descuento adicional personalizado (%) dado por el admin"
     )
-    formulario_inscripcion_url: Optional[str] = Field(
-        None,
-        description="URL del PDF de inscripción firmado"
-    )
-    
-    # Documentos
-    comprobante_matricula_url: Optional[str] = Field(None, description="URL Comprobante Matrícula")
-    comprobante_modulo_url: Optional[str] = Field(None, description="URL Comprobante Módulo")
-    requisitos_url: Optional[List[str]] = Field(default_factory=list, description="URLs Requisitos")
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "estudiante_id": "507f1f77bcf86cd799439011",
                 "curso_id": "507f1f77bcf86cd799439012",
-                "es_estudiante_interno": "interno",
-                "tipo_pago": "cuotas",
-                "descuento_personalizado": 5.0,
-                "formulario_inscripcion_url": "https://storage.example.com/forms/inscripcion_001.pdf"
+                "descuento_personalizado": 5.0
             }
         }
 
@@ -82,33 +66,33 @@ class EnrollmentResponse(BaseModel):
     Schema para mostrar información de una inscripción
     
     Uso: GET /enrollments/{id}, respuestas de POST/PUT/PATCH
-    
-    Incluye todos los campos de la inscripción.
     """
     
     id: PyObjectId = Field(..., alias="_id")
     estudiante_id: PyObjectId
     curso_id: PyObjectId
     
-    fecha_inscripcion: datetime
-    estado: EstadoInscripcion
+    # Snapshot de precios
     es_estudiante_interno: TipoEstudiante
-    formulario_inscripcion_url: Optional[str]
+    costo_total: float
+    costo_matricula: float
+    cantidad_cuotas: int
     
-    # Documentos
-    comprobante_matricula_url: Optional[str] = None
-    comprobante_modulo_url: Optional[str] = None
-    requisitos_url: List[str] = []
-    
+    # Descuentos
+    descuento_curso_aplicado: float
     descuento_personalizado: Optional[float]
+    
+    # Totales
     total_a_pagar: float
     total_pagado: float
     saldo_pendiente: float
-    tipo_pago: TipoPago
+    
+    # Estado
+    fecha_inscripcion: datetime
+    estado: EstadoInscripcion
     
     created_at: datetime
     updated_at: datetime
-    
     
     model_config = {
         "populate_by_name": True,
@@ -119,17 +103,19 @@ class EnrollmentResponse(BaseModel):
                 "_id": "507f1f77bcf86cd799439013",
                 "estudiante_id": "507f1f77bcf86cd799439011",
                 "curso_id": "507f1f77bcf86cd799439012",
-                "fecha_inscripcion": "2024-02-01T10:00:00",
-                "estado": "activo",
                 "es_estudiante_interno": "interno",
-                "formulario_inscripcion_url": "https://storage.example.com/forms/inscripcion_001.pdf",
+                "costo_total": 3000.0,
+                "costo_matricula": 500.0,
+                "cantidad_cuotas": 5,
+                "descuento_curso_aplicado": 10.0,
                 "descuento_personalizado": 5.0,
-                "total_a_pagar": 2850.0,
-                "total_pagado": 500.0,
-                "saldo_pendiente": 2350.0,
-                "tipo_pago": "cuotas",
-                "created_at": "2024-02-01T10:00:00",
-                "updated_at": "2024-02-01T10:00:00"
+                "total_a_pagar": 2565.0,
+                "total_pagado": 0.0,
+                "saldo_pendiente": 2565.0,
+                "fecha_inscripcion": "2024-12-11T10:00:00",
+                "estado": "pendiente_pago",
+                "created_at": "2024-12-11T10:00:00",
+                "updated_at": "2024-12-11T10:00:00"
             }
         }
     }
@@ -141,114 +127,93 @@ class EnrollmentUpdate(BaseModel):
     
     Uso: PATCH /enrollments/{id}
     
-    Permite actualizar estado, descuentos, y otros campos.
-    Los montos generalmente se actualizan a través de pagos.
+    Nota: Los campos financieros (total_pagado, saldo_pendiente)
+    se actualizan automáticamente cuando se aprueba un pago.
     """
     
-    estado: Optional[EstadoInscripcion] = None
-    formulario_inscripcion_url: Optional[str] = None
+    descuento_personalizado: Optional[float] = Field(
+        None,
+        ge=0,
+        le=100,
+        description="Actualizar descuento personalizado"
+    )
     
-    # Documentos
-    comprobante_matricula_url: Optional[str] = None
-    comprobante_modulo_url: Optional[str] = None
-    requisitos_url: Optional[List[str]] = None
-    descuento_personalizado: Optional[float] = Field(None, ge=0, le=100)
-    total_a_pagar: Optional[float] = Field(None, gt=0)
-    total_pagado: Optional[float] = Field(None, ge=0)
-    saldo_pendiente: Optional[float] = Field(None, ge=0)
-    
-    @validator('saldo_pendiente')
-    def validar_saldo(cls, v, values):
-        """Valida que el saldo sea coherente con total y pagado"""
-        if 'total_a_pagar' in values and 'total_pagado' in values:
-            esperado = values['total_a_pagar'] - values['total_pagado']
-            if abs(v - esperado) > 0.01:
-                raise ValueError(f"Saldo inválido: {v} vs esperado {esperado:.2f}")
-        return v
+    estado: Optional[EstadoInscripcion] = Field(
+        None,
+        description="Cambiar estado de la inscripción"
+    )
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
-                "estado": "completado",
-                "total_pagado": 2850.0,
-                "saldo_pendiente": 0.0
+                "descuento_personalizado": 10.0,
+                "estado": "activo"
             }
         }
 
 
 class EnrollmentWithDetails(EnrollmentResponse):
     """
-    Schema enriquecido de inscripción con detalles del estudiante y curso
+    Schema para mostrar inscripción con detalles de Student y Course
     
-    Uso: GET /enrollments/ (listados), reportes
+    Uso: GET /enrollments/{id}?include_details=true
     
-    ¿Por qué este schema?
-    --------------------
-    Evita hacer múltiples llamadas a la API para obtener información
-    contextual. En lugar de:
-    
-    1. GET /enrollments/{id} → obtener enrollment
-    2. GET /students/{estudiante_id} → obtener nombre del estudiante
-    3. GET /courses/{curso_id} → obtener nombre del curso
-    
-    Hacemos:
-    1. GET /enrollments/{id}?include_details=true → todo en una llamada
-    
-    ¿Qué agrega?
-    -----------
-    - estudiante_nombre: Nombre completo del estudiante
-    - estudiante_email: Email del estudiante
-    - estudiante_registro: Registro del estudiante
-    - curso_nombre: Nombre del programa
-    - curso_codigo: Código del curso
+    Incluye datos calculados adicionales:
+    - nombre del estudiante
+    - nombre del curso
+    - monto de cada cuota
+    - porcentaje de avance en pagos
     """
     
-    # Detalles del estudiante
-    estudiante_nombre: Optional[str] = Field(
+    # Datos del estudiante (expandidos)
+    estudiante_nombre: Optional[str] = None
+    estudiante_email: Optional[str] = None
+    
+    # Datos del curso (expandidos)
+    curso_nombre: Optional[str] = None
+    curso_codigo: Optional[str] = None
+    
+    # Calculados
+    monto_cuota: Optional[float] = Field(
         None,
-        description="Nombre completo del estudiante"
-    )
-    estudiante_email: Optional[str] = Field(
-        None,
-        description="Email del estudiante"
-    )
-    estudiante_registro: Optional[str] = Field(
-        None,
-        description="Registro del estudiante"
+        description="Monto de cada cuota (calculado)"
     )
     
-    # Detalles del curso
-    curso_nombre: Optional[str] = Field(
+    porcentaje_pagado: Optional[float] = Field(
         None,
-        description="Nombre del programa"
-    )
-    curso_codigo: Optional[str] = Field(
-        None,
-        description="Código del curso"
+        ge=0,
+        le=100,
+        description="Porcentaje pagado del total"
     )
     
-    class Config:
-        schema_extra = {
+    model_config = {
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True,
+        "from_attributes": True,
+        "json_schema_extra": {
             "example": {
                 "_id": "507f1f77bcf86cd799439013",
                 "estudiante_id": "507f1f77bcf86cd799439011",
+                "estudiante_nombre": "Juan Pérez",
+                "estudiante_email": "juan@email.com",
                 "curso_id": "507f1f77bcf86cd799439012",
-                "fecha_inscripcion": "2024-02-01T10:00:00",
-                "estado": "activo",
-                "es_estudiante_interno": "interno",
-                "formulario_inscripcion_url": "https://storage.example.com/forms/inscripcion_001.pdf",
-                "descuento_personalizado": 5.0,
-                "total_a_pagar": 2850.0,
-                "total_pagado": 500.0,
-                "saldo_pendiente": 2350.0,
-                "tipo_pago": "cuotas",
-                "created_at": "2024-02-01T10:00:00",
-                "updated_at": "2024-02-01T10:00:00",
-                # Campos adicionales
-                "estudiante_nombre": "Juan Pérez García",
-                "estudiante_email": "juan.perez@example.com",
-                "estudiante_registro": "EST-2024-001",
                 "curso_nombre": "Diplomado en Ciencia de Datos",
-                "curso_codigo": "DIPL-2024-001"
+                "curso_codigo": "DIPL-2024-001",
+                "es_estudiante_interno": "interno",
+                "costo_total": 3000.0,
+                "costo_matricula": 500.0,
+                "cantidad_cuotas": 5,
+                "descuento_curso_aplicado": 10.0,
+                "descuento_personalizado": 5.0,
+                "total_a_pagar": 2565.0,
+                "total_pagado": 1000.0,
+                "saldo_pendiente": 1565.0,
+                "monto_cuota": 413.0,
+                "porcentaje_pagado": 38.99,
+                "fecha_inscripcion": "2024-12-11T10:00:00",
+                "estado": "activo",
+                "created_at": "2024-12-11T10:00:00",
+                "updated_at": "2024-12-11T10:00:00"
             }
         }
+    }

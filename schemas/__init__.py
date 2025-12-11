@@ -54,7 +54,9 @@ from .payment import (
     PaymentCreate,
     PaymentResponse,
     PaymentUpdate,
-    PaymentWithDetails
+    PaymentWithDetails,
+    PaymentApproval,
+    PaymentRejection
 )
 
 # Discount schemas
@@ -92,6 +94,8 @@ __all__ = [
     "PaymentResponse",
     "PaymentUpdate",
     "PaymentWithDetails",
+    "PaymentApproval",
+    "PaymentRejection",
     # Discount
     "DiscountCreate",
     "DiscountResponse",
