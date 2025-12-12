@@ -64,7 +64,8 @@ async def get_course_students(course_id: PydanticObjectId) -> List[CourseEnrolle
     student_ids = [e.estudiante_id for e in enrollments]
     
     # 3. Obtener estudiantes en una sola consulta (optimización)
-    students = await Student.find(Student.id.in_(student_ids)).to_list()
+    from beanie.operators import In
+    students = await Student.find(In(Student.id, student_ids)).to_list()
     students_map = {s.id: s for s in students}
     
     # 4. Construir reporte
@@ -85,10 +86,10 @@ async def get_course_students(course_id: PydanticObjectId) -> List[CourseEnrolle
         item = CourseEnrolledStudent(
             estudiante_id=student.id,
             nombre=student.nombre or "Sin nombre",
-            carnet=student.carnet,
+            carnet=student.carnet or None,
             contacto={
-                "email": student.email or "",
-                "celular": student.celular
+                "email": student.email or None,
+                "celular": student.celular or None
             },
             inscripcion={
                 "id": enrollment.id,

@@ -1,5 +1,5 @@
 from typing import List, Any, Union, Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, Form, Query
 from models.student import Student
 from models.user import User
 from schemas.student import StudentCreate, StudentResponse, StudentUpdateSelf, StudentUpdateAdmin, ChangePassword
@@ -11,16 +11,33 @@ router = APIRouter()
 
 @router.get("/", response_model=List[StudentResponse])
 async def read_students(
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1),
+    q: Optional[str] = Query(None, description="Buscar por nombre, email, carnet o registro"),
+    activo: Optional[bool] = Query(None, description="Filtrar por estado activo/inactivo"),
+    estado_titulo: Optional[str] = Query(None, description="Filtrar por estado del título (pendiente, verificado, etc)"),
+    curso_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por curso inscrito"),
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Recuperar estudiantes.
+    Recuperar estudiantes con filtros.
     
     Requiere: ADMIN o SUPERADMIN
+    
+    Filtros:
+    - q: Búsqueda de texto
+    - activo: true/false
+    - estado_titulo: pendiente, verificado, rechazado, sin_titulo
+    - curso_id: ID de un curso
     """
-    students = await student_service.get_students(skip=skip, limit=limit)
+    students = await student_service.get_students(
+        skip=skip,
+        limit=limit,
+        q=q,
+        activo=activo,
+        estado_titulo=estado_titulo,
+        curso_id=curso_id
+    )
     return students
 
 @router.post("/", response_model=StudentResponse)

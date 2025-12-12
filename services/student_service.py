@@ -7,13 +7,63 @@ Lógica de negocio para estudiantes (Funciones).
 
 from typing import List, Optional, Union
 from models.student import Student
+from models.enums import EstadoTitulo
 from schemas.student import StudentCreate, StudentUpdateSelf, StudentUpdateAdmin
 from beanie import PydanticObjectId
+from beanie.operators import Or, RegEx
 
 
-async def get_students(skip: int = 0, limit: int = 100) -> List[Student]:
-    """Obtener lista de estudiantes"""
-    return await Student.find_all().skip(skip).limit(limit).to_list()
+async def get_students(
+    skip: int = 0,
+    limit: int = 100,
+    q: Optional[str] = None,
+    activo: Optional[bool] = None,
+    estado_titulo: Optional[EstadoTitulo] = None,
+    curso_id: Optional[PydanticObjectId] = None
+) -> List[Student]:
+    """
+    Obtener lista de estudiantes con filtros avanzados
+    
+    Args:
+        skip: Paginación (saltar)
+        limit: Paginación (límite)
+        q: Búsqueda por texto (nombre, email, carnet, registro)
+        activo: Filtrar por estado activo/inactivo
+        estado_titulo: Filtrar por estado del título
+        curso_id: Filtrar por inscripción en un curso
+    """
+    # Iniciar consulta base
+    query = Student.find()
+    
+    # 1. Filtro de búsqueda (q)
+    if q:
+        # Busca coincidencias parciales (case-insensitive) en varios campos
+        search_regex = RegEx(f".*{q}.*", "i")  # "i" = case insensitive
+        query = query.find(
+            Or(
+                Student.nombre == search_regex,
+                Student.email == search_regex,
+                Student.carnet == search_regex,
+                Student.registro == search_regex
+            )
+        )
+    
+    # 2. Filtro por estado activo
+    if activo is not None:
+        query = query.find(Student.activo == activo)
+    
+    # 3. Filtro por estado del título
+    if estado_titulo:
+        # El título es un objeto embebido, accedemos a sus campos con punto
+        query = query.find(Student.titulo.estado == estado_titulo)
+    
+    # 4. Filtro por curso inscrito
+    if curso_id:
+        # lista_cursos_ids es una lista de IDs
+        query = query.find(Student.lista_cursos_ids == curso_id)
+    
+    # Ejecutar consulta con paginación
+    return await query.skip(skip).limit(limit).to_list()
 
 
 async def get_student(id: PydanticObjectId) -> Optional[Student]:
@@ -76,7 +126,6 @@ async def update_student(
     await student.save()
     
     return student
-
 
 
 async def delete_student(id: PydanticObjectId) -> Student:

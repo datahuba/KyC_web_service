@@ -194,7 +194,7 @@ class CourseUpdate(BaseModel):
 # ============================================================================
 
 class StudentContactInfo(BaseModel):
-    email: str
+    email: Optional[str] = None
     celular: Optional[str] = None
 
 class EnrollmentInfo(BaseModel):
@@ -215,8 +215,8 @@ class CourseEnrolledStudent(BaseModel):
     Combina datos del estudiante y de su inscripción.
     """
     estudiante_id: PyObjectId
-    nombre: str
-    carnet: str
+    nombre: Optional[str] = "Sin nombre"
+    carnet: Optional[str] = None
     contacto: StudentContactInfo
     inscripcion: EnrollmentInfo
     financiero: FinancialInfo
