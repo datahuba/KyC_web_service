@@ -59,7 +59,7 @@ async def get_students(
     
     # 4. Filtro por curso inscrito
     if curso_id:
-        # lista_cursos_ids es una lista de IDs
+        # lista_cursos_ids es una lista de IDs (Optimizado)
         query = query.find(Student.lista_cursos_ids == curso_id)
     
     # Ejecutar consulta con paginación

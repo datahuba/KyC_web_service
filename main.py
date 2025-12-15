@@ -21,7 +21,6 @@ if settings.DEBUG:
 
 @app.on_event("startup")
 async def start_db():
-    print("--- STARTUP EVENT TRIGGERED ---")
     await init_db()
 
 @app.get("/")

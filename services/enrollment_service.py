@@ -100,6 +100,11 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
         course.inscritos.append(enrollment_in.estudiante_id)
         await course.save()
     
+    # 9. Agregar curso a la lista de cursos del estudiante (Sincronización bidireccional)
+    if enrollment_in.curso_id not in student.lista_cursos_ids:
+        student.lista_cursos_ids.append(enrollment_in.curso_id)
+        await student.save()
+    
     return enrollment
 
 
