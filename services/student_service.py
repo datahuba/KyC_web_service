@@ -54,8 +54,17 @@ async def get_students(
     
     # 3. Filtro por estado del título
     if estado_titulo:
-        # El título es un objeto embebido, accedemos a sus campos con punto
-        query = query.find(Student.titulo.estado == estado_titulo)
+        if estado_titulo == EstadoTitulo.SIN_TITULO:
+            # Caso especial: Incluir los que tienen estado SIN_TITULO Y los que no tienen objeto título (None)
+            query = query.find(
+                Or(
+                    Student.titulo.estado == EstadoTitulo.SIN_TITULO,
+                    Student.titulo == None
+                )
+            )
+        else:
+            # Caso normal: Filtrar por el estado específico
+            query = query.find(Student.titulo.estado == estado_titulo)
     
     # 4. Filtro por curso inscrito
     if curso_id:
