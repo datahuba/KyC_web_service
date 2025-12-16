@@ -38,16 +38,15 @@ class PaymentCreate(BaseModel):
         description="ID de la inscripción a la que pertenece este pago"
     )
     
-    concepto: str = Field(
-        ...,
-        min_length=1,
-        description="Concepto del pago: 'MATRICULA', 'CUOTA', etc."
+    concepto: Optional[str] = Field(
+        None,
+        description="Concepto del pago (Opcional, se calcula automáticamente)"
     )
     
     numero_cuota: Optional[int] = Field(
         None,
         ge=1,
-        description="Número de cuota (1, 2, 3...) si concepto es CUOTA"
+        description="Número de cuota (Opcional, se calcula automáticamente)"
     )
     
     numero_transaccion: str = Field(
@@ -55,10 +54,10 @@ class PaymentCreate(BaseModel):
         description="Número de transacción bancaria del comprobante"
     )
     
-    cantidad_pago: float = Field(
-        ...,
+    cantidad_pago: Optional[float] = Field(
+        None,
         gt=0,
-        description="Monto del pago en Bs"
+        description="Monto del pago (Opcional, se calcula automáticamente)"
     )
     
     comprobante_url: str = Field(

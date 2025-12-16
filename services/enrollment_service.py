@@ -63,25 +63,27 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
     
     # 5. Aplicar descuento del curso (Prioridad: ID > Valor directo)
     descuento_curso = 0.0
+    descuento_curso_id = None
     
     if course.descuento_id:
         discount_obj = await Discount.get(course.descuento_id)
         if discount_obj and discount_obj.activo:
             descuento_curso = discount_obj.porcentaje
+            descuento_curso_id = discount_obj.id
     elif course.descuento_curso:
         descuento_curso = course.descuento_curso
         
     total_con_descuento_curso = costo_total - (costo_total * descuento_curso / 100)
     
-    # 6. Aplicar descuento personalizado/seleccionado (Prioridad: ID > Valor directo)
+    # 6. Aplicar descuento del estudiante (Prioridad: ID > Valor directo)
     descuento_personal = 0.0
-    descuento_id_seleccionado = None
+    descuento_estudiante_id = None
     
     if enrollment_in.descuento_id:
         discount_sel = await Discount.get(enrollment_in.descuento_id)
         if discount_sel and discount_sel.activo:
             descuento_personal = discount_sel.porcentaje
-            descuento_id_seleccionado = discount_sel.id
+            descuento_estudiante_id = discount_sel.id
     elif enrollment_in.descuento_personalizado:
         descuento_personal = enrollment_in.descuento_personalizado
         
@@ -95,9 +97,15 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
         costo_total=costo_total,
         costo_matricula=costo_matricula,
         cantidad_cuotas=course.cantidad_cuotas,
+        
+        # Descuento Curso
+        descuento_curso_id=descuento_curso_id,
         descuento_curso_aplicado=descuento_curso,
+        
+        # Descuento Estudiante
+        descuento_estudiante_id=descuento_estudiante_id,
         descuento_personalizado=descuento_personal,
-        descuento_id=descuento_id_seleccionado,
+        
         total_a_pagar=round(total_final, 2),
         saldo_pendiente=round(total_final, 2),
         estado=EstadoInscripcion.PENDIENTE_PAGO

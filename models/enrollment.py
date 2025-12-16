@@ -80,23 +80,34 @@ class Enrollment(MongoBaseModel):
     # DESCUENTOS APLICADOS
     # ========================================================================
     
+    # ========================================================================
+    # DESCUENTOS APLICADOS (Snapshots y Referencias)
+    # ========================================================================
+    
+    # 1. Descuento del Curso
+    descuento_curso_id: Optional[PyObjectId] = Field(
+        None,
+        description="ID del descuento que tenía el curso al momento de inscribirse"
+    )
+    
     descuento_curso_aplicado: float = Field(
         default=0.0,
         ge=0,
         le=100,
-        description="Descuento del curso al momento de inscripción (%, snapshot)"
+        description="Porcentaje de descuento del curso aplicado (Snapshot)"
+    )
+    
+    # 2. Descuento del Estudiante (Seleccionado al inscribir)
+    descuento_estudiante_id: Optional[PyObjectId] = Field(
+        None,
+        description="ID del descuento seleccionado para el estudiante"
     )
     
     descuento_personalizado: Optional[float] = Field(
         None,
         ge=0,
         le=100,
-        description="Descuento adicional dado por el admin a ESTE estudiante (%)"
-    )
-    
-    descuento_id: Optional[PyObjectId] = Field(
-        None,
-        description="ID del descuento seleccionado para esta inscripción (opcional)"
+        description="Porcentaje de descuento del estudiante aplicado (Snapshot)"
     )
     
     # ========================================================================
@@ -189,6 +200,70 @@ class Enrollment(MongoBaseModel):
     def esta_completamente_pagado(self) -> bool:
         """Verifica si la inscripción está completamente pagada"""
         return self.saldo_pendiente <= 0.01  # Tolerancia de 1 centavo
+    
+    @property
+    def siguiente_pago(self) -> dict:
+        """
+        Calcula los detalles del siguiente pago sugerido.
+        
+        Returns:
+            dict: {
+                "concepto": str,       # "Matrícula" o "Cuota X"
+                "numero_cuota": int,   # 0 para matrícula, 1-N para cuotas
+                "monto_sugerido": float
+            }
+        """
+        if self.esta_completamente_pagado():
+            return {
+                "concepto": "Pago Completado",
+                "numero_cuota": 0,
+                "monto_sugerido": 0.0
+            }
+            
+        # 1. Verificar Matrícula
+        if self.total_pagado < self.costo_matricula:
+            pendiente_matricula = self.costo_matricula - self.total_pagado
+            # Si el pendiente es muy pequeño (por errores de redondeo), asumimos pagado
+            if pendiente_matricula > 0.01:
+                return {
+                    "concepto": "Matrícula",
+                    "numero_cuota": 0,
+                    "monto_sugerido": round(pendiente_matricula, 2)
+                }
+        
+        # 2. Calcular Cuotas
+        # Saldo disponible para cuotas
+        pagado_a_cuotas = max(0.0, self.total_pagado - self.costo_matricula)
+        total_a_pagar_cuotas = self.total_a_pagar - self.costo_matricula
+        
+        if self.cantidad_cuotas > 0:
+            monto_por_cuota = total_a_pagar_cuotas / self.cantidad_cuotas
+            
+            # Cuántas cuotas enteras se han pagado
+            cuotas_pagadas = int(pagado_a_cuotas / monto_por_cuota)
+            
+            # La siguiente cuota
+            siguiente_cuota = cuotas_pagadas + 1
+            
+            # Si es la última cuota, ajustamos el monto al saldo pendiente real
+            if siguiente_cuota >= self.cantidad_cuotas:
+                siguiente_cuota = self.cantidad_cuotas
+                monto_sugerido = self.saldo_pendiente
+            else:
+                monto_sugerido = monto_por_cuota
+                
+            return {
+                "concepto": f"Cuota {siguiente_cuota}",
+                "numero_cuota": siguiente_cuota,
+                "monto_sugerido": round(monto_sugerido, 2)
+            }
+            
+        # Fallback (si no hay cuotas definidas pero hay saldo)
+        return {
+            "concepto": "Pago Pendiente",
+            "numero_cuota": 1,
+            "monto_sugerido": round(self.saldo_pendiente, 2)
+        }
     
     class Settings:
         name = "enrollments"

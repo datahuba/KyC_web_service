@@ -59,15 +59,31 @@ async def create_payment(
             "No puedes crear un pago para una inscripción que no te pertenece"
         )
     
-    # 3. Crear pago
+    # 3. Calcular detalles del pago automáticamente (Single Source of Truth)
+    siguiente = enrollment.siguiente_pago
+    
+    if siguiente["monto_sugerido"] <= 0:
+        raise ValueError("Esta inscripción ya está completamente pagada")
+        
+    # Forzamos los valores calculados por el sistema
+    concepto_final = siguiente["concepto"]
+    numero_cuota_final = siguiente["numero_cuota"] if siguiente["numero_cuota"] > 0 else None
+    cantidad_final = siguiente["monto_sugerido"]
+    
+    # Si el usuario envió una cantidad diferente, podríamos lanzar error,
+    # pero para cumplir "no tiene opción de poner cantidad distinta",
+    # simplemente ignoramos su input y usamos el calculado.
+    # El admin verificará si el comprobante coincide con este monto.
+
+    # 4. Crear pago
     payment = Payment(
         inscripcion_id=payment_in.inscripcion_id,
         estudiante_id=enrollment.estudiante_id,
         curso_id=enrollment.curso_id,
-        concepto=payment_in.concepto,
-        numero_cuota=payment_in.numero_cuota,
+        concepto=concepto_final,
+        numero_cuota=numero_cuota_final,
         numero_transaccion=payment_in.numero_transaccion,
-        cantidad_pago=payment_in.cantidad_pago,
+        cantidad_pago=cantidad_final,
         descuento_aplicado=payment_in.descuento_aplicado,
         comprobante_url=payment_in.comprobante_url,
         estado_pago=EstadoPago.PENDIENTE

@@ -44,16 +44,16 @@ class EnrollmentCreate(BaseModel):
         description="ID del curso"
     )
     
+    descuento_id: Optional[PyObjectId] = Field(
+        None,
+        description="ID del descuento a aplicar al estudiante (opcional)"
+    )
+    
     descuento_personalizado: Optional[float] = Field(
         None,
         ge=0,
         le=100,
-        description="Descuento adicional personalizado (%) dado por el admin"
-    )
-    
-    descuento_id: Optional[PyObjectId] = Field(
-        None,
-        description="ID del descuento seleccionado para esta inscripción (opcional)"
+        description="Descuento manual (solo si no se usa descuento_id)"
     )
     
     class Config:
@@ -84,9 +84,11 @@ class EnrollmentResponse(BaseModel):
     cantidad_cuotas: int
     
     # Descuentos
+    descuento_curso_id: Optional[PyObjectId] = None
     descuento_curso_aplicado: float
+    
+    descuento_estudiante_id: Optional[PyObjectId] = None
     descuento_personalizado: Optional[float]
-    descuento_id: Optional[PyObjectId] = None
     
     # Totales
     total_a_pagar: float
@@ -96,6 +98,12 @@ class EnrollmentResponse(BaseModel):
     # Estado
     fecha_inscripcion: datetime
     estado: EstadoInscripcion
+    
+    # Información de Siguiente Pago (Calculado)
+    siguiente_pago: Optional[dict] = Field(
+        None,
+        description="Detalles sugeridos para el próximo pago (concepto, monto, cuota)"
+    )
     
     created_at: datetime
     updated_at: datetime
@@ -137,16 +145,16 @@ class EnrollmentUpdate(BaseModel):
     se actualizan automáticamente cuando se aprueba un pago.
     """
     
+    descuento_id: Optional[PyObjectId] = Field(
+        None,
+        description="Actualizar descuento de estudiante (reemplaza snapshot)"
+    )
+    
     descuento_personalizado: Optional[float] = Field(
         None,
         ge=0,
         le=100,
-        description="Actualizar descuento personalizado"
-    )
-    
-    descuento_id: Optional[PyObjectId] = Field(
-        None,
-        description="Actualizar descuento seleccionado"
+        description="Actualizar porcentaje manual"
     )
     
     estado: Optional[EstadoInscripcion] = Field(
