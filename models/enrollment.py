@@ -94,6 +94,11 @@ class Enrollment(MongoBaseModel):
         description="Descuento adicional dado por el admin a ESTE estudiante (%)"
     )
     
+    descuento_id: Optional[PyObjectId] = Field(
+        None,
+        description="ID del descuento seleccionado para esta inscripción (opcional)"
+    )
+    
     # ========================================================================
     # TOTALES FINANCIEROS
     # ========================================================================

@@ -56,6 +56,7 @@ class CourseCreate(BaseModel):
     # Estructura de pago
     cantidad_cuotas: int = Field(..., ge=1)
     descuento_curso: Optional[float] = Field(None, ge=0, le=100)
+    descuento_id: Optional[PyObjectId] = None
     
     # Información adicional
     observacion: Optional[str] = None
@@ -107,6 +108,7 @@ class CourseResponse(BaseModel):
     
     cantidad_cuotas: int
     descuento_curso: Optional[float]
+    descuento_id: Optional[PyObjectId]
     
     observacion: Optional[str]
     inscritos: List[PyObjectId]
@@ -171,6 +173,7 @@ class CourseUpdate(BaseModel):
     
     cantidad_cuotas: Optional[int] = Field(None, ge=1)
     descuento_curso: Optional[float] = Field(None, ge=0, le=100)
+    descuento_id: Optional[PyObjectId] = None
     
     observacion: Optional[str] = None
     inscritos: Optional[List[PyObjectId]] = None

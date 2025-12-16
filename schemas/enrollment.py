@@ -51,6 +51,11 @@ class EnrollmentCreate(BaseModel):
         description="Descuento adicional personalizado (%) dado por el admin"
     )
     
+    descuento_id: Optional[PyObjectId] = Field(
+        None,
+        description="ID del descuento seleccionado para esta inscripción (opcional)"
+    )
+    
     class Config:
         json_schema_extra = {
             "example": {
@@ -81,6 +86,7 @@ class EnrollmentResponse(BaseModel):
     # Descuentos
     descuento_curso_aplicado: float
     descuento_personalizado: Optional[float]
+    descuento_id: Optional[PyObjectId] = None
     
     # Totales
     total_a_pagar: float
@@ -136,6 +142,11 @@ class EnrollmentUpdate(BaseModel):
         ge=0,
         le=100,
         description="Actualizar descuento personalizado"
+    )
+    
+    descuento_id: Optional[PyObjectId] = Field(
+        None,
+        description="Actualizar descuento seleccionado"
     )
     
     estado: Optional[EstadoInscripcion] = Field(

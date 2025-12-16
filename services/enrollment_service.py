@@ -21,6 +21,8 @@ from schemas.enrollment import EnrollmentCreate
 from beanie import PydanticObjectId
 
 
+from models.discount import Discount
+
 async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str) -> Enrollment:
     """
     Crear una nueva inscripción (solo admins)
@@ -28,19 +30,8 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
     Proceso:
     1. Obtener datos del estudiante y curso
     2. Calcular precios según tipo de estudiante
-    3. Aplicar descuentos (del curso + personalizado)
+    3. Aplicar descuentos (del curso + seleccionado)
     4. Crear inscripción con snapshot de precios
-    
-    Args:
-        enrollment_in: Datos de la inscripción
-        admin_username: Username del admin que crea la inscripción
-    
-    Returns:
-        Inscripción creada
-    
-    Raises:
-        ValueError: Si el estudiante o curso no existe
-        ValueError: Si el estudiante ya está inscrito en ese curso
     """
     
     # 1. Obtener estudiante y curso
@@ -70,12 +61,30 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
     costo_total = course.get_costo_total(es_interno)
     costo_matricula = course.get_matricula(es_interno)
     
-    # 5. Aplicar descuento del curso
-    descuento_curso = course.descuento_curso or 0.0
+    # 5. Aplicar descuento del curso (Prioridad: ID > Valor directo)
+    descuento_curso = 0.0
+    
+    if course.descuento_id:
+        discount_obj = await Discount.get(course.descuento_id)
+        if discount_obj and discount_obj.activo:
+            descuento_curso = discount_obj.porcentaje
+    elif course.descuento_curso:
+        descuento_curso = course.descuento_curso
+        
     total_con_descuento_curso = costo_total - (costo_total * descuento_curso / 100)
     
-    # 6. Aplicar descuento personalizado (si existe)
-    descuento_personal = enrollment_in.descuento_personalizado or 0.0
+    # 6. Aplicar descuento personalizado/seleccionado (Prioridad: ID > Valor directo)
+    descuento_personal = 0.0
+    descuento_id_seleccionado = None
+    
+    if enrollment_in.descuento_id:
+        discount_sel = await Discount.get(enrollment_in.descuento_id)
+        if discount_sel and discount_sel.activo:
+            descuento_personal = discount_sel.porcentaje
+            descuento_id_seleccionado = discount_sel.id
+    elif enrollment_in.descuento_personalizado:
+        descuento_personal = enrollment_in.descuento_personalizado
+        
     total_final = total_con_descuento_curso - (total_con_descuento_curso * descuento_personal / 100)
     
     # 7. Crear inscripción con snapshot de precios
@@ -88,6 +97,7 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
         cantidad_cuotas=course.cantidad_cuotas,
         descuento_curso_aplicado=descuento_curso,
         descuento_personalizado=descuento_personal,
+        descuento_id=descuento_id_seleccionado,
         total_a_pagar=round(total_final, 2),
         saldo_pendiente=round(total_final, 2),
         estado=EstadoInscripcion.PENDIENTE_PAGO
@@ -100,7 +110,7 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
         course.inscritos.append(enrollment_in.estudiante_id)
         await course.save()
     
-    # 9. Agregar curso a la lista de cursos del estudiante (Sincronización bidireccional)
+    # 9. Agregar curso a la lista de cursos del estudiante
     if enrollment_in.curso_id not in student.lista_cursos_ids:
         student.lista_cursos_ids.append(enrollment_in.curso_id)
         await student.save()
@@ -169,8 +179,8 @@ async def get_all_enrollments(
         
         students = await Student.find(
             Or(
-                Student.nombre_completo == regex_pattern,
-                Student.carnet_identidad == regex_pattern
+                Student.nombre == regex_pattern,
+                Student.carnet == regex_pattern
             )
         ).to_list()
         student_ids = [s.id for s in students]

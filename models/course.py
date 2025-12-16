@@ -164,6 +164,11 @@ class Course(MongoBaseModel):
         description="Descuento del curso aplicable a todos los estudiantes (porcentaje)"
     )
     
+    descuento_id: Optional[PyObjectId] = Field(
+        None,
+        description="ID del descuento asociado a este curso (opcional)"
+    )
+    
     # ========================================================================
     # INFORMACIÓN ADICIONAL
     # ========================================================================
