@@ -16,7 +16,7 @@ Permisos:
 """
 
 from typing import List, Any, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from models.payment import Payment
 from models.student import Student
 from models.user import User
@@ -38,7 +38,10 @@ router = APIRouter()
 @router.post("/", response_model=PaymentResponse, status_code=201)
 async def create_payment(
     *,
-    payment_in: PaymentCreate,
+    file: UploadFile = File(..., description="Comprobante de pago (imagen JPG/PNG/WEBP o PDF)"),
+    inscripcion_id: str = Form(..., description="ID de la inscripción"),
+    numero_transaccion: str = Form(..., description="Número de transacción bancaria"),
+    descuento_aplicado: Optional[float] = Form(None, description="Descuento adicional (opcional)"),
     current_user: Student = Depends(get_current_user)
 ) -> Any:
     """
@@ -46,18 +49,34 @@ async def create_payment(
     
     Requiere: Autenticación como STUDENT
     
+    Content-Type: multipart/form-data
+    
     El estudiante sube:
-    - Comprobante de pago (PDF en Cloudinary)
-    - Número de transacción bancaria
-    - Monto pagado
-    - Concepto (MATRICULA, CUOTA)
+    - file: Comprobante de pago en IMAGEN (JPG, PNG, WEBP) o PDF
+    - inscripcion_id: ID de la inscripción a la que pertenece el pago
+    - numero_transaccion: Número de transacción bancaria
+    - descuento_aplicado: Descuento adicional (opcional)
+    
+    El sistema automáticamente:
+    1. Detecta si es imagen o PDF
+    2. Valida el formato del archivo
+    3. Sube el comprobante a Cloudinary
+    4. Calcula el monto exacto a pagar (matrícula o cuota)
+    5. Determina el concepto (Matrícula, Cuota X)
+    6. Crea el pago en estado PENDIENTE
     
     El pago queda en estado PENDIENTE hasta que un admin lo apruebe.
     
     Validaciones:
-    - La inscripción existe
-    - El estudiante es dueño de la inscripción
+    - El archivo debe ser imagen (JPG, PNG, WEBP) o PDF
+    - Tamaño máximo: 5MB para imágenes, 10MB para PDFs
+    - La inscripción debe existir
+    - El estudiante debe ser dueño de la inscripción
+    - El monto se calcula automáticamente (NO es editable)
     """
+    from core.cloudinary_utils import upload_image, upload_pdf
+    from schemas.payment import PaymentCreate
+    
     # Solo estudiantes pueden crear pagos
     if not isinstance(current_user, Student):
         raise HTTPException(
@@ -66,13 +85,53 @@ async def create_payment(
         )
     
     try:
+        # Detectar tipo de archivo y subir según corresponda
+        folder = f"payments/{current_user.id}"
+        safe_transaction = numero_transaccion.replace(' ', '_').replace('/', '_')
+        public_id = f"voucher_{safe_transaction}"
+        
+        # Tipos de archivo permitidos
+        image_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
+        pdf_type = "application/pdf"
+        
+        if file.content_type in image_types:
+            # Es una imagen - usar upload_image
+            comprobante_url = await upload_image(file, folder, public_id)
+            
+        elif file.content_type == pdf_type:
+            # Es un PDF - usar upload_pdf
+            comprobante_url = await upload_pdf(file, folder, public_id)
+            
+        else:
+            # Tipo no permitido
+            raise HTTPException(
+                status_code=400,
+                detail=f"Formato no permitido: {file.content_type}. "
+                       f"Use imagen (JPG, PNG, WEBP) o PDF"
+            )
+        
+        # Crear schema con los datos + URL generada
+        payment_in = PaymentCreate(
+            inscripcion_id=inscripcion_id,
+            numero_transaccion=numero_transaccion,
+            comprobante_url=comprobante_url,
+            descuento_aplicado=descuento_aplicado
+        )
+        
+        # Crear pago usando el servicio
         payment = await payment_service.create_payment(
             payment_in=payment_in,
             student_id=current_user.id
         )
+        
         return payment
+        
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al crear pago: {str(e)}")
 
 
 from schemas.common import PaginatedResponse, PaginationMeta
