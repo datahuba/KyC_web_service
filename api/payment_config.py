@@ -26,7 +26,17 @@ from api.dependencies import require_admin, get_current_user
 router = APIRouter()
 
 
-@router.post("/", response_model=PaymentConfigResponse, status_code=201)
+@router.post(
+    "/",
+    response_model=PaymentConfigResponse,
+    status_code=201,
+    summary="Crear Configuración de Pago",
+    responses={
+        201: {"description": "Configuración creada exitosamente con QR subido"},
+        400: {"description": "Ya existe una configuración activa - usar PUT para actualizar"},
+        403: {"description": "Sin permisos - Solo Admin"}
+    }
+)
 async def create_payment_config(
     *,
     file: UploadFile = File(..., description="Imagen del QR de pago (JPG, PNG, WEBP)"),
@@ -38,28 +48,22 @@ async def create_payment_config(
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Crear la configuración de pagos del sistema (solo admins)
+    Crear configuración de pagos del sistema
     
-    Requiere: ADMIN o SUPERADMIN
+    **Requiere:** Admin o SuperAdmin
     
-    Content-Type: multipart/form-data
+    **IMPORTANTE:** Solo puede existir UNA configuración activa.
     
-    IMPORTANTE: Solo puede existir una configuración activa.
-    Si ya existe una, se debe actualizar en lugar de crear.
+    **Campos obligatorios:**
+    - `file`: Imagen del QR (JPG, PNG, WEBP, máx 5MB)
+    - `numero_cuenta`: Número de cuenta bancaria
     
-    El admin debe proporcionar:
-    - file: Imagen del QR (JPG, PNG, WEBP, máximo 5MB)
-    - numero_cuenta: Número de cuenta bancaria
-    - banco, titular, tipo_cuenta: Información adicional (opcional)
+    **El sistema automáticamente:**
+    - ✅ Valida la imagen
+    - ✅ Sube QR a Cloudinary
+    - ✅ Guarda configuración en MongoDB
     
-    El sistema automáticamente:
-    1. Valida la imagen
-    2. Sube la imagen a Cloudinary
-    3. Guarda la URL generada
-    4. Almacena la configuración en MongoDB
-    
-    Esta información será visible para todos los usuarios autenticados
-    al momento de realizar pagos.
+    Los estudiantes verán esta info al realizar pagos.
     """
     from core.cloudinary_utils import upload_image
     
@@ -99,24 +103,25 @@ async def create_payment_config(
         raise HTTPException(status_code=500, detail=f"Error al crear configuración: {str(e)}")
 
 
-@router.get("/", response_model=PaymentConfigResponse)
+@router.get(
+    "/",
+    response_model=PaymentConfigResponse,
+    summary="Ver Configuración de Pago",
+    responses={
+        200: {"description": "Configuración actual con QR y datos bancarios"},
+        404: {"description": "No existe configuración"}
+    }
+)
 async def get_payment_config(
     *,
     current_user: User | Student = Depends(get_current_user)
 ) -> Any:
     """
-    Obtener la configuración de pagos actual
+    Ver configuración de pago actual
     
-    Permisos: Cualquier usuario autenticado (ADMIN o STUDENT)
+    **Requiere:** Usuario autenticado
     
-    Los estudiantes necesitan esta información para:
-    - Ver el QR de pago
-    - Conocer el número de cuenta donde depositar
-    - Obtener detalles del banco y titular
-    
-    Los admins pueden ver además:
-    - Quién creó/actualizó la configuración
-    - Fechas de creación/actualización
+    **Para estudiantes:** Ver QR, cuenta bancaria y datos de pago
     """
     config = await payment_config_service.get_payment_config()
     
@@ -129,7 +134,16 @@ async def get_payment_config(
     return config
 
 
-@router.put("/", response_model=PaymentConfigResponse)
+@router.put(
+    "/",
+    response_model=PaymentConfigResponse,
+    summary="Actualizar Configuración de Pago",
+    responses={
+        200: {"description": "Configuración actualizada exitosamente"},
+        403: {"description": "Sin permisos - Solo Admin"},
+        404: {"description": "No existe configuración - usar POST"}
+    }
+)
 async def update_payment_config(
     *,
     file: Optional[UploadFile] = File(None, description="Nueva imagen del QR (opcional)"),
@@ -141,29 +155,16 @@ async def update_payment_config(
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Actualizar la configuración de pagos (solo admins)
+    Actualizar configuración de pagos
     
-    Requiere: ADMIN o SUPERADMIN
+    **Requiere:** Admin o SuperAdmin
     
-    Content-Type: multipart/form-data
+    **Todos los campos son opcionales.**  
+    Solo se actualizan los proporcionados.
     
-    Todos los campos son opcionales. Solo se actualizarán los proporcionados.
-    
-    Permite actualizar:
-    - file: Nueva imagen del QR (se sube automáticamente a Cloudinary y reemplaza la anterior)
-    - numero_cuenta: Número de cuenta
-    - banco, titular, tipo_cuenta: Información bancaria
-    - notas: Notas adicionales
-    
-    Si se proporciona un nuevo QR (file):
-    1. Se valida la imagen
-    2. Se sube a Cloudinary (reemplaza la imagen anterior)
-    3. Se actualiza la URL automáticamente
-    
-    Casos de uso:
-    - Cambio de cuenta bancaria
-    - Actualización del QR (por cambio de banco o sistema)
-    - Corrección de datos incorrectos
+    **Casos comunes:**
+    - Cambiar QR: Subir nuevo `file`
+    - Cambiar cuenta: Modificar `numero_cuenta`
     """
     from core.cloudinary_utils import upload_image
     
@@ -207,29 +208,28 @@ async def update_payment_config(
         raise HTTPException(status_code=500, detail=f"Error al actualizar configuración: {str(e)}")
 
 
-@router.delete("/", response_model=PaymentConfigResponse)
+@router.delete(
+    "/",
+    response_model=PaymentConfigResponse,
+    summary="Eliminar Configuración de Pago",
+    responses={
+        200: {"description": "Configuración marcada como inactiva"},
+        403: {"description": "Sin permisos - Solo Admin"},
+        404: {"description": "No existe configuración para eliminar"}
+    }
+)
 async def delete_payment_config(
     *,
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Eliminar la configuración de pagos (solo admins)
+    Eliminar configuración de pagos
     
-    Requiere: ADMIN o SUPERADMIN
+    **Requiere:** Admin o SuperAdmin
     
-    IMPORTANTE: Esta operación NO elimina permanentemente la configuración,
-    solo la marca como inactiva.
+    **IMPORTANTE:** NO elimina permanentemente, solo desactiva.
     
-    Esto permite:
-    - Mantener un historial de configuraciones
-    - Auditoría de cambios
-    - Posibilidad de reactivar si fue un error
-    
-    Después de eliminar, será necesario crear una nueva configuración
-    para que los estudiantes puedan realizar pagos.
-    
-    ADVERTENCIA: Sin una configuración activa, los estudiantes no podrán
-    ver el QR ni número de cuenta para realizar pagos.
+    **⚠️ ADVERTENCIA:** Los estudiantes no podrán realizar pagos sin configuración activa.
     """
     config = await payment_config_service.delete_payment_config()
     

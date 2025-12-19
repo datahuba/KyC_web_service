@@ -12,7 +12,15 @@ router = APIRouter()
 from schemas.common import PaginatedResponse, PaginationMeta
 import math
 
-@router.get("/", response_model=PaginatedResponse[StudentResponse])
+@router.get(
+    "/",
+    response_model=PaginatedResponse[StudentResponse],
+    summary="Listar Estudiantes",
+    responses={
+        200: {"description": "Lista de estudiantes con paginación y filtros"},
+        403: {"description": "Sin permisos - Solo Admin"}
+    }
+)
 async def read_students(
     page: int = Query(1, ge=1, description="Número de página"),
     per_page: int = Query(10, ge=1, le=100, description="Elementos por página"),
@@ -23,15 +31,19 @@ async def read_students(
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Recuperar estudiantes con filtros y paginación.
+    Listar estudiantes con paginación y filtros avanzados
     
-    Requiere: ADMIN o SUPERADMIN
+    **Requiere:** Admin o SuperAdmin
     
-    Filtros:
-    - q: Búsqueda de texto
-    - activo: true/false
-    - estado_titulo: pendiente, verificado, rechazado, sin_titulo
-    - curso_id: ID de un curso
+    **Filtros disponibles:**
+    - `q`: Búsqueda por nombre, email, carnet o registro
+    - `activo`: true/false - Filtrar por estado
+    - `estado_titulo`: pendiente, verificado, rechazado, sin_titulo
+    - `curso_id`: Ver estudiantes de un curso específico
+    
+    **Paginación:**
+    - `page`: Página actual (default: 1)
+    - `per_page`: Elementos por página (default: 10, max: 100)
     """
     students, total_count = await student_service.get_students(
         page=page,
@@ -59,32 +71,62 @@ async def read_students(
         )
     }
 
-@router.post("/", response_model=StudentResponse)
+@router.post(
+    "/",
+    response_model=StudentResponse,
+    status_code=201,
+    summary="Crear Estudiante",
+    responses={
+        201: {"description": "Estudiante creado exitosamente. Password inicial = carnet"},
+        400: {"description": "Error de validación: registro duplicado, etc."},
+        403: {"description": "Sin permisos - Solo Admin"}
+    }
+)
 async def create_student(
     *,
     student_in: StudentCreate,
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Crear nuevo estudiante.
+    Crear nuevo estudiante
     
-    Requiere: ADMIN o SUPERADMIN
+    **Requiere:** Admin o SuperAdmin
+    
+    **Campos mínimos:**
+    - registro (username)
+    - carnet (CI)
+    - nombre
+    - email
+    
+    **Automáticamente:**
+    - Password inicial = carnet (el estudiante debe cambiarlo después)
+    - Activo = true
+    - Lista de cursos = []
     """
     student = await student_service.create_student(student_in=student_in)
     return student
 
-@router.get("/{id}", response_model=StudentResponse)
+@router.get(
+    "/{id}",
+    response_model=StudentResponse,
+    summary="Ver Estudiante",
+    responses={
+        200: {"description": "Datos del estudiante"},
+        403: {"description": "Sin permisos - Admin o el mismo estudiante"},
+        404: {"description": "Estudiante no encontrado"}
+    }
+)
 async def read_student(
     *,
     id: PydanticObjectId,
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
     """
-    Obtener estudiante por ID.
+    Ver perfil de un estudiante
     
-    Requiere: Autenticación
-    - ADMIN/SUPERADMIN: Pueden ver cualquier estudiante
-    - STUDENT: Solo puede ver su propio perfil
+    **Permisos:**
+    - **Admin:** Puede ver cualquier estudiante
+    - **Estudiante:** Solo puede ver su propio perfil
     """
     student = await student_service.get_student(id=id)
     if not student:
@@ -99,28 +141,33 @@ async def read_student(
     
     return student
 
-@router.put("/me", response_model=StudentResponse)
+@router.put(
+    "/me",
+    response_model=StudentResponse,
+    summary="Actualizar Mi Perfil",
+    responses={
+        200: {"description": "Perfil actualizado exitosamente"},
+        403: {"description": "Solo estudiantes"}
+    }
+)
 async def update_student_self(
     *,
     student_in: StudentUpdateSelf,
     current_user: Student = Depends(get_current_user)
 ) -> Any:
     """
-    Actualizar el perfil del estudiante autenticado.
+    Actualizar perfil del estudiante autenticado
     
-    Requiere: Autenticación como STUDENT
+    **Requiere:** Estudiante autenticado
     
-    El estudiante solo puede actualizar:
-    - celular (número de teléfono)
-    - domicilio (dirección)
+    **Puede actualizar:**
+    - celular
+    - domicilio
     
-    Para subir archivos (CV, foto, carnet, etc.), usar los endpoints:
-    - POST /students/me/upload/photo
-    - POST /students/me/upload/cv
-    - POST /students/me/upload/carnet
-    - POST /students/me/upload/afiliacion
+    **NO puede cambiar:**
+    - nombre, email, registro, password, tipo de estudiante, etc.
     
-    NO puede cambiar: nombre, email, registro, activo, tipo de estudiante, password, etc.
+    **Para cambiar password:** Usar `POST /students/me/change-password`
     """
     # Verificar que sea un estudiante
     if not isinstance(current_user, Student):
@@ -134,28 +181,31 @@ async def update_student_self(
     return student
 
 
-@router.post("/me/change-password", response_model=StudentResponse)
+@router.post(
+    "/me/change-password",
+    response_model=StudentResponse,
+    summary="Cambiar Mi Contraseña",
+    responses={
+        200: {"description": "Contraseña cambiada exitosamente"},
+        400: {"description": "Contraseña actual incorrecta o validación fallida"},
+        403: {"description": "Solo estudiantes"}
+    }
+)
 async def change_password(
     *,
     password_data: ChangePassword,
     current_user: Student = Depends(get_current_user)
 ) -> Any:
     """
-    Cambiar contraseña del estudiante autenticado (seguro).
+    Cambiar contraseña del estudiante autenticado (seguro)
     
-    Requiere: Autenticación como STUDENT
+    **Requiere:** Estudiante autenticado
     
-    Seguridad:
-    - Verifica la contraseña actual
-    - Requiere confirmar la nueva contraseña (2 veces)
-    - Mínimo 5 caracteres para la nueva contraseña
-    
-    Proceso:
-    1. El estudiante envía su contraseña actual
-    2. El sistema verifica que sea correcta
-    3. El estudiante envía la nueva contraseña 2 veces
-    4. El sistema valida que coincidan
-    5. Se actualiza la contraseña (hasheada)
+    **Proceso seguro:**
+    1. Verifica la contraseña actual
+    2. Requiere confirmar la nueva contraseña (2 veces)
+    3. Mínimo 5 caracteres
+    4. Se hashea automáticamente
     """
     from core.security import verify_password, get_password_hash
      
@@ -173,7 +223,16 @@ async def change_password(
     return current_user
 
 
-@router.put("/{id}", response_model=StudentResponse)
+@router.put(
+    "/{id}",
+    response_model=StudentResponse,
+    summary="Actualizar Estudiante (Admin)",
+    responses={
+        200: {"description": "Estudiante actualizado exitosamente"},
+        403: {"description": "Sin permisos - Solo Admin"},
+        404: {"description": "Estudiante no encontrado"}
+    }
+)
 async def update_student_admin(
     *,
     id: PydanticObjectId,
@@ -181,23 +240,16 @@ async def update_student_admin(
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Actualizar cualquier estudiante (solo admins).
+    Actualizar cualquier estudiante
     
-    Requiere: ADMIN o SUPERADMIN
+    **Requiere:** Admin o SuperAdmin
     
-    Los administradores pueden actualizar:
-    - Datos personales (nombre, email, carnet, extensión, etc.)
+    **Los administradores pueden actualizar:**
+    - Datos personales (nombre, email, carnet, etc.)
     - Tipo de estudiante (interno/externo)
     - Estado (activo/inactivo)
+    - Password (para resetear)
     - Cursos inscritos
-    - Título profesional (datos del título)
-    
-    Para subir archivos, usar los endpoints dedicados:
-    - POST /students/{id}/upload/photo
-    - POST /students/{id}/upload/cv
-    - POST /students/{id}/upload/carnet
-    - POST /students/{id}/upload/afiliacion
-    - POST /students/{id}/upload/titulo (solo admins)
     """
     student = await student_service.get_student(id=id)
     if not student:
@@ -207,16 +259,27 @@ async def update_student_admin(
     return student
 
 
-@router.delete("/{id}", response_model=StudentResponse)
+@router.delete(
+    "/{id}",
+    response_model=StudentResponse,
+    summary="Eliminar Estudiante",
+    responses={
+        200: {"description": "Estudiante eliminado exitosamente"},
+        403: {"description": "Sin permisos - Solo SuperAdmin"},
+        404: {"description": "Estudiante no encontrado"}
+    }
+)
 async def delete_student(
     *,
     id: PydanticObjectId,
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Eliminar estudiante.
+    Eliminar estudiante
     
-    Requiere: ADMIN o SUPERADMIN (solo SUPERADMIN puede eliminar)
+    **Requiere:** SOLO SuperAdmin
+    
+    **Nota:** Los Admin normales NO pueden eliminar estudiantes.
     """
     # Solo SUPERADMIN puede eliminar
     from models.enums import UserRole
@@ -237,7 +300,17 @@ async def delete_student(
 # ENDPOINTS DE SUBIDA DE ARCHIVOS
 # ============================================================================
 
-@router.post("/{id}/upload/photo", response_model=StudentResponse)
+@router.post(
+    "/{id}/upload/photo",
+    response_model=StudentResponse,
+    summary="Subir Foto de Perfil",
+    responses={
+        200: {"description": "Foto subida exitosamente"},
+        400: {"description": "Formato no permitido"},
+        403: {"description": "Sin permisos - Admin o el mismo estudiante"},
+        404: {"description": "Estudiante no encontrado"}
+    }
+)
 async def upload_student_photo(
     *,
     id: PydanticObjectId,
@@ -247,12 +320,12 @@ async def upload_student_photo(
     """
     Subir foto de perfil del estudiante
     
-    Requiere: Autenticación
-    - ADMIN/SUPERADMIN: Pueden subir foto a cualquier estudiante
-    - STUDENT: Solo puede subir su propia foto
+    **Permisos:**
+    - **Admin:** Puede subir foto a cualquier estudiante
+    - **Estudiante:** Solo puede subir su propia foto
     
-    Formatos permitidos: JPG, PNG, WEBP
-    Tamaño máximo: 5MB
+    **Formatos permitidos:** JPG, PNG, WEBP  
+    **Tamaño máximo:** 5MB
     """
     from core.cloudinary_utils import upload_image
     

@@ -35,26 +35,51 @@ from api.dependencies import require_admin, get_current_user
 router = APIRouter()
 
 
-@router.post("/", response_model=EnrollmentResponse, status_code=201)
+@router.post(
+    "/",
+    response_model=EnrollmentResponse,
+    status_code=201,
+    summary="Crear Inscripción",
+    responses={
+        201: {"description": "Inscripción creada exitosamente. Los requisitos del curso se copian automáticamente."},
+        400: {"description": "Error de validación: estudiante ya inscrito, curso/estudiante no existe, etc."},
+        403: {"description": "Sin permisos - Solo Admin/SuperAdmin"},
+        404: {"description": "Estudiante o curso no encontrado"}
+    }
+)
 async def create_enrollment(
     *,
     enrollment_in: EnrollmentCreate,
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Crear nueva inscripción (solo admins)
+    Crear nueva inscripción de estudiante a un curso
     
-    Requiere: ADMIN o SUPERADMIN
+    **Requiere:** Admin o SuperAdmin
     
-    El sistema calculará automáticamente:
-    - Precios según tipo de estudiante (interno/externo)
-    - Descuentos (del curso + personalizado)
-    - Total a pagar y saldo pendiente
+    **El sistema automáticamente:**
+    - ✅ Aplica precio según tipo de estudiante (interno/externo)
+    - ✅ Calcula descuentos (curso + personalizado)
+    - ✅ Copia requisitos del curso al enrollment
+    - ✅ Inicializa requisitos en estado "pendiente"
+    - ✅ Calcula total a pagar y saldo pendiente
     
-    Validaciones:
-    - El estudiante existe
-    - El curso existe
-    - El estudiante no está ya inscrito en ese curso
+    **Validaciones:**
+    - Estudiante existe y está activo
+    - Curso existe y está activo
+    - Estudiante NO está ya inscrito en ese curso
+    
+    **Sistema de Doble Descuento:**
+    1. Descuento del Curso (nivel 1): Se aplica del curso al monto base
+    2. Descuento Personalizado (nivel 2): Se aplica sobre el resultado anterior
+    
+    **Ejemplo de cálculo:**
+    ```
+    Precio base: 3000 Bs
+    - Descuento curso (10%): -300 Bs → 2700 Bs
+    - Descuento personal (5%): -135 Bs → 2565 Bs
+    Total a pagar: 2565 Bs
+    ```
     """
     try:
         enrollment = await enrollment_service.create_enrollment(
@@ -69,7 +94,15 @@ async def create_enrollment(
 from schemas.common import PaginatedResponse, PaginationMeta
 import math
 
-@router.get("/", response_model=PaginatedResponse[EnrollmentResponse])
+@router.get(
+    "/",
+    response_model=PaginatedResponse[EnrollmentResponse],
+    summary="Listar Inscripciones",
+    responses={
+        200: {"description": "Lista de inscripciones con paginación y filtros"},
+        403: {"description": "Sin permisos"}
+    }
+)
 async def list_enrollments(
     *,
     page: int = Query(1, ge=1, description="Número de página"),
@@ -81,11 +114,36 @@ async def list_enrollments(
     current_user: User | Student = Depends(get_current_user)
 ) -> Any:
     """
-    Listar inscripciones con paginación y filtros
+    Listar inscripciones con paginación y filtros avanzados
     
-    Permisos:
-    - ADMIN: Ve todas las inscripciones (con filtros avanzados)
-    - STUDENT: Ve solo sus propias inscripciones
+    **Permisos:**
+    - **Admin:** Ve TODAS las inscripciones con filtros avanzados
+    - **Estudiante:** Ve SOLO sus propias inscripciones
+    
+    **Filtros disponibles (Admin):**
+    - `q`: Búsqueda por nombre de estudiante o curso
+    - `estado`: Filtrar por estado (pendiente_pago, activo, etc.)
+    - `curso_id`: Ver inscritos de un curso específico
+    - `estudiante_id`: Ver inscripciones de un estudiante
+    
+    **Paginación:**
+    - `page`: Número de página (default: 1)
+    - `per_page`: Elementos por página (default: 10, max: 500)
+    
+    **Retorna:**
+    ```json
+    {
+      "data": [...],
+      "meta": {
+        "page": 1,
+        "limit": 10,
+        "totalItems": 36,
+        "totalPages": 4,
+        "hasNextPage": true,
+        "hasPrevPage": false
+      }
+    }
+    ```
     """
     # Si es admin, retorna todas (paginadas en DB)
     if isinstance(current_user, User):
@@ -136,18 +194,36 @@ async def list_enrollments(
     }
 
 
-@router.get("/{id}", response_model=EnrollmentResponse)
+@router.get(
+    "/{id}",
+    response_model=EnrollmentResponse,
+    summary="Ver Inscripción",
+    responses={
+        200: {"description": "Detalles completos de la inscripción"},
+        403: {"description": "Sin permisos - Admin o estudiante dueño"},
+        404: {"description": "Inscripción no encontrada"}
+    }
+)
 async def get_enrollment(
     *,
     id: PydanticObjectId,
     current_user: User | Student = Depends(get_current_user)
 ) -> Any:
     """
-    Obtener una inscripción específica
+    Ver detalles completos de una inscripción
     
-    Permisos:
-    - ADMIN: Puede ver cualquier inscripción
-    - STUDENT: Solo puede ver sus propias inscripciones
+    **Permisos:**
+    - **Admin:** Puede ver cualquier inscripción
+    - **Estudiante:** Solo puede ver sus propias inscripciones
+    
+    **Incluye:**
+    - ✅ Información financiera (total, pagado, pendiente)
+    - ✅ Siguiente pago calculado automáticamente
+    - ✅ Snapshot de precios y descuentos
+    - ✅ Estado de la inscripción
+    - ✅ **Nota final** (si ha sido calificado)
+    - ✅ Requisitos (lista completa con estados)
+    - ✅ Cuotas pagadas vs totales
     """
     enrollment = await enrollment_service.get_enrollment(id)
     
@@ -165,7 +241,17 @@ async def get_enrollment(
     return enrollment
 
 
-@router.patch("/{id}", response_model=EnrollmentResponse)
+@router.patch(
+    "/{id}",
+    response_model=EnrollmentResponse,
+    summary="Actualizar Inscripción",
+    responses={
+        200: {"description": "Inscripción actualizada exitosamente"},
+        400: {"description": "Datos inválidos"},
+        403: {"description": "Sin permisos - Solo Admin"},
+        404: {"description": "Inscripción no encontrada"}
+    }
+)
 async def update_enrollment(
     *,
     id: PydanticObjectId,
@@ -173,13 +259,26 @@ async def update_enrollment(
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Actualizar una inscripción (solo admins)
+    Actualizar inscripción existente
     
-    Requiere: ADMIN o SUPERADMIN
+    **Requiere:** Admin o SuperAdmin
     
-    Permite actualizar:
-    - descuento_personalizado: Recalcula automáticamente el total
-    - estado: Cambiar el estado manualmente
+    **Campos actualizables:**
+    - `estado`: Cambiar estado de la inscripción
+    - `descuento_personalizado`: Ajustar descuento manual (recalcula totales)
+    - `nota_final`: Asignar/actualizar calificación (0-100) ⭐ NUEVO
+    
+    **Nota:** Los campos financieros (total_pagado, saldo_pendiente)
+    se actualizan automáticamente cuando se registra un pago.
+    
+    **Ejemplo - Asignar nota:**
+    ```json
+    {
+      "nota_final": 85.5
+    }
+    ```
+    
+    **Sistema recalcula automáticamente** totales si cambias descuentos.
     """
     try:
         # Actualizar descuento si se proporcionó
@@ -259,18 +358,40 @@ async def get_enrollments_by_course(
 # ENDPOINTS DE REQUISITOS
 # ========================================================================
 
-@router.get("/{id}/requisitos", response_model=RequisitoListResponse)
+@router.get(
+    "/{id}/requisitos",
+    response_model=RequisitoListResponse,
+    summary="Ver Requisitos del Enrollment",
+    responses={
+        200: {"description": "Lista de requisitos con estadísticas"},
+        403: {"description": "Sin permisos - Admin o estudiante dueño"},
+        404: {"description": "Enrollment no encontrado"}
+    }
+)
 async def listar_requisitos(
     *,
     id: PydanticObjectId,
     current_user: User | Student = Depends(get_current_user)
 ) -> Any:
     """
-    Listar todos los requisitos de una inscripción con estadísticas
+    Ver requisitos de una inscripción con estadísticas automáticas
     
-    Permisos:
-    - ADMIN: Puede ver requisitos de cualquier enrollment
-    - STUDENT: Solo puede ver requisitos de sus propios enrollments
+    **Permisos:**
+    - **Admin:** Puede ver requisitos de cualquier enrollment
+    - **Estudiante:** Solo puede ver requisitos de sus enrollments
+    
+    **Retorna:**
+    - `total`: Cantidad total de requisitos
+    - `pendientes`: Requisitos sin subir
+    - `en_proceso`: Requisitos subidos esperando revisión
+    - `aprobados`: Requisitos aprobados por admin
+    - `rechazados`: Requisitos rechazados (deben resubirse)
+    
+    **Estados posibles:**
+    - `pendiente`: No subido aún
+    - `en_proceso`: Subido, esperando revisión del admin
+    - `aprobado`: Admin aprobó el documento
+    - `rechazado`: Admin rechazó, debe resubir
     """
     enrollment = await Enrollment.get(id)
     if not enrollment:
@@ -296,7 +417,17 @@ async def listar_requisitos(
     }
 
 
-@router.put("/{id}/requisitos/{index}", response_model=RequisitoResponse)
+@router.put(
+    "/{id}/requisitos/{index}",
+    response_model=RequisitoResponse,
+    summary="Subir Documento de Requisito",
+    responses={
+        200: {"description": "Documento subido exitosamente, estado cambiado a 'en_proceso'"},
+        400: {"description": "Índice fuera de rango o formato de archivo no permitido"},
+        403: {"description": "Sin permisos - Solo el estudiante dueño"},
+        404: {"description": "Enrollment no encontrado"}
+    }
+)
 async def subir_requisito(
     *,
     id: PydanticObjectId,
@@ -305,7 +436,26 @@ async def subir_requisito(
     current_user: Student = Depends(get_current_user)
 ) -> Any:
     """
-    Subir documento para un requisito específico (solo estudiantes)
+    Subir documento para un requisito específico
+    
+    **Requiere:** El estudiante DUEÑO del enrollment
+    
+    **Parámetros:**
+    - `id`: ID del enrollment
+    - `index`: Índice del requisito (0, 1, 2...)
+    - `file`: Archivo PDF o imagen
+    
+    **Archivos permitidos:**
+    - PDF (máx 10MB)
+    - Imágenes: JPG, PNG, WEBP (máx 5MB)
+    
+    **Índices:**
+    Los requisitos están numerados desde 0:
+    - [0] = Primer requisito
+    - [1] = Segundo requisito
+    
+    **Resubida:**
+    Si un requisito fue rechazado, puedes volver a subirlo usando el mismo índice.
     """
     if not isinstance(current_user, Student):
         raise HTTPException(403, "Solo estudiantes")
@@ -344,7 +494,17 @@ async def subir_requisito(
         raise HTTPException(500, f"Error: {str(e)}")
 
 
-@router.put("/{id}/requisitos/{index}/aprobar", response_model=RequisitoResponse)
+@router.put(
+    "/{id}/requisitos/{index}/aprobar",
+    response_model=RequisitoResponse,
+    summary="Aprobar Requisito",
+    responses={
+        200: {"description": "Requisito aprobado exitosamente"},
+        400: {"description": "No se puede aprobar: sin documento o estado incorrecto"},
+        403: {"description": "Sin permisos - Solo Admin"},
+        404: {"description": "Enrollment no encontrado"}
+    }
+)
 async def aprobar_requisito(
     *,
     id: PydanticObjectId,
@@ -352,7 +512,18 @@ async def aprobar_requisito(
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Aprobar un requisito (solo admins)
+    Aprobar un requisito subido por el estudiante
+    
+    **Requiere:** Admin o SuperAdmin
+    
+    **Validaciones automáticas:**
+    - ✅ Verifica que tenga documento subido
+    - ✅ Verifica estado: debe estar en `en_proceso` o `rechazado`
+    
+    **Lo que hace:**
+    1. Cambia estado a `aprobado`
+    2. Registra `revisado_por` (username del admin)
+    3. Limpia `motivo_rechazo`
     """
     enrollment = await Enrollment.get(id)
     if not enrollment:
@@ -375,7 +546,18 @@ async def aprobar_requisito(
     return enrollment.requisitos[index]
 
 
-@router.put("/{id}/requisitos/{index}/rechazar", response_model=RequisitoResponse)
+@router.put(
+    "/{id}/requisitos/{index}/rechazar",
+    response_model=RequisitoResponse,
+    summary="Rechazar Requisito",
+    responses={
+        200: {"description": "Requisito rechazado con motivo guardado"},
+        400: {"description": "No se puede rechazar: sin documento o estado incorrecto"},
+        403: {"description": "Sin permisos - Solo Admin"},
+        404: {"description": "Enrollment no encontrado"},
+        422: {"description": "Motivo de rechazo requerido"}
+    }
+)
 async def rechazar_requisito(
     *,
     id: PydanticObjectId,
@@ -384,7 +566,22 @@ async def rechazar_requisito(
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Rechazar un requisito con motivo (solo admins)
+    Rechazar un requisito con motivo
+    
+    **Requiere:** Admin o SuperAdmin
+    
+    **Parámetros:**
+    - `motivo`: **OBLIGATORIO** - Razón del rechazo
+    
+    **Ejemplos de motivos:**
+    - "Imagen muy borrosa, no se lee el número de carnet"
+    - "El CV está desactualizado"
+    - "Documento incompleto, falta una cara del carnet"
+    
+    **El estudiante puede:**
+    - Ver el motivo del rechazo
+    - Volver a subir el mismo requisito
+    - Al resubir, el estado vuelve a `en_proceso` y el motivo se limpia
     """
     enrollment = await Enrollment.get(id)
     if not enrollment:

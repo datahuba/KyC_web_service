@@ -15,16 +15,26 @@ import math
 from models.enums import UserRole
 from typing import Optional
 
-@router.get("/", response_model=PaginatedResponse[UserResponse])
+@router.get(
+    "/",
+    response_model=PaginatedResponse[UserResponse],
+    summary="Listar Usuarios Admin",
+    responses={
+        200: {"description": "Lista de usuarios admin con paginación"},
+        403: {"description": "Sin permisos - Solo Admin"}
+    }
+)
 async def read_users(
     page: int = Query(1, ge=1, description="Número de página"),
     per_page: int = Query(10, ge=1, le=100, description="Elementos por página"),
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Recuperar usuarios con paginación.
+    Listar usuarios administradores
     
-    Requiere: ADMIN o SUPERADMIN
+    **Requiere:** Admin o SuperAdmin
+    
+    **Retorna:** Lista de usuarios del sistema (Admin/SuperAdmin)
     """
     users, total_count = await user_service.get_users(page=page, per_page=per_page)
     
@@ -45,16 +55,28 @@ async def read_users(
         )
     }
 
-@router.post("/", response_model=UserResponse)
+@router.post(
+    "/",
+    response_model=UserResponse,
+    status_code=201,
+    summary="Crear Usuario Admin",
+    responses={
+        201: {"description": "Usuario creado exitosamente"},
+        400: {"description": "Username o email ya existe"},
+        403: {"description": "Sin permisos - Solo SuperAdmin"}
+    }
+)
 async def create_user(
     *,
     user_in: UserCreate,
     current_user: User = Depends(require_superadmin)
 ) -> Any:
     """
-    Crear nuevo usuario.
+    Crear nuevo usuario administrador
     
-    Requiere: SUPERADMIN
+    **Requiere:** SOLO SuperAdmin
+    
+    **Roles disponibles:** Admin, SuperAdmin
     """
     # Verificar que username y email sean únicos
     existing_user = await user_service.get_user_by_username(user_in.username)
@@ -68,23 +90,41 @@ async def create_user(
     user = await user_service.create_user(user_in=user_in)
     return user
 
-@router.get("/{id}", response_model=UserResponse)
+@router.get(
+    "/{id}",
+    response_model=UserResponse,
+    summary="Ver Usuario Admin",
+    responses={
+        200: {"description": "Detalles del usuario"},
+        403: {"description": "Sin permisos - Solo Admin"},
+        404: {"description": "Usuario no encontrado"}
+    }
+)
 async def read_user(
     *,
     id: PydanticObjectId,
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Obtener usuario por ID.
+    Ver detalles de un usuario administrador
     
-    Requiere: ADMIN o SUPERADMIN
+    **Requiere:** Admin o SuperAdmin
     """
     user = await user_service.get_user(id=id)
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     return user
 
-@router.put("/{id}", response_model=UserResponse)
+@router.put(
+    "/{id}",
+    response_model=UserResponse,
+    summary="Actualizar Usuario Admin",
+    responses={
+        200: {"description": "Usuario actualizado exitosamente"},
+        403: {"description": "Sin permisos - Solo SuperAdmin"},
+        404: {"description": "Usuario no encontrado"}
+    }
+)
 async def update_user(
     *,
     id: PydanticObjectId,
@@ -92,9 +132,9 @@ async def update_user(
     current_user: User = Depends(require_superadmin)
 ) -> Any:
     """
-    Actualizar usuario.
+    Actualizar usuario administrador
     
-    Requiere: SUPERADMIN
+    **Requiere:** SOLO SuperAdmin
     """
     user = await user_service.get_user(id=id)
     if not user:
@@ -102,16 +142,25 @@ async def update_user(
     user = await user_service.update_user(user=user, user_in=user_in)
     return user
 
-@router.delete("/{id}", response_model=UserResponse)
+@router.delete(
+    "/{id}",
+    response_model=UserResponse,
+    summary="Eliminar Usuario Admin",
+    responses={
+        200: {"description": "Usuario eliminado exitosamente"},
+        403: {"description": "Sin permisos - Solo SuperAdmin"},
+        404: {"description": "Usuario no encontrado"}
+    }
+)
 async def delete_user(
     *,
     id: PydanticObjectId,
     current_user: User = Depends(require_superadmin)
 ) -> Any:
     """
-    Eliminar usuario.
+    Eliminar usuario administrador
     
-    Requiere: SUPERADMIN
+    **Requiere:** SOLO SuperAdmin
     """
     user = await user_service.get_user(id=id)
     if not user:

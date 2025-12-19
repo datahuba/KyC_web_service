@@ -15,16 +15,26 @@ import math
 
 from typing import Optional
 
-@router.get("/", response_model=PaginatedResponse[DiscountResponse])
+@router.get(
+    "/",
+    response_model=PaginatedResponse[DiscountResponse],
+    summary="Listar Descuentos",
+    responses={
+        200: {"description": "Lista de descuentos con paginación"},
+        403: {"description": "Sin permisos - Solo Admin"}
+    }
+)
 async def read_discounts(
     page: int = Query(1, ge=1, description="Número de página"),
     per_page: int = Query(10, ge=1, le=100, description="Elementos por página"),
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Recuperar descuentos con paginación.
+    Listar descuentos con paginación
     
-    Requiere: ADMIN o SUPERADMIN
+    **Requiere:** Admin o SuperAdmin
+    
+    **Retorna:** Descuentos disponibles para asignar a estudiantes
     """
     discounts, total_count = await discount_service.get_discounts(page=page, per_page=per_page)
     
@@ -45,37 +55,69 @@ async def read_discounts(
         )
     }
 
-@router.post("/", response_model=DiscountResponse)
+@router.post(
+    "/",
+    response_model=DiscountResponse,
+    status_code=201,
+    summary="Crear Descuento",
+    responses={
+        201: {"description": "Descuento creado exitosamente"},
+        400: {"description": "Error de validación"},
+        403: {"description": "Sin permisos - Solo Admin"}
+    }
+)
 async def create_discount(
     *,
     discount_in: DiscountCreate,
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Crear nuevo descuento.
+    Crear nuevo descuento
     
-    Requiere: ADMIN o SUPERADMIN
+    **Requiere:** Admin o SuperAdmin
+    
+    **Campos:**
+    - `nombre`: Nombre del descuento  
+    - `porcentaje`: Porcentaje (0-100)
     """
     discount = await discount_service.create_discount(discount_in=discount_in)
     return discount
 
-@router.get("/{id}", response_model=DiscountResponse)
+@router.get(
+    "/{id}",
+    response_model=DiscountResponse,
+    summary="Ver Descuento",
+    responses={
+        200: {"description": "Detalles del descuento"},
+        403: {"description": "Sin permisos - Solo Admin"},
+        404: {"description": "Descuento no encontrado"}
+    }
+)
 async def read_discount(
     *,
     id: PydanticObjectId,
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Obtener descuento por ID.
+    Ver detalles de un descuento
     
-    Requiere: ADMIN o SUPERADMIN
+    **Requiere:** Admin o SuperAdmin
     """
     discount = await discount_service.get_discount(id=id)
     if not discount:
         raise HTTPException(status_code=404, detail="Descuento no encontrado")
     return discount
 
-@router.put("/{id}", response_model=DiscountResponse)
+@router.put(
+    "/{id}",
+    response_model=DiscountResponse,
+    summary="Actualizar Descuento",
+    responses={
+        200: {"description": "Descuento actualizado exitosamente"},
+        403: {"description": "Sin permisos - Solo Admin"},
+        404: {"description": "Descuento no encontrado"}
+    }
+)
 async def update_discount(
     *,
     id: PydanticObjectId,
@@ -83,9 +125,9 @@ async def update_discount(
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Actualizar descuento.
+    Actualizar descuento existente
     
-    Requiere: ADMIN o SUPERADMIN
+    **Requiere:** Admin o SuperAdmin
     """
     discount = await discount_service.get_discount(id=id)
     if not discount:
@@ -93,16 +135,25 @@ async def update_discount(
     discount = await discount_service.update_discount(discount=discount, discount_in=discount_in)
     return discount
 
-@router.delete("/{id}", response_model=DiscountResponse)
+@router.delete(
+    "/{id}",
+    response_model=DiscountResponse,
+    summary="Eliminar Descuento",
+    responses={
+        200: {"description": "Descuento eliminado exitosamente"},
+        403: {"description": "Sin permisos - Solo SuperAdmin"},
+        404: {"description": "Descuento no encontrado"}
+    }
+)
 async def delete_discount(
     *,
     id: PydanticObjectId,
     current_user: User = Depends(require_superadmin)
 ) -> Any:
     """
-    Eliminar descuento.
+    Eliminar descuento
     
-    Requiere: SUPERADMIN
+    **Requiere:** SOLO SuperAdmin
     """
     discount = await discount_service.get_discount(id=id)
     if not discount:

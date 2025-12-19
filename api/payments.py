@@ -35,7 +35,17 @@ from api.dependencies import require_admin, get_current_user
 router = APIRouter()
 
 
-@router.post("/", response_model=PaymentResponse, status_code=201)
+@router.post(
+    "/",
+    response_model=PaymentResponse,
+    status_code=201,
+    summary="Registrar Pago",
+    responses={
+        201: {"description": "Pago registrado exitosamente, pendiente de aprobación"},
+        400: {"description": "Error de validación: archivo inválido, inscripción no encontrada, etc."},
+        403: {"description": "Sin permisos - No es tu inscripción"}
+    }
+)
 async def create_payment(
     *,
     file: UploadFile = File(..., description="Comprobante de pago (imagen JPG/PNG/WEBP o PDF)"),
@@ -45,34 +55,27 @@ async def create_payment(
     current_user: Student = Depends(get_current_user)
 ) -> Any:
     """
-    Crear un nuevo pago (solo estudiantes)
+    Registrar un nuevo pago
     
-    Requiere: Autenticación como STUDENT
+    **Requiere:** Estudiante autenticado
     
-    Content-Type: multipart/form-data
+    **El estudiante sube:**
+    - `file`: Comprobante de pago (JPG, PNG, WEBP o PDF)
+    - `inscripcion_id`: ID de su inscripción
+    - `numero_transaccion`: Número de transacción del banco
     
-    El estudiante sube:
-    - file: Comprobante de pago en IMAGEN (JPG, PNG, WEBP) o PDF
-    - inscripcion_id: ID de la inscripción a la que pertenece el pago
-    - numero_transaccion: Número de transacción bancaria
-    - descuento_aplicado: Descuento adicional (opcional)
+    **El sistema automáticamente:**
+    - ✅ Calcula el monto exacto a pagar (matrícula o cuota)
+    - ✅ Determina el concepto ("Matrícula", "Cuota 1", etc.)
+    - ✅ Valida que sea tu inscripción
+    - ✅ Sube comprobante a Cloudinary
+    - ✅ Crea pago en estado PENDIENTE
     
-    El sistema automáticamente:
-    1. Detecta si es imagen o PDF
-    2. Valida el formato del archivo
-    3. Sube el comprobante a Cloudinary
-    4. Calcula el monto exacto a pagar (matrícula o cuota)
-    5. Determina el concepto (Matrícula, Cuota X)
-    6. Crea el pago en estado PENDIENTE
+    **El admin debe aprobar** el pago para que se actualicen los totales.
     
-    El pago queda en estado PENDIENTE hasta que un admin lo apruebe.
-    
-    Validaciones:
-    - El archivo debe ser imagen (JPG, PNG, WEBP) o PDF
-    - Tamaño máximo: 5MB para imágenes, 10MB para PDFs
-    - La inscripción debe existir
-    - El estudiante debe ser dueño de la inscripción
-    - El monto se calcula automáticamente (NO es editable)
+    **Formatos permitidos:**
+    - Imágenes: JPG, PNG, WEBP (máx 5MB)
+    - PDF (máx 10MB)
     """
     from core.cloudinary_utils import upload_image, upload_pdf
     from schemas.payment import PaymentCreate
@@ -137,7 +140,15 @@ async def create_payment(
 from schemas.common import PaginatedResponse, PaginationMeta
 import math
 
-@router.get("/", response_model=PaginatedResponse[PaymentResponse])
+@router.get(
+    "/",
+    response_model=PaginatedResponse[PaymentResponse],
+    summary="Listar Pagos",
+    responses={
+        200: {"description": "Lista de pagos con paginación y filtros"},
+        403: {"description": "Sin permisos"}
+    }
+)
 async def list_payments(
     *,
     page: int = Query(1, ge=1, description="Número de página"),
@@ -151,9 +162,14 @@ async def list_payments(
     """
     Listar pagos con paginación y filtros
     
-    Permisos:
-    - ADMIN: Ve todos los pagos (con filtros avanzados)
-    - STUDENT: Ve solo sus propios pagos
+    **Permisos:**
+    - **Admin:** Ve TODOS los pagos con filtros avanzados
+    - **Estudiante:** Ve SOLO sus propios pagos
+    
+    **Filtros (Admin):**
+    - `estado`: pendiente, aprobado, rechazado
+    - `curso_id`: Pagos de un curso específico
+    - `estudiante_id`: Pagos de un estudiante
     """
     # Si es admin, retorna todos (paginadas en DB)
     if isinstance(current_user, User):
@@ -204,18 +220,27 @@ async def list_payments(
     }
 
 
-@router.get("/{id}", response_model=PaymentResponse)
+@router.get(
+    "/{id}",
+    response_model=PaymentResponse,
+    summary="Ver Pago",
+    responses={
+        200: {"description": "Detalles del pago"},
+        403: {"description": "Sin permisos - Admin o dueño del pago"},
+        404: {"description": "Pago no encontrado"}
+    }
+)
 async def get_payment(
     *,
     id: PydanticObjectId,
     current_user: User | Student = Depends(get_current_user)
 ) -> Any:
     """
-    Obtener un pago específico
+    Ver detalles de un pago
     
-    Permisos:
-    - ADMIN: Puede ver cualquier pago
-    - STUDENT: Solo puede ver sus propios pagos
+    **Permisos:**
+    - **Admin:** Puede ver cualquier pago
+    - **Estudiante:** Solo puede ver sus propios pagos
     """
     payment = await payment_service.get_payment(id)
     
@@ -233,24 +258,34 @@ async def get_payment(
     return payment
 
 
-@router.put("/{id}/aprobar", response_model=PaymentResponse)
+@router.put(
+    "/{id}/aprobar",
+    response_model=PaymentResponse,
+    summary="Aprobar Pago",
+    responses={
+        200: {"description": "Pago aprobado exitosamente, totales actualizados"},
+        400: {"description": "Error: pago ya procesado o datos inválidos"},
+        403: {"description": "Sin permisos - Solo Admin"},
+        404: {"description": "Pago no encontrado"}
+    }
+)
 async def aprobar_pago(
     *,
     id: PydanticObjectId,
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Aprobar un pago (solo admins)
+    Aprobar un pago
     
-    Requiere: ADMIN o SUPERADMIN
+    **Requiere:** Admin o SuperAdmin
     
-    Proceso automático:
+    **El sistema automáticamente:**
     1. Cambia estado del pago a APROBADO
-    2. Actualiza enrollment.total_pagado
-    3. Actualiza enrollment.saldo_pendiente
-    4. Cambia estado de enrollment si corresponde:
-       - PENDIENTE_PAGO → ACTIVO (cuando paga matrícula)
-       - ACTIVO → COMPLETADO (cuando paga todo)
+    2. Actualiza `enrollment.total_pagado` (+monto)
+    3. Actualiza `enrollment.saldo_pendiente` (-monto)
+    4. Cambia estado del enrollment si corresponde:
+       - PENDIENTE_PAGO → ACTIVO (al pagar matrícula)
+       - ACTIVO → COMPLETADO (al pagar todo)
     """
     try:
         payment = await payment_service.aprobar_pago(
@@ -262,7 +297,17 @@ async def aprobar_pago(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.put("/{id}/rechazar", response_model=PaymentResponse)
+@router.put(
+    "/{id}/rechazar",
+    response_model=PaymentResponse,
+    summary="Rechazar Pago",
+    responses={
+        200: {"description": "Pago rechazado, estudiante puede ver motivo y reenviar"},
+        400: {"description": "Error: pago ya procesado"},
+        403: {"description": "Sin permisos - Solo Admin"},
+        404: {"description": "Pago no encontrado"}
+    }
+)
 async def rechazar_pago(
     *,
     id: PydanticObjectId,
@@ -270,17 +315,17 @@ async def rechazar_pago(
     current_user: User = Depends(require_admin)
 ) -> Any:
     """
-    Rechazar un pago (solo admins)
+    Rechazar un pago con motivo
     
-    Requiere: ADMIN o SUPERADMIN
+    **Requiere:** Admin o SuperAdmin
     
-    Motivos comunes de rechazo:
-    - Voucher ilegible
-    - Monto incorrecto
-    - Transacción no encontrada en el banco
-    - Voucher duplicado
+    **Motivos comunes:**
+    - "Voucher ilegible"
+    - "Monto incorrecto"
+    - "Transacción no encontrada en el banco"
+    - "Voucher duplicado"
     
-    El estudiante podrá ver el motivo y subir un nuevo comprobante.
+    El estudiante puede ver el motivo y subir un nuevo comprobante.
     """
     try:
         payment = await payment_service.rechazar_pago(

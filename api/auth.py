@@ -20,12 +20,27 @@ from typing import Union
 router = APIRouter()
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post(
+    "/login",
+    response_model=TokenResponse,
+    summary="Login Admin",
+    responses={
+        200: {"description": "Login exitoso, retorna JWT token"},
+        401: {"description": "Credenciales incorrectas"},
+        403: {"description": "Usuario inactivo"}
+    }
+)
 async def login_user(login_data: LoginRequest) -> Any:
     """
-    Login para usuarios administrativos (User model)
+    Login para administradores
     
-    Autentica con username y password, devuelve JWT token
+    **Acceso público** (no requiere autenticación)
+    
+    **Credenciales:**
+    - `username`: Username del admin
+    - `password`: Contraseña
+    
+    **Retorna:** JWT Token de acceso
     """
     # Buscar usuario por username
     user = await User.find_one(User.username == login_data.username)
@@ -74,12 +89,27 @@ async def login_user(login_data: LoginRequest) -> Any:
     )
 
 
-@router.post("/login/student", response_model=TokenResponse)
+@router.post(
+    "/login/student",
+    response_model=TokenResponse,
+    summary="Login Estudiante",
+    responses={
+        200: {"description": "Login exitoso, retorna JWT token"},
+        401: {"description": "Credenciales incorrectas"},
+        403: {"description": "Estudiante inactivo"}
+    }
+)
 async def login_student(login_data: LoginRequest) -> Any:
     """
-    Login para estudiantes (Student model)
+    Login para estudiantes
     
-    Autentica con registro (username) y password, devuelve JWT token
+    **Acceso público** (no requiere autenticación)
+    
+    **Credenciales:**
+    - `username`: Número de registro del estudiante
+    - `password`: Contraseña (inicialmente = carnet)
+    
+    **Retorna:** JWT Token de acceso
     """
     # Buscar estudiante por registro
     student = await Student.find_one(Student.registro == login_data.username)
@@ -124,14 +154,24 @@ async def login_student(login_data: LoginRequest) -> Any:
     )
 
 
-@router.get("/me", response_model=CurrentUserResponse)
+@router.get(
+    "/me",
+    response_model=CurrentUserResponse,
+    summary="Ver Mi Perfil",
+    responses={
+        200: {"description": "Información del usuario autenticado"},
+        401: {"description": "No autenticado - Token inválido o expirado"}
+    }
+)
 async def get_me(
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
     """
-    Obtener información del usuario actual
+    Ver información del usuario autenticado
     
-    Requiere autenticación
+    **Requiere:** Token JWT válido
+    
+    **Retorna:** Datos del usuario actual (Admin o Estudiante)
     """
     if isinstance(current_user, User):
         return CurrentUserResponse(

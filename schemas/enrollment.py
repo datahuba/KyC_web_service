@@ -115,6 +115,9 @@ class EnrollmentResponse(BaseModel):
     fecha_inscripcion: datetime
     estado: EstadoInscripcion
     
+    # Nota Final
+    nota_final: Optional[float] = None
+    
     # Información de Siguiente Pago (Calculado)
     siguiente_pago: Optional[dict] = Field(
         None,
@@ -150,6 +153,7 @@ class EnrollmentResponse(BaseModel):
                 "saldo_pendiente": 1565.0,
                 "fecha_inscripcion": "2024-12-11T10:00:00",
                 "estado": "activo",
+                "nota_final": 85.5,
                 "siguiente_pago": {
                     "concepto": "Cuota 3",
                     "numero_cuota": 3,
@@ -194,11 +198,19 @@ class EnrollmentUpdate(BaseModel):
         description="Cambiar estado de la inscripción"
     )
     
+    nota_final: Optional[float] = Field(
+        None,
+        ge=0,
+        le=100,
+        description="Nota final del estudiante (0-100)"
+    )
+    
     class Config:
         json_schema_extra = {
             "example": {
                 "descuento_personalizado": 10.0,
-                "estado": "activo"
+                "estado": "activo",
+                "nota_final": 85.5
             }
         }
 
