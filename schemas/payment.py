@@ -59,7 +59,11 @@ class PaymentCreate(BaseModel):
         gt=0,
         description="Monto del pago (Opcional, se calcula automáticamente)"
     )
-    
+    descuento_aplicado: Optional[float] = Field(
+        None,
+        ge=0,
+        description="Descuento aplicado en este pago (si corresponde)"
+    )
     comprobante_url: str = Field(
         ...,
         description="URL del comprobante/voucher (PDF en Cloudinary)"
