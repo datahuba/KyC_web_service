@@ -33,8 +33,9 @@ async def create_payment(
     Proceso:
     1. Validar que la inscripción existe
     2. Validar que el estudiante sea dueño de la inscripción
-    3. Obtener datos de enrollment para llenar referencias
-    4. Crear pago con estado PENDIENTE
+    3. Determinar concepto/cuota a pagar (usa siguiente_pago como default)
+    4. Validar que NO exista un pago duplicado (PENDIENTE o APROBADO)
+    5. Crear pago con estado PENDIENTE
     
     Args:
         payment_in: Datos del pago
@@ -46,6 +47,7 @@ async def create_payment(
     Raises:
         ValueError: Si la inscripción no existe
         ValueError: Si el estudiante no es dueño de la inscripción
+        ValueError: Si ya existe un pago para ese concepto/cuota
     """
     
     # 1. Obtener inscripción
@@ -59,23 +61,36 @@ async def create_payment(
             "No puedes crear un pago para una inscripción que no te pertenece"
         )
     
-    # 3. Calcular detalles del pago automáticamente (Single Source of Truth)
+    # 3. Determinar concepto y cuota a pagar
+    # Por ahora, siempre usamos siguiente_pago (puede extenderse para permitir selección)
     siguiente = enrollment.siguiente_pago
     
     if siguiente["monto_sugerido"] <= 0:
         raise ValueError("Esta inscripción ya está completamente pagada")
         
-    # Forzamos los valores calculados por el sistema
     concepto_final = siguiente["concepto"]
     numero_cuota_final = siguiente["numero_cuota"] if siguiente["numero_cuota"] > 0 else None
     cantidad_final = siguiente["monto_sugerido"]
     
-    # Si el usuario envió una cantidad diferente, podríamos lanzar error,
-    # pero para cumplir "no tiene opción de poner cantidad distinta",
-    # simplemente ignoramos su input y usamos el calculado.
-    # El admin verificará si el comprobante coincide con este monto.
+    # ✅ 4. VALIDACIÓN ANTI-DUPLICADOS
+    # Verificar que NO exista un pago PENDIENTE o APROBADO para este concepto/cuota
+    existing_payment = await Payment.find_one(
+        Payment.inscripcion_id == payment_in.inscripcion_id,
+        Payment.concepto == concepto_final,
+        Payment.numero_cuota == numero_cuota_final,
+        Payment.estado_pago.in_([EstadoPago.PENDIENTE, EstadoPago.APROBADO])
+    )
+    
+    if existing_payment:
+        estado_texto = "pendiente" if existing_payment.estado_pago == EstadoPago.PENDIENTE else "aprobado"
+        cuota_texto = f" (Cuota {numero_cuota_final})" if numero_cuota_final else ""
+        raise ValueError(
+            f"Ya existe un pago {estado_texto} para {concepto_final}{cuota_texto}. "
+            f"No puedes crear un pago duplicado. "
+            f"Si necesitas corregirlo, contacta al administrador para que rechace el pago actual."
+        )
 
-    # 4. Crear pago
+    # 5. Crear pago
     payment = Payment(
         inscripcion_id=payment_in.inscripcion_id,
         estudiante_id=enrollment.estudiante_id,
@@ -220,11 +235,29 @@ async def aprobar_pago(
             f"No se puede aprobar un pago que está en estado {payment.estado_pago}"
         )
     
-    # 3. Aprobar pago
+    # ✅ 3. VALIDACIÓN ANTI-DUPLICADOS
+    # Verificar que NO exista otro pago APROBADO para el mismo concepto/cuota
+    existing_approved = await Payment.find_one(
+        Payment.id != payment_id,  # Excluir el pago actual
+        Payment.inscripcion_id == payment.inscripcion_id,
+        Payment.concepto == payment.concepto,
+        Payment.numero_cuota == payment.numero_cuota,
+        Payment.estado_pago == EstadoPago.APROBADO
+    )
+    
+    if existing_approved:
+        cuota_texto = f" (Cuota {payment.numero_cuota})" if payment.numero_cuota else ""
+        raise ValueError(
+            f"No se puede aprobar: ya existe un pago aprobado para {payment.concepto}{cuota_texto}. "
+            f"Pago aprobado existente: {existing_approved.id}. "
+            f"Este pago parece ser un duplicado. Considera rechazarlo en su lugar."
+        )
+    
+    # 4. Aprobar pago
     payment.aprobar_pago(admin_username)
     await payment.save()
     
-    # 4. Actualizar enrollment
+    # 5. Actualizar enrollment
     await enrollment_service.actualizar_saldo_enrollment(
         enrollment_id=payment.inscripcion_id,
         monto_pago_aprobado=payment.cantidad_pago
