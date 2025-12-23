@@ -51,7 +51,6 @@ async def create_payment(
     file: UploadFile = File(..., description="Comprobante de pago (imagen JPG/PNG/WEBP o PDF)"),
     inscripcion_id: str = Form(..., description="ID de la inscripción"),
     numero_transaccion: str = Form(..., description="Número de transacción bancaria"),
-    descuento_aplicado: Optional[float] = Form(None, description="Descuento adicional (opcional)"),
     current_user: Student = Depends(get_current_user)
 ) -> Any:
     """
@@ -65,11 +64,10 @@ async def create_payment(
     - `numero_transaccion`: Número de transacción del banco
     
     **El sistema automáticamente:**
-    - ✅ Calcula el monto exacto a pagar (matrícula o cuota)
-    - ✅ Determina el concepto ("Matrícula", "Cuota 1", etc.)
-    - ✅ Valida que sea tu inscripción
-    - ✅ Sube comprobante a Cloudinary
-    - ✅ Crea pago en estado PENDIENTE
+    - ✅ **Detecta qué te falta pagar** (Matrícula -> Cuota 1 -> Cuota 2...)
+    - ✅ **Revisa "huecos"**: Si te rechazaron la matrícula, te sugerirá pagarla de nuevo
+    - ✅ **Permite múltiples pagos**: Puedes pagar Cuota 1 y Cuota 2 seguidas (quedan pendientes)
+    - ✅ **Previene duplicados**: Si ya tienes un pago PENDIENTE para Cuota 1, no te deja crear otro igual
     
     **El admin debe aprobar** el pago para que se actualicen los totales.
     
@@ -117,8 +115,7 @@ async def create_payment(
         payment_in = PaymentCreate(
             inscripcion_id=inscripcion_id,
             numero_transaccion=numero_transaccion,
-            comprobante_url=comprobante_url,
-            descuento_aplicado=descuento_aplicado
+            comprobante_url=comprobante_url
         )
         
         # Crear pago usando el servicio
@@ -127,7 +124,8 @@ async def create_payment(
             student_id=current_user.id
         )
         
-        return payment
+        # Enriquecer respuesta con datos legibles
+        return await payment_service.enrich_payment_with_details(payment)
         
     except HTTPException:
         raise
@@ -261,7 +259,7 @@ async def get_payment(
                 detail="No tienes permiso para ver este pago"
             )
     
-    return payment
+    return await payment_service.enrich_payment_with_details(payment)
 
 
 @router.put(
@@ -298,7 +296,7 @@ async def aprobar_pago(
             payment_id=id,
             admin_username=current_user.username
         )
-        return payment
+        return await payment_service.enrich_payment_with_details(payment)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -339,7 +337,7 @@ async def rechazar_pago(
             admin_username=current_user.username,
             motivo=rejection.motivo
         )
-        return payment
+        return await payment_service.enrich_payment_with_details(payment)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -372,7 +370,13 @@ async def get_payments_by_enrollment(
             )
     
     payments = await payment_service.get_payments_by_enrollment(enrollment_id)
-    return payments
+    
+    # Enriquecer lista
+    enriched = []
+    for p in payments:
+        enriched.append(await payment_service.enrich_payment_with_details(p))
+        
+    return enriched
 
 
 @router.get("/enrollment/{enrollment_id}/resumen")
@@ -429,7 +433,13 @@ async def get_payments_pendientes(
     - Procesamiento batch de aprobaciones
     """
     payments = await payment_service.get_payments_pendientes()
-    return payments
+    
+    # Enriquecer lista
+    enriched = []
+    for p in payments:
+        enriched.append(await payment_service.enrich_payment_with_details(p))
+        
+    return enriched
 
 
 @router.get(

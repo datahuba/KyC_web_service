@@ -112,34 +112,59 @@ async def create_payment(
             "No puedes crear un pago para una inscripción que no te pertenece"
         )
     
-    # 3. Determinar concepto y cuota a pagar
-    # Por ahora, siempre usamos siguiente_pago (puede extenderse para permitir selección)
-    siguiente = enrollment.siguiente_pago
+    # 3. Determinar concepto y cuota a pagar (ESTRATEGIA CHECKLIST)
+    # Verificamos qué conceptos están cubiertos por pagos activos (PENDIENTE o APROBADO)
+    # y sugerimos el primero que falte.
     
-    if siguiente["monto_sugerido"] <= 0:
-        raise ValueError("Esta inscripción ya está completamente pagada")
-        
-    concepto_final = siguiente["concepto"]
-    numero_cuota_final = siguiente["numero_cuota"] if siguiente["numero_cuota"] > 0 else None
-    cantidad_final = siguiente["monto_sugerido"]
-    
-    # ✅ 4. VALIDACIÓN ANTI-DUPLICADOS
-    # Verificar que NO exista un pago PENDIENTE o APROBADO para este concepto/cuota
-    existing_payment = await Payment.find_one(
+    # Obtener todos los pagos activos de esta inscripción
+    from beanie.operators import Or
+    pagos_activos = await Payment.find(
         Payment.inscripcion_id == payment_in.inscripcion_id,
-        Payment.concepto == concepto_final,
-        Payment.numero_cuota == numero_cuota_final,
-        Payment.estado_pago.in_([EstadoPago.PENDIENTE, EstadoPago.APROBADO])
-    )
-    
-    if existing_payment:
-        estado_texto = "pendiente" if existing_payment.estado_pago == EstadoPago.PENDIENTE else "aprobado"
-        cuota_texto = f" (Cuota {numero_cuota_final})" if numero_cuota_final else ""
-        raise ValueError(
-            f"Ya existe un pago {estado_texto} para {concepto_final}{cuota_texto}. "
-            f"No puedes crear un pago duplicado. "
-            f"Si necesitas corregirlo, contacta al administrador para que rechace el pago actual."
+        Or(
+            Payment.estado_pago == EstadoPago.PENDIENTE,
+            Payment.estado_pago == EstadoPago.APROBADO
         )
+    ).to_list()
+    
+    # Crear set de conceptos cubiertos para búsqueda rápida
+    # Formato: (concepto_str, numero_cuota_int_or_none)
+    conceptos_cubiertos = {
+        (p.concepto, p.numero_cuota) for p in pagos_activos
+    }
+    
+    concepto_final = None
+    numero_cuota_final = None
+    cantidad_final = 0.0
+    
+    # 3.1 Verificar Matrícula
+    if enrollment.costo_matricula > 0:
+        # La matrícula suele tener concepto="Matrícula" y numero_cuota=None
+        if ("Matrícula", None) not in conceptos_cubiertos:
+            concepto_final = "Matrícula"
+            numero_cuota_final = None
+            cantidad_final = enrollment.costo_matricula
+    
+    # 3.2 Verificar Cuotas (si no se asignó matrícula)
+    if not concepto_final and enrollment.cantidad_cuotas > 0:
+        monto_cuota = enrollment.calcular_monto_cuota()
+        
+        for i in range(1, enrollment.cantidad_cuotas + 1):
+            if (f"Cuota {i}", i) not in conceptos_cubiertos:
+                concepto_final = f"Cuota {i}"
+                numero_cuota_final = i
+                cantidad_final = monto_cuota
+                
+                # Caso especial: última cuota (ajuste de saldo)
+                # Opcional: Calcular saldo exacto si es la última para evitar centavos sueltos
+                # Por ahora usamos el monto estándar calculado
+                break
+    
+    # 3.3 Si nada falta
+    if not concepto_final:
+        raise ValueError("Esta inscripción ya tiene todos los pagos (Matrícula y Cuotas) en proceso o aprobados.")
+
+    # 4. Validar Anti-Duplicados (Redundante con lógica arriba, pero seguridad extra)
+    # Ya sabemos que NO está en 'conceptos_cubiertos', así que no es duplicado.
 
     # 5. Crear pago
     payment = Payment(
@@ -150,7 +175,6 @@ async def create_payment(
         numero_cuota=numero_cuota_final,
         numero_transaccion=payment_in.numero_transaccion,
         cantidad_pago=cantidad_final,
-        descuento_aplicado=payment_in.descuento_aplicado,
         comprobante_url=payment_in.comprobante_url,
         estado_pago=EstadoPago.PENDIENTE
     )
