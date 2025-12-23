@@ -120,6 +120,11 @@ class PaymentResponse(BaseModel):
         description="Concepto del pago (Matrícula, Cuota 1, etc.)"
     )
     
+    total_cuotas: Optional[int] = Field(
+        None,
+        description="Total de cuotas del curso (ej: 12)"
+    )
+    
     numero_transaccion: str = Field(
         ...,
         description="Número de transacción bancaria"
@@ -130,10 +135,7 @@ class PaymentResponse(BaseModel):
         description="Estado del pago (pendiente/aprobado/rechazado)"
     )
     
-    total_cuotas: Optional[int] = Field(
-        None,
-        description="Total de cuotas del curso (ej: 12)"
-    )
+
     
     # ========================================================================
     # CAMPOS TÉCNICOS ADICIONALES
