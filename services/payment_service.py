@@ -43,31 +43,31 @@ async def enrich_payment_with_details(payment: Payment) -> dict:
     student = await Student.get(payment.estudiante_id)
     nombre_estudiante = student.nombre if student and student.nombre else "Sin nombre"
     
-    # 2. Formatear fecha
-    fecha = payment.fecha_subida.strftime("%Y-%m-%d %H:%M:%S") if payment.fecha_subida else ""
+    # 2. Formatear fecha (Hora Boliviana UTC-4)
+    from datetime import timedelta
+    fecha = ""
+    if payment.fecha_subida:
+        fecha_bolivia = payment.fecha_subida - timedelta(hours=4)
+        fecha = fecha_bolivia.strftime("%Y-%m-%d %H:%M:%S")
     
-    # 3. Calcular progreso (cuotas pagadas / cuotas totales)
-    progreso = ""
+    # 3. Calcular total de cuotas
+    total_cuotas = 0
     try:
         enrollment = await enrollment_service.get_enrollment(payment.inscripcion_id)
-        if enrollment and enrollment.cuotas_pagadas_info:
-            cuotas_pagadas = enrollment.cuotas_pagadas_info.get("cuotas_pagadas", 0)
-            cuotas_totales = enrollment.cuotas_pagadas_info.get("cuotas_totales", 0)
-            progreso = f"{cuotas_pagadas}/{cuotas_totales}"
-        elif enrollment:
-            progreso = f"0/{enrollment.cantidad_cuotas}"
+        if enrollment:
+            total_cuotas = enrollment.cantidad_cuotas
     except:
-        progreso = ""
+        total_cuotas = 0
     
     # 4. Agregar campos enriquecidos
     payment_dict.update({
-        # Datos legibles (mismos que reporte Excel)
+        # Dados legibles (mismos que reporte Excel)
         "nombre_estudiante": nombre_estudiante,
         "fecha": fecha,
         "moneda": "Bs",
         "monto": payment.cantidad_pago,
         "estado": payment.estado_pago.value if payment.estado_pago else "",
-        "progreso": progreso,
+        "total_cuotas": total_cuotas
     })
     
     return payment_dict

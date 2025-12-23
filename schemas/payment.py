@@ -130,9 +130,9 @@ class PaymentResponse(BaseModel):
         description="Estado del pago (pendiente/aprobado/rechazado)"
     )
     
-    progreso: Optional[str] = Field(
+    total_cuotas: Optional[int] = Field(
         None,
-        description="Progreso de pagos del enrollment (ej: 3/12)"
+        description="Total de cuotas del curso (ej: 12)"
     )
     
     # ========================================================================
@@ -252,11 +252,6 @@ class PaymentRejection(BaseModel):
     
     Uso: PUT /payments/{id}/rechazar
     """
-    
-    admin_username: str = Field(
-        ...,
-        description="Username del admin que rechaza"
-    )
     
     motivo: str = Field(
         ...,

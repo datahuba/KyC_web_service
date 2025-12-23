@@ -477,7 +477,7 @@ async def generar_reporte_excel_pagos(
     
     **Retorna:** Archivo Excel para descargar
     """
-    from datetime import datetime, date
+    from datetime import datetime, date, timedelta
     from fastapi.responses import StreamingResponse
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment, PatternFill
@@ -507,8 +507,8 @@ async def generar_reporte_excel_pagos(
     ws = wb.active
     ws.title = "Reporte de Pagos"
     
-    # Encabezados
-    headers = ["Nombre del Estudiante", "Fecha", "Moneda", "Monto", "Concepto", "Nº de Transacción", "Estado", "Progreso"]
+    # Encabezados (Nuevo orden solicitado)
+    headers = ["Nombre del Estudiante", "Fecha", "Moneda", "Monto", "Concepto", "Total Cuotas", "Nº de Transacción", "Estado", "Descripción"]
     ws.append(headers)
     
     # Estilo de encabezados
@@ -520,43 +520,48 @@ async def generar_reporte_excel_pagos(
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center")
     
+    # Activar filtros en los encabezados
+    ws.auto_filter.ref = ws.dimensions
+    
     # Llenar datos
     for payment in payments:
         # Obtener estudiante
         student = await Student.get(payment.estudiante_id)
         nombre_estudiante = student.nombre if student and student.nombre else "Sin nombre"
         
-        # Obtener enrollment con servicio (ya incluye cuotas_pagadas_info calculado)
-        from services import enrollment_service
+        # Obtener enrollment para sacar el Total de Cuotas
+        total_cuotas = 0
         try:
-            enrollment = await enrollment_service.get_enrollment(payment.inscripcion_id)
-            # Usar el campo ya calculado
-            progreso = ""
-            if enrollment and enrollment.cuotas_pagadas_info:
-                cuotas_pagadas = enrollment.cuotas_pagadas_info.get("cuotas_pagadas", 0)
-                cuotas_totales = enrollment.cuotas_pagadas_info.get("cuotas_totales", 0)
-                progreso = f"{cuotas_pagadas}/{cuotas_totales}"
-            elif enrollment:
-                # Fallback si no hay info calculada
-                progreso = f"0/{enrollment.cantidad_cuotas}"
+            # Optimizacion: Usar proyección para solo traer cantidad_cuotas si es posible,
+            # pero Enrollment.get() trae todo.
+            enrollment = await Enrollment.get(payment.inscripcion_id)
+            if enrollment:
+                total_cuotas = enrollment.cantidad_cuotas
         except:
-            progreso = ""
+            pass
         
         # Preparar fila
+        # Ajustar fecha a hora boliviana (UTC-4)
+        fecha_bolivia = ""
+        if payment.fecha_subida:
+            fecha_bolivia_dt = payment.fecha_subida - timedelta(hours=4)
+            fecha_bolivia = fecha_bolivia_dt.strftime("%Y-%m-%d %H:%M:%S")
+
         row = [
             nombre_estudiante,
-            payment.fecha_subida.strftime("%Y-%m-%d %H:%M:%S") if payment.fecha_subida else "",
-            "Bs",  # Moneda bolivianos
+            fecha_bolivia,
+            "Bs",  # Moneda
             payment.cantidad_pago,
             payment.concepto or "",
+            total_cuotas,
             payment.numero_transaccion or "",
             payment.estado_pago.value if payment.estado_pago else "",
-            progreso
+            "" # Descripción vacía
         ]
         ws.append(row)
     
     # Ajustar ancho de columnas
-    column_widths = [30, 20, 10, 12, 20, 25, 15, 12]
+    column_widths = [30, 20, 10, 15, 20, 15, 25, 15, 30]
     for i, width in enumerate(column_widths, 1):
         ws.column_dimensions[chr(64 + i)].width = width
     
