@@ -74,6 +74,66 @@ async def enrich_payment_with_details(payment: Payment) -> dict:
 
 
 
+
+async def get_next_pending_payment(enrollment_id: PydanticObjectId) -> dict:
+    """
+    Calcula cual es el SIGUIENTE pago que le corresponde hacer al estudiante
+    basado en la estrategia 'Checklist' (llenar huecos vacíos).
+    
+    Returns:
+        dict: {
+            "concepto": str,
+            "numero_cuota": int|None,
+            "monto_sugerido": float
+        }
+        o None si ya pagó todo.
+    """
+    enrollment = await enrollment_service.get_enrollment(enrollment_id)
+    if not enrollment:
+        raise ValueError("Inscripción no encontrada")
+
+    # Obtener todos los pagos activos de esta inscripción
+    from beanie.operators import Or
+    pagos_activos = await Payment.find(
+        Payment.inscripcion_id == enrollment_id,
+        Or(
+            Payment.estado_pago == EstadoPago.PENDIENTE,
+            Payment.estado_pago == EstadoPago.APROBADO
+        )
+    ).to_list()
+    
+    # Crear set de conceptos cubiertos para búsqueda rápida
+    conceptos_cubiertos = {
+        (p.concepto, p.numero_cuota) for p in pagos_activos
+    }
+    
+    concepto_final = None
+    numero_cuota_final = None
+    cantidad_final = 0.0
+    
+    # 1. Verificar Matrícula
+    if enrollment.costo_matricula > 0:
+        if ("Matrícula", None) not in conceptos_cubiertos:
+            return {
+                "concepto": "Matrícula",
+                "numero_cuota": None,
+                "monto_sugerido": enrollment.costo_matricula
+            }
+    
+    # 2. Verificar Cuotas
+    if enrollment.cantidad_cuotas > 0:
+        monto_cuota = enrollment.calcular_monto_cuota()
+        
+        for i in range(1, enrollment.cantidad_cuotas + 1):
+            if (f"Cuota {i}", i) not in conceptos_cubiertos:
+                return {
+                    "concepto": f"Cuota {i}",
+                    "numero_cuota": i,
+                    "monto_sugerido": monto_cuota
+                }
+                
+    return None
+
 async def create_payment(
     payment_in: PaymentCreate,
     student_id: PydanticObjectId
@@ -84,21 +144,8 @@ async def create_payment(
     Proceso:
     1. Validar que la inscripción existe
     2. Validar que el estudiante sea dueño de la inscripción
-    3. Determinar concepto/cuota a pagar (usa siguiente_pago como default)
-    4. Validar que NO exista un pago duplicado (PENDIENTE o APROBADO)
-    5. Crear pago con estado PENDIENTE
-    
-    Args:
-        payment_in: Datos del pago
-        student_id: ID del estudiante que crea el pago
-    
-    Returns:
-        Pago creado
-    
-    Raises:
-        ValueError: Si la inscripción no existe
-        ValueError: Si el estudiante no es dueño de la inscripción
-        ValueError: Si ya existe un pago para ese concepto/cuota
+    3. Determinar concepto/cuota a pagar (usa get_next_pending_payment)
+    4. Crear pago con estado PENDIENTE
     """
     
     # 1. Obtener inscripción
@@ -112,75 +159,28 @@ async def create_payment(
             "No puedes crear un pago para una inscripción que no te pertenece"
         )
     
-    # 3. Determinar concepto y cuota a pagar (ESTRATEGIA CHECKLIST)
-    # Verificamos qué conceptos están cubiertos por pagos activos (PENDIENTE o APROBADO)
-    # y sugerimos el primero que falte.
+    # 3. Determinar concepto y cuota a pagar (ESTRATEGIA CHECKLIST REUTILIZADA)
+    next_payment = await get_next_pending_payment(payment_in.inscripcion_id)
     
-    # Obtener todos los pagos activos de esta inscripción
-    from beanie.operators import Or
-    pagos_activos = await Payment.find(
-        Payment.inscripcion_id == payment_in.inscripcion_id,
-        Or(
-            Payment.estado_pago == EstadoPago.PENDIENTE,
-            Payment.estado_pago == EstadoPago.APROBADO
-        )
-    ).to_list()
-    
-    # Crear set de conceptos cubiertos para búsqueda rápida
-    # Formato: (concepto_str, numero_cuota_int_or_none)
-    conceptos_cubiertos = {
-        (p.concepto, p.numero_cuota) for p in pagos_activos
-    }
-    
-    concepto_final = None
-    numero_cuota_final = None
-    cantidad_final = 0.0
-    
-    # 3.1 Verificar Matrícula
-    if enrollment.costo_matricula > 0:
-        # La matrícula suele tener concepto="Matrícula" y numero_cuota=None
-        if ("Matrícula", None) not in conceptos_cubiertos:
-            concepto_final = "Matrícula"
-            numero_cuota_final = None
-            cantidad_final = enrollment.costo_matricula
-    
-    # 3.2 Verificar Cuotas (si no se asignó matrícula)
-    if not concepto_final and enrollment.cantidad_cuotas > 0:
-        monto_cuota = enrollment.calcular_monto_cuota()
-        
-        for i in range(1, enrollment.cantidad_cuotas + 1):
-            if (f"Cuota {i}", i) not in conceptos_cubiertos:
-                concepto_final = f"Cuota {i}"
-                numero_cuota_final = i
-                cantidad_final = monto_cuota
-                
-                # Caso especial: última cuota (ajuste de saldo)
-                # Opcional: Calcular saldo exacto si es la última para evitar centavos sueltos
-                # Por ahora usamos el monto estándar calculado
-                break
-    
-    # 3.3 Si nada falta
-    if not concepto_final:
-        raise ValueError("Esta inscripción ya tiene todos los pagos (Matrícula y Cuotas) en proceso o aprobados.")
+    if not next_payment:
+         raise ValueError("Esta inscripción ya tiene todos los pagos (Matrícula y Cuotas) en proceso o aprobados.")
 
-    # 4. Validar Anti-Duplicados (Redundante con lógica arriba, pero seguridad extra)
-    # Ya sabemos que NO está en 'conceptos_cubiertos', así que no es duplicado.
-
-    # 5. Crear pago
+    # 4. Crear pago
     payment = Payment(
         inscripcion_id=payment_in.inscripcion_id,
         estudiante_id=enrollment.estudiante_id,
         curso_id=enrollment.curso_id,
-        concepto=concepto_final,
-        numero_cuota=numero_cuota_final,
+        concepto=next_payment["concepto"],
+        numero_cuota=next_payment["numero_cuota"],
         numero_transaccion=payment_in.numero_transaccion,
-        cantidad_pago=cantidad_final,
+        cantidad_pago=next_payment["monto_sugerido"],
         comprobante_url=payment_in.comprobante_url,
         estado_pago=EstadoPago.PENDIENTE
     )
     
     await payment.insert()
     return payment
+
 
 
 async def get_payment(id: PydanticObjectId) -> Optional[Payment]:

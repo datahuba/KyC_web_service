@@ -135,7 +135,10 @@ class PaymentResponse(BaseModel):
         description="Estado del pago (pendiente/aprobado/rechazado)"
     )
     
-
+    comprobante_url: str = Field(
+        ...,
+        description="URL del comprobante/voucher (PDF en Cloudinary)"
+    )
     
     # ========================================================================
     # CAMPOS TÉCNICOS ADICIONALES
@@ -152,7 +155,7 @@ class PaymentResponse(BaseModel):
     )
     
     # Comprobante y estado
-    comprobante_url: str
+    
     estado_pago: EstadoPago
     
     # Auditoría

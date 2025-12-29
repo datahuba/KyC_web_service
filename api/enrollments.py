@@ -28,7 +28,7 @@ from schemas.enrollment import (
     EnrollmentUpdate,
     EnrollmentWithDetails
 )
-from services import enrollment_service
+from services import enrollment_service, payment_service
 from beanie import PydanticObjectId
 from api.dependencies import require_admin, get_current_user
 
@@ -352,6 +352,57 @@ async def get_enrollments_by_course(
     """
     enrollments = await enrollment_service.get_enrollments_by_course(course_id)
     return enrollments
+
+
+
+@router.get(
+    "/{id}/next-payment",
+    summary="Ver Siguiente Pago Pendiente",
+    responses={
+        200: {
+            "description": "Detalles del siguiente pago a realizar",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "concepto": "Cuota 2",
+                        "numero_cuota": 2,
+                        "monto_sugerido": 500.0
+                    }
+                }
+            }
+        },
+        204: {"description": "No hay pagos pendientes (todo pagado)"},
+        404: {"description": "Inscripción no encontrada"},
+        403: {"description": "Sin permisos"}
+    }
+)
+async def get_next_payment_info(
+    *,
+    id: PydanticObjectId,
+    current_user: User | Student = Depends(get_current_user)
+) -> Any:
+    """
+    Obtiene la información sugerida para el próximo pago.
+    
+    **Utilidad para Frontend:**
+    - Llama a este endpoint antes de abrir el formulario de pago.
+    - Pre-llena los campos "Concepto" y "Monto".
+    - Si devuelve null/204, muestra "Felicidades, estás al día".
+    """
+    enrollment = await Enrollment.get(id)
+    if not enrollment:
+        raise HTTPException(404, "Enrollment no encontrado")
+    
+    if isinstance(current_user, Student):
+        if enrollment.estudiante_id != current_user.id:
+            raise HTTPException(403, "No es tu enrollment")
+            
+    next_payment = await payment_service.get_next_pending_payment(id)
+    
+    if not next_payment:
+        return None # Devuelve null en JSON, frontend interpreta como "todo pagado"
+        
+    return next_payment
 
 
 # ========================================================================
