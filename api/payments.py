@@ -496,11 +496,11 @@ async def generar_reporte_excel_pagos(
     except:
         raise HTTPException(status_code=400, detail="Formato de fecha inválido. Usar YYYY-MM-DD")
     
-    # Obtener pagos del rango de fechas
+    # Obtener pagos del rango de fechas (ordenados por más reciente primero)
     payments = await Payment.find(
         Payment.fecha_subida >= fecha_desde_dt,
         Payment.fecha_subida <= fecha_hasta_dt
-    ).sort("+fecha_subida").to_list()
+    ).sort("-fecha_subida").to_list()
     
     # Crear Excel
     wb = Workbook()

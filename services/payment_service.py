@@ -192,24 +192,24 @@ async def get_payment(id: PydanticObjectId) -> Optional[Payment]:
 
 
 async def get_payments_by_student(student_id: PydanticObjectId) -> List[Payment]:
-    """Obtener todos los pagos de un estudiante"""
+    """Obtener todos los pagos de un estudiante (ordenados por más reciente primero)"""
     return await Payment.find(
         Payment.estudiante_id == student_id
-    ).to_list()
+    ).sort("-fecha_subida").to_list()
 
 
 async def get_payments_by_enrollment(enrollment_id: PydanticObjectId) -> List[Payment]:
-    """Obtener todos los pagos de una inscripción"""
+    """Obtener todos los pagos de una inscripción (ordenados por más reciente primero)"""
     return await Payment.find(
         Payment.inscripcion_id == enrollment_id
-    ).to_list()
+    ).sort("-fecha_subida").to_list()
 
 
 async def get_payments_by_course(course_id: PydanticObjectId) -> List[Payment]:
-    """Obtener todos los pagos de un curso"""
+    """Obtener todos los pagos de un curso (ordenados por más reciente primero)"""
     return await Payment.find(
         Payment.curso_id == course_id
-    ).to_list()
+    ).sort("-fecha_subida").to_list()
 
 
 from beanie.operators import Or
@@ -261,7 +261,8 @@ async def get_all_payments(
     total_count = await query.count()
     skip = (page - 1) * per_page
     
-    payments = await query.skip(skip).limit(per_page).to_list()
+    # Ordenar por fecha descendente (más reciente primero)
+    payments = await query.sort("-fecha_subida").skip(skip).limit(per_page).to_list()
     return payments, total_count
 
 
