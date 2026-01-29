@@ -79,6 +79,28 @@ class Payment(MongoBaseModel):
         gt=0,
         description="Monto del pago en Bs"
     )
+
+    moneda: str = Field(default="Bs")  # Solo BOB
+
+    remitente: Optional[str] = Field(
+        None, 
+        description="Cuenta o nombre de quien envía el pago"
+    )
+
+    cuenta_destino: Optional[str] = Field(
+        None, 
+        description="Cuenta de destino del pago"
+    )
+
+    banco: Optional[str] = Field(
+        None, 
+        description="Banco desde donde se realiza el pago"
+    )
+
+    glosa: Optional[str] = Field(
+        None, 
+        description="Descripción adicional del pago"
+    )
     
     descuento_aplicado: Optional[float] = Field(
         None,
