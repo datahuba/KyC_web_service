@@ -4,8 +4,9 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Virtual environment
+# Virtual environments
 venv/
+.env
 
 # Logs
 *.log
@@ -14,5 +15,5 @@ venv/
 .vscode/
 .idea/
 
-.env
-
+# OS
+.DS_Store
