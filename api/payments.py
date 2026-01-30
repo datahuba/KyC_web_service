@@ -31,6 +31,7 @@ from schemas.payment import (
 from services import payment_service
 from beanie import PydanticObjectId
 from api.dependencies import require_admin, get_current_user
+from datetime import date
 
 router = APIRouter()
 
@@ -51,6 +52,15 @@ async def create_payment(
     file: UploadFile = File(..., description="Comprobante de pago (imagen JPG/PNG/WEBP o PDF)"),
     inscripcion_id: str = Form(..., description="ID de la inscripción"),
     numero_transaccion: str = Form(..., description="Número de transacción bancaria"),
+
+    # NUEVOS CAMPOS DEL COMPROBANTE
+    remitente: str = Form(..., description="Nombre del remitente que figura en el comprobante"),
+    fecha_comprobante: str = Form(..., description="Fecha del comprobante (YYYY-MM-DD)"),
+    monto: float = Form(..., gt=0, description="Monto pagado"),
+    banco: str = Form(..., description="Banco emisor"),
+    glosa: Optional[str] = Form(None, description="Glosa / descripción"),
+    cuenta_destino: str = Form(..., description="Cuenta destino"),
+
     current_user: Student = Depends(get_current_user)
 ) -> Any:
     """
@@ -111,11 +121,30 @@ async def create_payment(
                        f"Use imagen (JPG, PNG, WEBP) o PDF"
             )
         
+        from datetime import date
+
+        # Validar formato de fecha del comprobante (input)
+        try:
+            date.fromisoformat(fecha_comprobante)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="fecha_comprobante debe tener formato YYYY-MM-DD"
+            )
+        
         # Crear schema con los datos + URL generada
         payment_in = PaymentCreate(
             inscripcion_id=inscripcion_id,
             numero_transaccion=numero_transaccion,
-            comprobante_url=comprobante_url
+            comprobante_url=comprobante_url,
+
+            # metadata del comprobante
+            remitente=remitente,
+            fecha_comprobante=fecha_comprobante,
+            monto=monto,
+            banco=banco,
+            glosa=glosa,
+            cuenta_destino=cuenta_destino
         )
         
         # Crear pago usando el servicio

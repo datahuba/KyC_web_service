@@ -48,11 +48,50 @@ class PaymentCreate(BaseModel):
         ge=1,
         description="Número de cuota (Opcional, se calcula automáticamente)"
     )
+
+    # ============================================================
+    # DATOS DECLARADOS DEL COMPROBANTE (INPUT DEL ESTUDIANTE)
+    # ============================================================
+
+    remitente: str = Field(
+        ...,
+        description="Nombre del remitente que figura en el comprobante"
+    )
+
+    fecha_comprobante: str = Field(
+        ...,
+        description="Fecha que figura en el comprobante (YYYY-MM-DD)"
+    )
+
+    monto: float = Field(
+        ...,
+        gt=0,
+        description="Monto que figura en el comprobante"
+    )
+
+    banco: str = Field(
+        ...,
+        description="Banco emisor del comprobante"
+    )
+
+    glosa: Optional[str] = Field(
+        None,
+        description="Glosa o descripción del comprobante"
+    )
+
+    cuenta_destino: str = Field(
+        ...,
+        description="Cuenta destino del pago"
+    )
     
     numero_transaccion: str = Field(
         ...,
         description="Número de transacción bancaria del comprobante"
     )
+
+    # ============================================================
+    # DATOS INTERNOS DEL SISTEMA
+    # ============================================================
     
     cantidad_pago: Optional[float] = Field(
         None,

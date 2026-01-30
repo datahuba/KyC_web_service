@@ -173,9 +173,26 @@ async def create_payment(
         inscripcion_id=payment_in.inscripcion_id,
         estudiante_id=enrollment.estudiante_id,
         curso_id=enrollment.curso_id,
+
         concepto=next_payment["concepto"],
         numero_cuota=next_payment["numero_cuota"],
+        
+        # Identificación de la transacción
         numero_transaccion=payment_in.numero_transaccion,
+        
+        # ===============================
+        # DATOS DEL COMPROBANTE
+        # ===============================
+        remitente=payment_in.remitente,
+        fecha_comprobante=payment_in.fecha_comprobante,
+        monto_comprobante=payment_in.monto_comprobante,
+        banco=payment_in.banco,
+        glosa=payment_in.glosa,
+        cuenta_destino=payment_in.cuenta_destino,
+
+        # ===============================
+        # DATOS INTERNOS DEL SISTEMA
+        # ===============================
         cantidad_pago=next_payment["monto_sugerido"],
         comprobante_url=payment_in.comprobante_url,
         estado_pago=EstadoPago.PENDIENTE
