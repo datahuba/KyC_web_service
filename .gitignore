@@ -10,6 +10,12 @@ venv/
 # Logs
 *.log
 
+# Env
+.env
+.env.*
+!.env.example
+!.env.test
+
 # IDEs
 .vscode/
 .idea/
