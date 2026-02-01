@@ -99,6 +99,13 @@ class Payment(MongoBaseModel):
         default=EstadoPago.PENDIENTE,
         description="Estado: PENDIENTE, APROBADO, RECHAZADO"
     )
+
+    # Nuevos campos en el modelo
+    remitente: Optional[str] = None
+    banco: Optional[str] = None
+    monto_comprobante: Optional[float] = None
+    fecha_comprobante: Optional[datetime] = None # En el modelo es datetime
+    cuenta_destino: Optional[str] = None
     
     # ========================================================================
     # TIMESTAMPS Y AUDITORÍA

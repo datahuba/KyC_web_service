@@ -37,7 +37,38 @@ class PaymentCreate(BaseModel):
         ...,
         description="ID de la inscripción a la que pertenece este pago"
     )
+
+    numero_transaccion: str = Field(
+        ...,
+        description="Número de transacción bancaria del comprobante"
+    )
+
+    remitente: str = Field(
+        ...,
+        description="Nombre del remitente del comprobante"
+    )
+
+    banco: str = Field(
+        ...,
+        description="Nombre del banco del comprobante"
+    )
     
+    monto_comprobante: float = Field(
+        ...,
+        gt=0,
+        description="Monto del comprobante (en bolivianos)"
+    )
+    
+    fecha_comprobante: str = Field(
+        ...,
+        description="Fecha del comprobante (YYYY-MM-DD)"
+    )
+    
+    cuenta_destino: str = Field(
+        ...,
+        description="Número de cuenta destino del comprobante"
+    )
+
     concepto: Optional[str] = Field(
         None,
         description="Concepto del pago (Opcional, se calcula automáticamente)"
@@ -47,11 +78,6 @@ class PaymentCreate(BaseModel):
         None,
         ge=1,
         description="Número de cuota (Opcional, se calcula automáticamente)"
-    )
-    
-    numero_transaccion: str = Field(
-        ...,
-        description="Número de transacción bancaria del comprobante"
     )
     
     cantidad_pago: Optional[float] = Field(
@@ -129,6 +155,13 @@ class PaymentResponse(BaseModel):
         ...,
         description="Número de transacción bancaria"
     )
+
+    # NUEVOS CAMPOS: Los marcamos como Optional y con valor por defecto None
+    remitente: Optional[str] = None
+    banco: Optional[str] = None
+    monto_comprobante: Optional[float] = None
+    fecha_comprobante: Optional[datetime] = None
+    cuenta_destino: Optional[str] = None
     
     estado: str = Field(
         ...,

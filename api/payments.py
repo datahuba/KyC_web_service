@@ -51,6 +51,13 @@ async def create_payment(
     file: UploadFile = File(..., description="Comprobante de pago (imagen JPG/PNG/WEBP o PDF)"),
     inscripcion_id: str = Form(..., description="ID de la inscripción"),
     numero_transaccion: str = Form(..., description="Número de transacción bancaria"),
+    # --- NUEVOS CAMPOS DEL FORM ---
+    remitente: str = Form(...),
+    banco: str = Form(...),
+    monto_comprobante: float = Form(...),
+    fecha_comprobante: str = Form(...),
+    cuenta_destino: str = Form(...),
+
     current_user: Student = Depends(get_current_user)
 ) -> Any:
     """
@@ -115,6 +122,11 @@ async def create_payment(
         payment_in = PaymentCreate(
             inscripcion_id=inscripcion_id,
             numero_transaccion=numero_transaccion,
+            remitente=remitente,
+            banco=banco,
+            monto_comprobante=monto_comprobante,
+            fecha_comprobante=fecha_comprobante,
+            cuenta_destino=cuenta_destino,
             comprobante_url=comprobante_url
         )
         
