@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from api import students, courses, enrollments, payments, discounts, users, auth, payment_config
+from api import students, courses, enrollments, payments, discounts, users, auth, payment_config, classroom
 
 api_router = APIRouter()
 
@@ -11,4 +11,5 @@ api_router.include_router(payments.router, prefix="/payments", tags=["payments"]
 api_router.include_router(payment_config.router, prefix="/payment-config", tags=["payment-config"])
 api_router.include_router(discounts.router, prefix="/discounts", tags=["discounts"])
 api_router.include_router(users.router, prefix="/users", tags=["users"])
+api_router.include_router(classroom.router, prefix="/classroom", tags=["classroom"])
 
