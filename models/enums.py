@@ -301,11 +301,24 @@ class EstadoRequisito(str, Enum):
 class UserRole(str, Enum):
     """
     Roles de usuario para control de acceso (RBAC)
-    
+
     Valores:
     -------
     - ADMIN: crea estudiantes, cursos, descuentos, enrollments,
     - SUPERADMIN: crea todo lo anterior y usuarios de tipo admin """
     ADMIN = "admin"
     SUPERADMIN = "superadmin"
+
+
+class AssignmentType(str, Enum):
+    """Tipo de actividad evaluable en un classroom"""
+    TASK = "TASK"
+    EXAM = "EXAM"
+
+
+class SubmissionStatus(str, Enum):
+    """Estado de la entrega de un estudiante"""
+    PENDING = "pending"      # No ha entregado
+    SUBMITTED = "submitted"  # Entregó, pendiente de calificación
+    GRADED = "graded"        # Calificado por el docente
 

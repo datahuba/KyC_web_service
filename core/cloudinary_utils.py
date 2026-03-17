@@ -138,6 +138,91 @@ async def upload_image(
         )
 
 
+async def upload_document(
+    file: UploadFile,
+    folder: str,
+    public_id: Optional[str] = None
+) -> dict:
+    """
+    Sube un documento o imagen a Cloudinary.
+
+    Tipos permitidos: PDF, Word (.doc/.docx), PPT (.ppt/.pptx),
+                      Excel (.xls/.xlsx), imágenes (JPG, PNG, WEBP).
+    Tamaño máximo: 20 MB.
+
+    Returns:
+        dict con claves: url, public_id, resource_type, mime_type, size_bytes
+    """
+    ALLOWED: dict[str, str] = {
+        "application/pdf": "raw",
+        "application/msword": "raw",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "raw",
+        "application/vnd.ms-powerpoint": "raw",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": "raw",
+        "application/vnd.ms-excel": "raw",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "raw",
+        "image/jpeg": "image",
+        "image/png": "image",
+        "image/webp": "image",
+    }
+    MAX_SIZE = 20 * 1024 * 1024  # 20 MB
+
+    content_type = file.content_type or ""
+    if content_type not in ALLOWED:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Tipo de archivo no permitido: {content_type}. "
+                "Permitidos: PDF, Word, PPT, Excel, JPG, PNG, WEBP."
+            ),
+        )
+
+    file.file.seek(0, 2)
+    size_bytes = file.file.tell()
+    file.file.seek(0)
+
+    if size_bytes > MAX_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail="Archivo demasiado grande (máximo 20 MB).",
+        )
+
+    resource_type = ALLOWED[content_type]
+
+    try:
+        import asyncio
+
+        file_content = await file.read()
+        loop = asyncio.get_event_loop()
+
+        result = await loop.run_in_executor(
+            None,
+            lambda: cloudinary.uploader.upload(
+                file_content,
+                folder=folder,
+                public_id=public_id,
+                resource_type=resource_type,
+                overwrite=True,
+            ),
+        )
+
+        return {
+            "url": result["secure_url"],
+            "public_id": result["public_id"],
+            "resource_type": resource_type,
+            "mime_type": content_type,
+            "size_bytes": size_bytes,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al subir archivo a Cloudinary: {str(e)}",
+        )
+
+
 async def delete_file(public_id: str, resource_type: str = "raw") -> bool:
     """
     Eliminar un archivo de Cloudinary

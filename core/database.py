@@ -17,18 +17,22 @@ from models.enrollment import Enrollment
 from models.payment import Payment
 from models.payment_config import PaymentConfig
 from models.discount import Discount
+from models.classroom import Classroom, ClassroomStudent
+from models.classroom_material import ClassroomMaterial
+from models.assignment import Assignment
+from models.submission import Submission
 
 async def init_db():
     """
     Inicializa la conexión a la base de datos y Beanie ODM.
-    
+
     Esta función debe ser llamada al inicio de la aplicación (startup event).
     """
     # Crear cliente de Motor
     client = motor.motor_asyncio.AsyncIOMotorClient(
         settings.MONGODB_URL
     )
-    
+
     # Inicializar Beanie con la base de datos y los modelos
     await init_beanie(
         database=client[settings.DATABASE_NAME],
@@ -40,6 +44,11 @@ async def init_db():
             Payment,
             PaymentConfig,
             Discount,
+            Classroom,
+            ClassroomStudent,
+            ClassroomMaterial,
+            Assignment,
+            Submission,
         ]
     )
     print(f"[OK] Conectado a MongoDB ({settings.DATABASE_NAME}) y Beanie inicializado.")
