@@ -80,14 +80,44 @@ async def get_my_classes(
     return [ClassroomResponse.from_doc(c) for c in classes]
 
 
+@router.get("/", response_model=List[ClassroomResponse], summary="Todas las Clases (Admin)")
+async def get_all_classrooms(
+    current_user: User = Depends(require_admin),
+) -> Any:
+    """
+    Obtiene TODAS las clases (solo para admins).
+    **Requiere:** Admin o SuperAdmin.
+    """
+    classes = await classroom_service.get_all_classrooms()
+    
+    # Build teacher_id to name map
+    teacher_ids = {c.teacher_user_id for c in classes if c.teacher_user_id}
+    teachers = await User.find({"_id": {"$in": list(teacher_ids)}}).to_list()
+    teacher_map = {str(t.id): t.username for t in teachers}
+    
+    results = []
+    for c in classes:
+        teacher_name = teacher_map.get(str(c.teacher_user_id), "") if c.teacher_user_id else ""
+        results.append(ClassroomResponse.from_doc(c, teacher_name=teacher_name))
+    return results
+
+
 @router.post("/", response_model=ClassroomResponse, status_code=201, summary="Crear Clase")
 async def create_classroom(
     data: ClassroomCreate,
     current_user: User = Depends(require_admin),
 ) -> Any:
-    """Crea un nuevo classroom. **Requiere:** Admin o SuperAdmin."""
-    classroom = await classroom_service.create_classroom(data, current_user.id)
-    return ClassroomResponse.from_doc(classroom, teacher_name=current_user.username)
+    """Crea un nuevo classroom. **Requiere:** Admin o SuperAdmin. El admin puede especificar el docente en teacher_user_id, o autenticarse como el docente."""
+    classroom = await classroom_service.create_classroom(data, default_teacher_id=current_user.id)
+    
+    # Get teacher name from the classroom's teacher_user_id or current_user
+    teacher_name = current_user.username
+    if classroom.teacher_user_id and classroom.teacher_user_id != current_user.id:
+        teacher = await User.get(classroom.teacher_user_id)
+        if teacher:
+            teacher_name = teacher.username
+    
+    return ClassroomResponse.from_doc(classroom, teacher_name=teacher_name)
 
 
 @router.get("/{classroom_id}", response_model=ClassroomResponse, summary="Detalle de Clase")

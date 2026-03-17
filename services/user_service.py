@@ -23,6 +23,11 @@ async def get_users(page: int = 1, per_page: int = 10) -> tuple[List[User], int]
     return users, total_count
 
 
+async def get_active_users() -> List[User]:
+    """Obtener todos los usuarios activos (potenciales docentes)"""
+    return await User.find(User.activo == True).sort("username").to_list()
+
+
 async def get_user(id: PydanticObjectId) -> Optional[User]:
     """Obtener usuario por ID"""
     return await User.get(id)
