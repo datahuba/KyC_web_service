@@ -16,6 +16,29 @@ from models.enums import UserRole
 from typing import Optional
 
 @router.get(
+    "/teachers",
+    response_model=List[UserResponse],
+    summary="Listar Docentes Activos",
+    responses={
+        200: {"description": "Lista de docentes activos"},
+        403: {"description": "Sin permisos - Solo Admin"}
+    }
+)
+async def get_teachers(
+    current_user: User = Depends(require_admin)
+) -> Any:
+    """
+    Obtiene solo los usuarios ACTIVOS que pueden ser docentes
+    
+    **Requiere:** Admin o SuperAdmin
+    
+    **Nota:** Solo retorna usuarios con activo=True
+    """
+    users = await user_service.get_active_users()
+    return users
+
+
+@router.get(
     "/",
     response_model=PaginatedResponse[UserResponse],
     summary="Listar Usuarios Admin",

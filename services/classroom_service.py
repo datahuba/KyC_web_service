@@ -43,6 +43,13 @@ async def get_classrooms_as_student(student_id: PydanticObjectId) -> List[Classr
     ).sort("-created_at").to_list()
 
 
+async def get_all_classrooms() -> List[Classroom]:
+    """Obtiene TODAS las clases (para admins)."""
+    return await Classroom.find(
+        Classroom.activo == True,
+    ).sort("-created_at").to_list()
+
+
 async def get_enrolled_students(classroom_id: PydanticObjectId) -> List[Student]:
     """Estudiantes activos inscritos en una clase."""
     enrollments = await ClassroomStudent.find(
@@ -62,11 +69,15 @@ async def get_enrolled_students(classroom_id: PydanticObjectId) -> List[Student]
 
 async def create_classroom(
     data: ClassroomCreate,
-    teacher_user_id: PydanticObjectId,
+    teacher_user_id: Optional[PydanticObjectId] = None,
+    default_teacher_id: Optional[PydanticObjectId] = None,
 ) -> Classroom:
+    # Use provided teacher_user_id, fallback to default_teacher_id, or None
+    final_teacher_id = data.teacher_user_id or teacher_user_id or default_teacher_id
+    
     classroom = Classroom(
-        **data.model_dump(),
-        teacher_user_id=teacher_user_id,
+        **{k: v for k, v in data.model_dump().items() if k != 'teacher_user_id'},
+        teacher_user_id=final_teacher_id,
     )
     await classroom.create()
     return classroom

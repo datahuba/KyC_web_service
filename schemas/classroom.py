@@ -21,6 +21,7 @@ class ClassroomCreate(BaseModel):
     nombre: str = Field(..., min_length=1, max_length=200)
     descripcion: Optional[str] = Field(None, max_length=1000)
     course_id: Optional[PydanticObjectId] = None
+    teacher_user_id: Optional[PydanticObjectId] = None
 
     @field_validator("course_id", mode="before")
     @classmethod
@@ -38,6 +39,7 @@ class ClassroomUpdate(BaseModel):
     nombre: Optional[str] = Field(None, min_length=1, max_length=200)
     descripcion: Optional[str] = None
     activo: Optional[bool] = None
+    teacher_user_id: Optional[PydanticObjectId] = None
 
 
 class ClassroomResponse(BaseModel):
