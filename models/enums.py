@@ -304,8 +304,10 @@ class UserRole(str, Enum):
 
     Valores:
     -------
+    - DOCENTE: gestiona materiales, tareas y calificaciones en classrooms
     - ADMIN: crea estudiantes, cursos, descuentos, enrollments,
     - SUPERADMIN: crea todo lo anterior y usuarios de tipo admin """
+    DOCENTE = "docente"
     ADMIN = "admin"
     SUPERADMIN = "superadmin"
 

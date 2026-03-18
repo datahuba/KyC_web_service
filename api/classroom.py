@@ -13,7 +13,7 @@ from typing import Any, List, Optional, Union
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from beanie import PydanticObjectId
 
-from api.dependencies import get_current_user, require_admin
+from api.dependencies import get_current_user, require_admin, require_docente
 from models.user import User
 from models.student import Student
 from models.enums import AssignmentType
@@ -174,15 +174,17 @@ async def get_enrolled_students(
     classroom_id: PydanticObjectId,
     current_user: Union[User, Student] = Depends(get_current_user),
 ) -> Any:
-    """Lista los estudiantes activos inscritos en la clase."""
+    """
+    Lista los estudiantes activos inscritos en la clase.
+    **Requiere:** Solo Docentes (User)
+    """
     classroom = await classroom_service.get_classroom(classroom_id)
     if not classroom:
         raise HTTPException(status_code=404, detail="Classroom no encontrado.")
 
-    if isinstance(current_user, Student):
-        enrolled = await classroom_service.is_student_enrolled(classroom_id, current_user.id)
-        if not enrolled:
-            raise HTTPException(status_code=403, detail="No tienes acceso a esta clase.")
+    # Solo docentes pueden ver la lista de estudiantes
+    if not isinstance(current_user, User):
+        raise HTTPException(status_code=403, detail="Solo docentes pueden ver la lista de estudiantes.")
 
     students = await classroom_service.get_enrolled_students(classroom_id)
     return [ClassroomStudentResponse.from_doc(s) for s in students]
@@ -215,7 +217,7 @@ async def upload_material(
     classroom_id: PydanticObjectId,
     title: str = Form(..., min_length=1, max_length=200),
     file: UploadFile = File(...),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_docente),
 ) -> Any:
     """
     Sube un archivo (PDF, Word, PPT, Excel, imagen) al classroom.
@@ -241,7 +243,7 @@ async def upload_material(
 async def delete_material(
     classroom_id: PydanticObjectId,
     material_id: PydanticObjectId,
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_docente),
 ) -> Any:
     """Elimina material de Cloudinary y lo marca inactivo en MongoDB."""
     material = await classroom_material_service.get_material(material_id)
@@ -279,7 +281,7 @@ async def get_assignments(
 async def create_assignment(
     classroom_id: PydanticObjectId,
     data: AssignmentCreate,
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_docente),
 ) -> Any:
     """Crea tarea o examen. **Requiere:** Admin (docente)."""
     classroom = await classroom_service.get_classroom(classroom_id)
@@ -299,7 +301,7 @@ async def update_assignment(
     classroom_id: PydanticObjectId,
     assignment_id: PydanticObjectId,
     data: AssignmentUpdate,
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_docente),
 ) -> Any:
     assignment = await assignment_service.get_assignment(assignment_id)
     if not assignment or assignment.classroom_id != classroom_id:
@@ -316,7 +318,7 @@ async def update_assignment(
 async def delete_assignment(
     classroom_id: PydanticObjectId,
     assignment_id: PydanticObjectId,
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_docente),
 ) -> Any:
     assignment = await assignment_service.get_assignment(assignment_id)
     if not assignment or assignment.classroom_id != classroom_id:
@@ -376,7 +378,7 @@ async def submit_assignment(
 async def get_submissions(
     classroom_id: PydanticObjectId,
     assignment_id: PydanticObjectId,
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_docente),
 ) -> Any:
     """Todas las entregas de una actividad. **Requiere:** Admin."""
     assignment = await assignment_service.get_assignment(assignment_id)
@@ -397,7 +399,7 @@ async def grade_submission(
     assignment_id: PydanticObjectId,
     submission_id: PydanticObjectId,
     data: GradeRequest,
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_docente),
 ) -> Any:
     """Califica la entrega de un estudiante. **Requiere:** Admin (docente)."""
     assignment = await assignment_service.get_assignment(assignment_id)
