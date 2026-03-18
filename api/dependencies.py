@@ -124,6 +124,27 @@ def require_superadmin(
     return current_user
 
 
+def require_docente(
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> User:
+    """
+    Requiere que el usuario sea DOCENTE, ADMIN o SUPERADMIN
+    """
+    if not isinstance(current_user, User):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Se requiere rol de DOCENTE o superior"
+        )
+
+    if current_user.rol not in [UserRole.DOCENTE, UserRole.ADMIN, UserRole.SUPERADMIN]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Se requiere rol de DOCENTE o superior"
+        )
+
+    return current_user
+
+
 def require_admin(
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> User:
