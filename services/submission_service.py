@@ -9,7 +9,7 @@ Manejo de entregas y calificaciones.
 
 from datetime import datetime
 from typing import List, Optional
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile, status
 from beanie import PydanticObjectId
 
 from models.submission import Submission
@@ -56,6 +56,9 @@ async def get_grades_for_classroom(
     return await query.sort("-submitted_at").to_list()
 
 
+MAX_ATTEMPTS = 3
+
+
 async def submit(
     assignment_id: PydanticObjectId,
     classroom_id: PydanticObjectId,
@@ -63,13 +66,19 @@ async def submit(
     text_content: Optional[str] = None,
     file: Optional[UploadFile] = None,
 ) -> Submission:
-    """Crea o actualiza la entrega del estudiante."""
+    """Crea o actualiza la entrega del estudiante (máximo 3 intentos)."""
     submission = await get_my_submission(assignment_id, student_id)
+
+    # Verificar límite de intentos
+    if submission is not None and (submission.attempt_count or 0) >= MAX_ATTEMPTS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Has alcanzado el límite de {MAX_ATTEMPTS} entregas para esta actividad."
+        )
 
     file_data: dict = {}
     if file and file.filename:
         folder = f"classroom/{str(classroom_id)}/assignments/{str(assignment_id)}/submissions/{str(student_id)}"
-        # Eliminar archivo previo si existe
         if submission and submission.public_id:
             await delete_file(submission.public_id, submission.resource_type or "raw")
         result = await upload_document(file, folder)
@@ -91,6 +100,7 @@ async def submit(
             text_content=text_content,
             status=SubmissionStatus.SUBMITTED,
             submitted_at=now,
+            attempt_count=1,
             **file_data,
         )
         await submission.create()
@@ -101,6 +111,7 @@ async def submit(
             setattr(submission, k, v)
         submission.status = SubmissionStatus.SUBMITTED
         submission.submitted_at = now
+        submission.attempt_count = (submission.attempt_count or 0) + 1
         await submission.save()
 
     return submission
