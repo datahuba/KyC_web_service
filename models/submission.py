@@ -29,6 +29,9 @@ class Submission(MongoBaseModel):
     mime_type: Optional[str] = None
     size_bytes: Optional[int] = None
 
+    # Control de intentos (máximo 3)
+    attempt_count: int = Field(default=0, ge=0)
+
     # Estado y calificación
     status: SubmissionStatus = Field(default=SubmissionStatus.PENDING)
     score: Optional[float] = Field(None, ge=0)
