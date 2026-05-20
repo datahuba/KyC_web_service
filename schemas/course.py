@@ -50,9 +50,9 @@ class CourseCreate(BaseModel):
     costo_total_interno: float = Field(..., gt=0)
     matricula_interno: float = Field(..., ge=0)
     
-    # Precios externos
-    costo_total_externo: float = Field(..., gt=0)
-    matricula_externo: float = Field(..., ge=0)
+    # Precios externos (opcionales; si no se envían, se asumen en 0)
+    costo_total_externo: float = Field(0, ge=0)
+    matricula_externo: float = Field(0, ge=0)
     
     # Estructura de pago
     cantidad_cuotas: int = Field(..., ge=1)
@@ -191,7 +191,7 @@ class CourseUpdate(BaseModel):
     costo_total_interno: Optional[float] = Field(None, gt=0)
     matricula_interno: Optional[float] = Field(None, ge=0)
     
-    costo_total_externo: Optional[float] = Field(None, gt=0)
+    costo_total_externo: Optional[float] = Field(None, ge=0)
     matricula_externo: Optional[float] = Field(None, ge=0)
     
     cantidad_cuotas: Optional[int] = Field(None, ge=1)

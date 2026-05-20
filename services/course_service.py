@@ -69,7 +69,15 @@ async def get_courses(
 
 async def create_course(course_in: CourseCreate) -> Course:
     """Crea un nuevo curso"""
-    course = Course(**course_in.dict())
+    payload = course_in.dict()
+
+    # Normalización defensiva: costos externos opcionales se persisten en 0
+    if payload.get("costo_total_externo") is None:
+        payload["costo_total_externo"] = 0
+    if payload.get("matricula_externo") is None:
+        payload["matricula_externo"] = 0
+
+    course = Course(**payload)
     await course.create()
     return course
 

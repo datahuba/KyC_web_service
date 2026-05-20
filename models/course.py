@@ -137,8 +137,8 @@ class Course(MongoBaseModel):
     # ========================================================================
     
     costo_total_externo: float = Field(
-        ...,
-        gt=0,
+        0,
+        ge=0,
         description="Costo total del curso para estudiantes externos (público general)"
     )
     
