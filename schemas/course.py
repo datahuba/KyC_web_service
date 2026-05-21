@@ -19,26 +19,15 @@ from models.enums import TipoCurso, Modalidad, EstadoInscripcion, TipoEstudiante
 from models.base import PyObjectId
 from schemas.requisito import RequisitoTemplateCreate
 
+class ModuloCreate(BaseModel):
+    nombre: str
+    costo: float
 
 class CourseCreate(BaseModel):
     """
     Schema para crear un nuevo curso
     
     Uso: POST /courses/
-    
-    ¿Qué incluye?
-    ------------
-    - Identificación (código, nombre, tipo, modalidad)
-    - Precios para internos (costo total, matrícula)
-    - Precios para externos (costo total, matrícula)
-    - Estructura de pago (cantidad de cuotas, descuento del curso)
-    - Información adicional (observación, fechas)
-    
-    ¿Qué NO incluye?
-    ---------------
-    - id: Se genera automáticamente
-    - inscritos: Se llena cuando los estudiantes se inscriben
-    - created_at, updated_at: Autogenerados
     """
     
     codigo: str = Field(..., description="Código único del curso")
@@ -54,8 +43,13 @@ class CourseCreate(BaseModel):
     costo_total_externo: float = Field(0, ge=0)
     matricula_externo: float = Field(0, ge=0)
     
-    # Estructura de pago
+    # Estructura de pago y módulos
     cantidad_cuotas: int = Field(..., ge=1)
+    modulos: Optional[List[ModuloCreate]] = Field(
+        default_factory=list,
+        description="Lista generada dinámicamente de módulos y sus costos"
+    )
+
     descuento_curso: Optional[float] = Field(None, ge=0, le=100)
     descuento_id: Optional[PyObjectId] = None
     
@@ -83,15 +77,14 @@ class CourseCreate(BaseModel):
                 "costo_total_externo": 4500.0,
                 "matricula_externo": 700.0,
                 "cantidad_cuotas": 5,
+                "modulos": [{"nombre": "Módulo 1", "costo": 580}],
                 "descuento_id": "507f1f77bcf86cd799439077",
-                "observacion": "Incluye materiales didácticos y certificación internacional",
+                "observacion": "Incluye materiales didácticos",
                 "fecha_inicio": "2024-03-15T00:00:00",
                 "fecha_fin": "2024-09-30T00:00:00",
                 "activo": True,
                 "requisitos": [
-                    {"descripcion": "Curriculum Vitae actualizado"},
-                    {"descripcion": "Fotocopia de Cédula de Identidad (ambos lados)"},
-                    {"descripcion": "Título profesional en provisión nacional o certificado de egreso"}
+                    {"descripcion": "Curriculum Vitae actualizado"}
                 ]
             }
         }
@@ -101,10 +94,6 @@ class CourseCreate(BaseModel):
 class CourseResponse(BaseModel):
     """
     Schema para mostrar información de un curso
-    
-    Uso: GET /courses/{id}, respuestas de POST/PUT/PATCH
-    
-    Incluye todos los campos del curso, incluyendo la lista de inscritos.
     """
     
     id: PyObjectId = Field(..., alias="_id")
@@ -120,6 +109,8 @@ class CourseResponse(BaseModel):
     matricula_externo: float
     
     cantidad_cuotas: int
+    modulos: List[ModuloCreate] = Field(default_factory=list)
+
     descuento_curso: Optional[float]
     descuento_id: Optional[PyObjectId]
     
@@ -147,7 +138,7 @@ class CourseResponse(BaseModel):
             "example": {
                 "_id": "507f1f77bcf86cd799439012",
                 "codigo": "DIP-SGC-2024",
-                "nombre_programa": "Diplomado en Sistemas de Gestión de Calidad ISO 9001:2015",
+                "nombre_programa": "Diplomado en Sistemas de Gestión de Calidad",
                 "tipo_curso": "diplomado",
                 "modalidad": "hibrido",
                 "costo_total_interno": 3500.0,
@@ -155,17 +146,15 @@ class CourseResponse(BaseModel):
                 "costo_total_externo": 4500.0,
                 "matricula_externo": 700.0,
                 "cantidad_cuotas": 5,
+                "modulos": [{"nombre": "Módulo 1", "costo": 580}],
                 "descuento_id": "507f1f77bcf86cd799439077",
                 "descuento_curso": 10.0,
-                "observacion": "Incluye materiales didácticos y certificación internacional",
+                "observacion": "Incluye materiales didácticos",
                 "inscritos": ["507f1f77bcf86cd799439011"],
                 "fecha_inicio": "2024-03-15T00:00:00",
                 "fecha_fin": "2024-09-30T00:00:00",
                 "activo": True,
-                "requisitos": [
-                    {"descripcion": "Curriculum Vitae actualizado"},
-                    {"descripcion": "Fotocopia de Cédula de Identidad"}
-                ],
+                "requisitos": [{"descripcion": "Curriculum Vitae actualizado"}],
                 "created_at": "2024-02-01T10:30:00",
                 "updated_at": "2024-02-01T10:30:00"
             }
@@ -176,11 +165,6 @@ class CourseResponse(BaseModel):
 class CourseUpdate(BaseModel):
     """
     Schema para actualizar un curso existente
-    
-    Uso: PATCH /courses/{id}
-    
-    Todos los campos son opcionales para permitir actualizaciones parciales.
-    Los validadores se mantienen para asegurar coherencia de precios.
     """
     
     codigo: Optional[str] = None
@@ -195,6 +179,8 @@ class CourseUpdate(BaseModel):
     matricula_externo: Optional[float] = Field(None, ge=0)
     
     cantidad_cuotas: Optional[int] = Field(None, ge=1)
+    modulos: Optional[List[ModuloCreate]] = None
+
     descuento_curso: Optional[float] = Field(None, ge=0, le=100)
     descuento_id: Optional[PyObjectId] = None
     
@@ -210,13 +196,12 @@ class CourseUpdate(BaseModel):
     model_config = {
         "json_schema_extra": {
             "example": {
-                "nombre_programa": "Diplomado en Sistemas de Gestión de Calidad ISO 9001:2015 y 14001:2015",
+                "nombre_programa": "Diplomado en Sistemas de Gestión de Calidad",
                 "costo_total_interno": 3800.0,
                 "activo": True
             }
         }
     }
-
 
 # ============================================================================
 # SCHEMAS DE REPORTE
