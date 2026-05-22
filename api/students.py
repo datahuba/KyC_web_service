@@ -378,3 +378,164 @@ async def upload_student_photo(
     
     return student
 
+# ============================================================================
+# ENDPOINTS ADICIONALES DE SUBIDA DE DOCUMENTOS (CV, Carnet, Afiliación, Título)
+# ============================================================================
+
+@router.post(
+    "/{id}/upload/cv",
+    response_model=StudentResponse,
+    summary="Subir Currículum Vitae (PDF)",
+    responses={
+        200: {"description": "CV subido exitosamente"},
+        400: {"description": "Formato no permitido"},
+        403: {"description": "Sin permisos"},
+        404: {"description": "Estudiante no encontrado"}
+    }
+)
+async def upload_student_cv(
+    *,
+    id: PydanticObjectId,
+    file: UploadFile,
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> Any:
+    from core.cloudinary_utils import upload_pdf
+    
+    student = await student_service.get_student(id=id)
+    if not student:
+        raise HTTPException(status_code=404, detail="Estudiante no encontrado")
+    
+    # Verificar permisos (Admin o el mismo estudiante)
+    if isinstance(current_user, Student) and current_user.id != id:
+        raise HTTPException(status_code=403, detail="No tienes permiso para subir archivos a este estudiante")
+    
+    # Subir PDF a Cloudinary
+    folder = f"students/{id}/cv"
+    public_id = f"cv_{id}"
+    cv_url = await upload_pdf(file, folder, public_id)
+    
+    # Guardar en el campo correspondiente del modelo
+    student.cv_url = cv_url
+    await student.save()
+    
+    return student
+
+
+@router.post(
+    "/{id}/upload/carnet",
+    response_model=StudentResponse,
+    summary="Subir PDF del Carnet",
+    responses={
+        200: {"description": "Carnet subido exitosamente"},
+        400: {"description": "Formato no permitido"},
+        403: {"description": "Sin permisos"},
+        404: {"description": "Estudiante no encontrado"}
+    }
+)
+async def upload_student_carnet(
+    *,
+    id: PydanticObjectId,
+    file: UploadFile,
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> Any:
+    from core.cloudinary_utils import upload_pdf
+    
+    student = await student_service.get_student(id=id)
+    if not student:
+        raise HTTPException(status_code=404, detail="Estudiante no encontrado")
+    
+    if isinstance(current_user, Student) and current_user.id != id:
+        raise HTTPException(status_code=403, detail="No tienes permiso")
+    
+    folder = f"students/{id}/carnet"
+    public_id = f"carnet_{id}"
+    carnet_url = await upload_pdf(file, folder, public_id)
+    
+    student.carnet_url = carnet_url
+    await student.save()
+    
+    return student
+
+
+@router.post(
+    "/{id}/upload/afiliacion",
+    response_model=StudentResponse,
+    summary="Subir PDF de Afiliación",
+    responses={
+        200: {"description": "Documento de afiliación subido exitosamente"},
+        403: {"description": "Sin permisos"},
+        404: {"description": "Estudiante no encontrado"}
+    }
+)
+async def upload_student_afiliacion(
+    *,
+    id: PydanticObjectId,
+    file: UploadFile,
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> Any:
+    from core.cloudinary_utils import upload_pdf
+    
+    student = await student_service.get_student(id=id)
+    if not student:
+        raise HTTPException(status_code=404, detail="Estudiante no encontrado")
+    
+    if isinstance(current_user, Student) and current_user.id != id:
+        raise HTTPException(status_code=403, detail="No tienes permiso")
+    
+    folder = f"students/{id}/afiliacion"
+    public_id = f"afiliacion_{id}"
+    afiliacion_url = await upload_pdf(file, folder, public_id)
+    
+    student.afiliacion_url = afiliacion_url
+    await student.save()
+    
+    return student
+
+
+@router.post(
+    "/{id}/upload/titulo",
+    response_model=StudentResponse,
+    summary="Subir PDF del Título Profesional e información",
+    responses={
+        200: {"description": "Título subido exitosamente"},
+        403: {"description": "Sin permisos"},
+        404: {"description": "Estudiante no encontrado"}
+    }
+)
+async def upload_student_titulo(
+    *,
+    id: PydanticObjectId,
+    file: UploadFile,
+    titulo: str = Form(...),
+    numero_titulo: str = Form(...),
+    año_expedicion: str = Form(...),
+    universidad: str = Form(...),
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> Any:
+    from core.cloudinary_utils import upload_pdf
+    
+    student = await student_service.get_student(id=id)
+    if not student:
+        raise HTTPException(status_code=404, detail="Estudiante no encontrado")
+    
+    if isinstance(current_user, Student) and current_user.id != id:
+        raise HTTPException(status_code=403, detail="No tienes permiso")
+    
+    folder = f"students/{id}/titulo"
+    public_id = f"titulo_{id}"
+    titulo_url = await upload_pdf(file, folder, public_id)
+    
+    # Guardar campos de información del título además del PDF
+    student.titulo_url = titulo_url
+    student.titulo = titulo
+    student.numero_titulo = numero_titulo
+    student.año_expedicion = año_expedicion
+    student.universidad = universidad
+    
+    # Si sube su título, marcamos el estado correspondiente (por ejemplo, pendiente de verificación por el admin)
+    from models.enums import EstadoRequisito  # Ajusta si usas otra denominación de enums para el título
+    student.estado_titulo = "pendiente"  # O el valor string que maneje tu backend
+    
+    await student.save()
+    
+    return student
