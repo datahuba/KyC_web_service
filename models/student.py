@@ -98,7 +98,20 @@ class Student(MongoBaseModel):
     activo: bool = Field(default=True,description="Si el estudiante puede acceder al sistema y realizar acciones")
     lista_cursos_ids: List[PyObjectId] = Field(default_factory=list,description="Lista de IDs de cursos en los que el estudiante está inscrito")
 
-
+# ========================================================================
+    # DOCUMENTACIÓN (Cargados desde el Panel de Admin)
+    # ========================================================================
+    cv_url: Optional[str] = Field(None, description="URL del Currículum Vitae (PDF)")
+    carnet_url: Optional[str] = Field(None, description="URL del Carnet de Identidad (PDF)")
+    afiliacion_url: Optional[str] = Field(None, description="URL de la Afiliación (PDF)")
+    
+    # INFORMACIÓN ACADÉMICA DEL TÍTULO PROFESIONAL
+    titulo_url: Optional[str] = Field(None, description="URL del PDF del Título Profesional")
+    titulo: Optional[str] = Field(None, description="Nombre del Título")
+    numero_titulo: Optional[str] = Field(None, description="Número de Registro de Título")
+    año_expedicion: Optional[str] = Field(None, description="Año de Expedición del Título")
+    universidad: Optional[str] = Field(None, description="Universidad que emitió el Título")
+    estado_titulo: Optional[str] = Field("sin_titulo", description="Estado de verificación del título (pendiente, verificado, rechazado, sin_titulo)")
     
     class Settings:
         name = "students"
