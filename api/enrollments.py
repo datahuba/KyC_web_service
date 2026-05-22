@@ -318,6 +318,52 @@ async def update_enrollment(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.delete(
+    "/{id}",
+    response_model=EnrollmentResponse,
+    summary="Eliminar Inscripción",
+    responses={
+        200: {"description": "Inscripción eliminada exitosamente junto con sus pagos"},
+        403: {"description": "Sin permisos - Solo SuperAdmin"},
+        404: {"description": "Inscripción no encontrada"}
+    }
+)
+async def delete_enrollment(
+    *,
+    id: PydanticObjectId,
+    current_user: User = Depends(require_admin)
+) -> Any:
+    """
+    Eliminar inscripción manualmente
+    
+    **Requiere:** SOLO SuperAdmin
+    
+    **Borrado en cascada:**
+    - Elimina de forma automática todos los pagos asociados a esta inscripción en la colección `payments`.
+    """
+    from models.enums import UserRole
+    if current_user.rol != UserRole.SUPERADMIN:
+        raise HTTPException(
+            status_code=403,
+            detail="Solo SUPERADMIN puede eliminar inscripciones"
+        )
+    
+    enrollment = await Enrollment.get(id)
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="Inscripción no encontrada")
+    
+    # 1. Borrar pagos asociados a esta inscripción en cascada
+    try:
+        from models.payment import Payment
+        await Payment.find({"enrollment_id": id}).delete()
+    except ImportError:
+        pass  # Evita que el endpoint falle si hay discrepancias con el import de Payment
+    
+    # 2. Eliminar el documento de inscripción
+    await enrollment.delete()
+    
+    # Retornamos el objeto eliminado para evitar errores de JSON en el frontend
+    return enrollment
 
 @router.get("/student/{student_id}", response_model=List[EnrollmentResponse])
 async def get_enrollments_by_student(

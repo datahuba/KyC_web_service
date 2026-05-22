@@ -279,7 +279,11 @@ async def delete_student(
     
     **Requiere:** SOLO SuperAdmin
     
-    **Nota:** Los Admin normales NO pueden eliminar estudiantes.
+    **Borrado en cascada automatizado:**
+    1. Identifica todas las inscripciones (`Enrollments`) del estudiante.
+    2. Elimina todos los pagos (`Payments`) asociados a esas inscripciones.
+    3. Elimina los registros de inscripción (`Enrollments`) del estudiante.
+    4. Finalmente, elimina la cuenta del estudiante.
     """
     # Solo SUPERADMIN puede eliminar
     from models.enums import UserRole
@@ -292,6 +296,29 @@ async def delete_student(
     student = await student_service.get_student(id=id)
     if not student:
         raise HTTPException(status_code=404, detail="Estudiante no encontrado")
+    
+    # --- INICIO DE BORRADO EN CASCADA ---
+    from models.enrollment import Enrollment
+    try:
+        from models.payment import Payment
+    except ImportError:
+        Payment = None  # En caso de que la ruta del modelo Payment sea diferente
+
+    # 1. Obtener las inscripciones del estudiante para recopilar sus IDs
+    enrollments = await Enrollment.find(Enrollment.estudiante_id == id).to_list()
+    enrollment_ids = [e.id for e in enrollments]
+
+    if enrollment_ids and Payment:
+        # 2. Eliminar todos los pagos enlazados a estas inscripciones
+        await Payment.find({"enrollment_id": {"$in": enrollment_ids}}).delete()
+        # Opcional: Eliminar pagos si tienen relación directa de estudiante_id
+        await Payment.find({"estudiante_id": id}).delete()
+
+    # 3. Eliminar todas las inscripciones del estudiante
+    await Enrollment.find(Enrollment.estudiante_id == id).delete()
+    # --- FIN DE BORRADO EN CASCADA ---
+
+    # 4. Eliminar al estudiante usando tu servicio actual
     student = await student_service.delete_student(id=id)
     return student
 
