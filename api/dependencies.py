@@ -15,6 +15,9 @@ from models.user import User
 from models.student import Student
 from models.enums import UserRole
 
+ADMIN_OR_ABOVE = {UserRole.ADMIN, UserRole.SUPERADMIN}
+DOCENTE_OR_ABOVE = {UserRole.DOCENTE, UserRole.ADMIN, UserRole.SUPERADMIN}
+
 # Security scheme para JWT (auto_error=False permite bypass en modo desarrollo)
 security = HTTPBearer(auto_error=False)
 
@@ -136,7 +139,7 @@ def require_docente(
             detail="Se requiere rol de DOCENTE o superior"
         )
 
-    if current_user.rol not in [UserRole.DOCENTE, UserRole.ADMIN, UserRole.SUPERADMIN]:
+    if current_user.rol not in DOCENTE_OR_ABOVE:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Se requiere rol de DOCENTE o superior"
@@ -159,7 +162,7 @@ def require_admin(
             detail="Se requiere rol de ADMIN o superior"
         )
     
-    if current_user.rol not in [UserRole.ADMIN, UserRole.SUPERADMIN]:
+    if current_user.rol not in ADMIN_OR_ABOVE:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Se requiere rol de ADMIN o superior"
