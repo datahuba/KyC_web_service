@@ -1,5 +1,5 @@
 from typing import List, Any, Union, Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, Form, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, status
 from models.student import Student
 from models.user import User
 from schemas.student import StudentCreate, StudentResponse, StudentUpdateSelf, StudentUpdateAdmin, ChangePassword
@@ -627,3 +627,47 @@ async def rechazar_titulo_estudiante(
         
     await student.save()
     return student
+
+@router.post(
+    "/import/excel",
+    summary="Importar Estudiantes de forma Masiva desde Excel",
+    responses={
+        200: {"description": "Reporte de importación procesado exitosamente"},
+        403: {"description": "Sin permisos - Solo Admin/SuperAdmin"}
+    }
+)
+async def import_students(
+    file: UploadFile = File(..., description="Archivo Excel (.xlsx o .xls)"),
+    current_user: User = Depends(require_admin)
+) -> Any:
+    """
+    Importar estudiantes de forma masiva desde un archivo de Excel.
+    
+    **Requiere:** Admin o SuperAdmin
+    
+    **Formato del Excel (Plantilla):**
+    - Columna A: Nombre completo (Obligatorio)
+    - Columna B: Registro (Opcional - Si falta, se usa el Email como usuario)
+    - Columna C: Carnet de Identidad (CI) (Obligatorio - Contraseña inicial)
+    - Columna D: Extensión
+    - Columna E: Email
+    - Columna F: Celular
+    - Columna G: Domicilio
+    - Columna H: Tipo de Estudiante ('interno' o 'externo')
+    """
+    # Validar extensión del archivo
+    if not file.filename.endswith(('.xlsx', '.xls')):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Formato de archivo no permitido. Debe cargar una hoja de cálculo (.xlsx o .xls)"
+        )
+        
+    contents = await file.read()
+    try:
+        report = await student_service.import_students_from_excel(contents)
+        return report
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
