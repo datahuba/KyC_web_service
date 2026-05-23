@@ -94,7 +94,7 @@ class StudentCreate(BaseModel):
 
 class StudentResponse(BaseModel):
     """
-    Schema para mostrar información de un estudiante
+    Schema para mostrar información de un estudiante (Sincronizado con MongoDB y Svelte)
     """
     
     id: PyObjectId = Field(..., alias="_id")
@@ -108,15 +108,14 @@ class StudentResponse(BaseModel):
     fecha_nacimiento: Optional[datetime] = None
     foto_url: Optional[str] = None
     es_estudiante_interno: Optional[TipoEstudiante] = None
+    
+    # DOCUMENTACIÓN (URLs de Cloudinary de los PDFs)
     cv_url: Optional[str] = None
     carnet_url: Optional[str] = None
     afiliacion_url: Optional[str] = None
-    titulo_url: Optional[str] = None
-    titulo: Optional[str] = None
-    numero_titulo: Optional[str] = None
-    año_expedicion: Optional[str] = None
-    universidad: Optional[str] = None
-    estado_titulo: Optional[str] = "sin_titulo"
+    
+    # OBJETO ANIDADO DEL TÍTULO PROFESIONAL (Espera una estructura de tipo dict)
+    titulo: Optional[dict] = None
     
     # Estado y Metadata
     activo: bool

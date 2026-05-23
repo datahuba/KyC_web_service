@@ -106,12 +106,10 @@ class Student(MongoBaseModel):
     afiliacion_url: Optional[str] = Field(None, description="URL de la Afiliación (PDF)")
     
     # INFORMACIÓN ACADÉMICA DEL TÍTULO PROFESIONAL
-    titulo_url: Optional[str] = Field(None, description="URL del PDF del Título Profesional")
-    titulo: Optional[str] = Field(None, description="Nombre del Título")
-    numero_titulo: Optional[str] = Field(None, description="Número de Registro de Título")
-    año_expedicion: Optional[str] = Field(None, description="Año de Expedición del Título")
-    universidad: Optional[str] = Field(None, description="Universidad que emitió el Título")
-    estado_titulo: Optional[str] = Field("sin_titulo", description="Estado de verificación del título (pendiente, verificado, rechazado, sin_titulo)")
+    titulo: Optional[dict] = Field(
+        default=None, 
+        description="Información completa del título profesional: {titulo, numero_titulo, año_expedicion, universidad, estado, url, motivo_rechazo}"
+    )
     
     class Settings:
         name = "students"
