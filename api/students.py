@@ -502,6 +502,16 @@ async def upload_student_afiliacion(
         404: {"description": "Estudiante no encontrado"}
     }
 )
+@router.post(
+    "/{id}/upload/titulo",
+    response_model=StudentResponse,
+    summary="Subir PDF del Título Profesional e información",
+    responses={
+        200: {"description": "Título subido exitosamente"},
+        403: {"description": "Sin permisos"},
+        404: {"description": "Estudiante no encontrado"}
+    }
+)
 async def upload_student_titulo(
     *,
     id: PydanticObjectId,
@@ -521,21 +531,99 @@ async def upload_student_titulo(
     if isinstance(current_user, Student) and current_user.id != id:
         raise HTTPException(status_code=403, detail="No tienes permiso")
     
+    # 1. Subir PDF a Cloudinary
     folder = f"students/{id}/titulo"
     public_id = f"titulo_{id}"
     titulo_url = await upload_pdf(file, folder, public_id)
     
-    # Guardar campos de información del título además del PDF
-    student.titulo_url = titulo_url
-    student.titulo = titulo
-    student.numero_titulo = numero_titulo
-    student.año_expedicion = año_expedicion
-    student.universidad = universidad
-    
-    # Si sube su título, marcamos el estado correspondiente (por ejemplo, pendiente de verificación por el admin)
-    from models.enums import EstadoRequisito  # Ajusta si usas otra denominación de enums para el título
-    student.estado_titulo = "pendiente"  # O el valor string que maneje tu backend
+    # 2. Guardar los campos de manera estructurada dentro del diccionario "titulo"
+    student.titulo = {
+        "titulo": titulo,
+        "numero_titulo": numero_titulo,
+        "año_expedicion": año_expedicion,
+        "universidad": universidad,
+        "estado": "pendiente",  # Estado inicial al subir el título
+        "url": titulo_url,
+        "motivo_rechazo": None
+    }
     
     await student.save()
+    return student
+
+# ============================================================================
+# ENDPOINTS PARA VERIFICACIÓN Y RECHAZO DE TÍTULOS (ADMIN/SUPERADMIN)
+# ============================================================================
+
+@router.put(
+    "/{id}/titulo/verificar",
+    response_model=StudentResponse,
+    summary="Verificar Título Profesional del Estudiante"
+)
+async def verificar_titulo_estudiante(
+    *,
+    id: PydanticObjectId,
+    titulo: Optional[str] = Form(None),
+    numero_titulo: Optional[str] = Form(None),
+    año_expedicion: Optional[str] = Form(None),
+    universidad: Optional[str] = Form(None),
+    current_user: User = Depends(require_admin)
+) -> Any:
+    student = await student_service.get_student(id=id)
+    if not student:
+        raise HTTPException(status_code=404, detail="Estudiante no encontrado")
     
+    # Si no existe el objeto, lo inicializamos completo
+    if not student.titulo:
+        student.titulo = {
+            "titulo": titulo,
+            "numero_titulo": numero_titulo,
+            "año_expedicion": año_expedicion,
+            "universidad": universidad,
+            "estado": "verificado",
+            "url": None,
+            "motivo_rechazo": None
+        }
+    else:
+        # Si ya existe, actualizamos los campos opcionales que vengan y lo verificamos
+        if titulo: student.titulo["titulo"] = titulo
+        if numero_titulo: student.titulo["numero_titulo"] = numero_titulo
+        if año_expedicion: student.titulo["año_expedicion"] = año_expedicion
+        if universidad: student.titulo["universidad"] = universidad
+        student.titulo["estado"] = "verificado"
+        student.titulo["motivo_rechazo"] = None # Limpiamos motivos anteriores
+        
+    await student.save()
+    return student
+
+
+@router.put(
+    "/{id}/titulo/rechazar",
+    response_model=StudentResponse,
+    summary="Rechazar Título Profesional del Estudiante"
+)
+async def rechazar_titulo_estudiante(
+    *,
+    id: PydanticObjectId,
+    motivo: str = Form(...),
+    current_user: User = Depends(require_admin)
+) -> Any:
+    student = await student_service.get_student(id=id)
+    if not student:
+        raise HTTPException(status_code=404, detail="Estudiante no encontrado")
+    
+    if not student.titulo:
+        student.titulo = {
+            "titulo": None,
+            "numero_titulo": None,
+            "año_expedicion": None,
+            "universidad": None,
+            "estado": "rechazado",
+            "url": None,
+            "motivo_rechazo": motivo
+        }
+    else:
+        student.titulo["estado"] = "rechazado"
+        student.titulo["motivo_rechazo"] = motivo
+        
+    await student.save()
     return student
