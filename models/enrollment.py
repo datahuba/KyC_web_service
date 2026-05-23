@@ -86,6 +86,9 @@ class Enrollment(MongoBaseModel):
     requisitos: List['Requisito'] = Field(default_factory=list)
     nota_final: Optional[float] = Field(None, ge=0, le=100)
     
+# >>> AGREGAR ESTE CAMPO AL FINAL DE LOS ATRIBUTOS <<<
+    matricula_pagada: bool = Field(default=False, description="¿Ya pagó la matrícula el estudiante para este curso?")
+
     # ========================================================================
     # VALIDADORES
     # ========================================================================

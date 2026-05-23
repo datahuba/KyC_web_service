@@ -30,8 +30,9 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
     Proceso:
     1. Obtener datos del estudiante y curso
     2. Calcular precios según tipo de estudiante
-    3. Aplicar descuentos (del curso + seleccionado)
-    4. Crear inscripción con snapshot de precios
+    3. Aplicar descuentos (del curso + seleccionado) sobre el costo de colegiatura (módulos)
+    4. Sumar el costo de la matrícula al total de la deuda definitiva
+    5. Crear inscripción con snapshot de precios
     """
     
     # 1. Obtener estudiante y curso
@@ -58,10 +59,10 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
     es_interno = student.es_estudiante_interno == TipoEstudiante.INTERNO
     
     # 4. Obtener precios del curso
-    costo_total = course.get_costo_total(es_interno)
-    costo_matricula = course.get_matricula(es_interno)
+    costo_total = course.get_costo_total(es_interno) # Representa la colegiatura total (módulos)
+    costo_matricula = course.get_matricula(es_interno) # Matrícula administrativa
     
-    # 5. Aplicar descuento del curso (Prioridad: ID > Valor directo)
+    # 5. Aplicar descuento del curso (Prioridad: ID > Valor directo) sobre colegiatura
     descuento_curso = 0.0
     descuento_curso_id = None
     
@@ -75,7 +76,7 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
         
     total_con_descuento_curso = costo_total - (costo_total * descuento_curso / 100)
     
-    # 6. Aplicar descuento del estudiante (Prioridad: ID > Valor directo)
+    # 6. Aplicar descuento del estudiante (Prioridad: ID > Valor directo) sobre colegiatura
     descuento_personal = 0.0
     descuento_estudiante_id = None
     
@@ -87,12 +88,16 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
     elif enrollment_in.descuento_personalizado:
         descuento_personal = enrollment_in.descuento_personalizado
         
-    total_final = total_con_descuento_curso - (total_con_descuento_curso * descuento_personal / 100)
+    colegiatura_final = total_con_descuento_curso - (total_con_descuento_curso * descuento_personal / 100)
+    
+    # MATEMÁTICA FINANCIERA CORREGIDA:
+    # La deuda total inicial es el costo de colegiatura con descuentos + la matrícula administrativa
+    total_final = colegiatura_final + costo_matricula
     
     # 7. Copiar requisitos del curso y convertirlos a Requisito con estado PENDIENTE
     requisitos_enrollment = [template.to_requisito() for template in course.requisitos]
     
-    # 8. Crear inscripción con snapshot de precios
+    # 8. Crear inscripción con snapshot de precios corregido
     enrollment = Enrollment(
         estudiante_id=enrollment_in.estudiante_id,
         curso_id=enrollment_in.curso_id,
@@ -110,8 +115,9 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
         descuento_personalizado=descuento_personal,
         
         total_a_pagar=round(total_final, 2),
-        saldo_pendiente=round(total_final, 2),
+        saldo_pendiente=round(total_final, 2), # Inicia debiendo colegiatura + matrícula
         estado=EstadoInscripcion.PENDIENTE_PAGO,
+        matricula_pagada=False, # Estado inicial de matrícula
         
         # Requisitos (copiados del curso)
         requisitos=requisitos_enrollment
@@ -133,20 +139,10 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
 
 
 async def enrich_enrollment_dates(enrollment: Enrollment) -> dict:
-    """
-    Enriquecer enrollment con fechas convertidas a hora boliviana
-    
-    Args:
-        enrollment: Objeto Enrollment
-    
-    Returns:
-        Diccionario con fechas en hora boliviana (UTC-4)
-    """
+    """Enriquecer enrollment con fechas convertidas a hora boliviana"""
     from core.timezone_utils import to_bolivia_time
     
     enrollment_dict = enrollment.model_dump()
-    
-    # Convertir fechas a hora boliviana
     enrollment_dict["fecha_inscripcion"] = to_bolivia_time(enrollment.fecha_inscripcion)
     enrollment_dict["created_at"] = to_bolivia_time(enrollment.created_at)
     enrollment_dict["updated_at"] = to_bolivia_time(enrollment.updated_at)
@@ -183,36 +179,18 @@ async def get_all_enrollments(
     curso_id: Optional[PydanticObjectId] = None,
     estudiante_id: Optional[PydanticObjectId] = None
 ) -> tuple[List[Enrollment], int]:
-    """
-    Obtener todas las inscripciones con paginación y filtros
-    
-    Args:
-        page: Número de página
-        per_page: Elementos por página
-        q: Búsqueda por nombre de estudiante o curso
-        estado: Filtrar por estado
-        curso_id: Filtrar por ID de curso
-        estudiante_id: Filtrar por ID de estudiante
-    """
+    """Obtener todas las inscripciones con paginación y filtros"""
     query = Enrollment.find()
     
-    # 1. Filtro Estado
     if estado:
         query = query.find(Enrollment.estado == estado)
-        
-    # 2. Filtro Curso ID
     if curso_id:
         query = query.find(Enrollment.curso_id == curso_id)
-        
-    # 3. Filtro Estudiante ID
     if estudiante_id:
         query = query.find(Enrollment.estudiante_id == estudiante_id)
         
-    # 4. Búsqueda por texto (q) - Estudiante o Curso
     if q:
-        # Buscar estudiantes que coincidan
         regex_pattern = {"$regex": q, "$options": "i"}
-        
         students = await Student.find(
             Or(
                 Student.nombre == regex_pattern,
@@ -221,13 +199,11 @@ async def get_all_enrollments(
         ).to_list()
         student_ids = [s.id for s in students]
         
-        # Buscar cursos que coincidan
         courses = await Course.find(
             Course.nombre_programa == regex_pattern
         ).to_list()
         course_ids = [c.id for c in courses]
         
-        # Filtrar inscripciones que coincidan con estudiantes O cursos encontrados
         query = query.find(
             Or(
                 In(Enrollment.estudiante_id, student_ids),
@@ -249,40 +225,32 @@ async def update_enrollment_descuento(
 ) -> Enrollment:
     """
     Actualizar descuento personalizado de una inscripción (solo admin)
-    
-    Recalcula el total_a_pagar y saldo_pendiente.
-    
-    Args:
-        enrollment_id: ID de la inscripción
-        descuento_personalizado: Nuevo descuento personalizado (%)
-        admin_username: Username del admin
-    
-    Returns:
-        Inscripción actualizada
-    
-    Raises:
-        ValueError: Si la inscripción no existe
+    Recalcula el total_a_pagar y saldo_pendiente considerando la matrícula administrativa.
     """
     enrollment = await Enrollment.get(enrollment_id)
     if not enrollment:
         raise ValueError(f"Inscripción {enrollment_id} no encontrada")
     
-    # Recalcular total con nuevo descuento
+    # Recalcular total de colegiatura con nuevo descuento
     total_con_descuento_curso = enrollment.costo_total - (
         enrollment.costo_total * enrollment.descuento_curso_aplicado / 100
     )
     
-    total_final = total_con_descuento_curso - (
+    colegiatura_final = total_con_descuento_curso - (
         total_con_descuento_curso * descuento_personalizado / 100
     )
     
-    # Calcular nuevo saldo pendiente
+    # MATEMÁTICA FINANCIERA CORREGIDA:
+    # El total definitivo a pagar incluye la colegiatura descontada más la matrícula administrativa
+    total_final = colegiatura_final + enrollment.costo_matricula
+    
+    # Calcular nuevo saldo pendiente basado en los pagos que ya ha realizado
     nuevo_saldo = total_final - enrollment.total_pagado
     
     # Actualizar
     enrollment.descuento_personalizado = descuento_personalizado
     enrollment.total_a_pagar = round(total_final, 2)
-    enrollment.saldo_pendiente = round(max(0, nuevo_saldo), 2)
+    enrollment.saldo_pendiente = round(max(0.0, nuevo_saldo), 2)
     enrollment.updated_at = datetime.utcnow()
     
     await enrollment.save()
@@ -294,17 +262,7 @@ async def cambiar_estado_enrollment(
     nuevo_estado: EstadoInscripcion,
     admin_username: str
 ) -> Enrollment:
-    """
-    Cambiar el estado de una inscripción (solo admin)
-    
-    Args:
-        enrollment_id: ID de la inscripción
-        nuevo_estado: Nuevo estado
-        admin_username: Username del admin
-    
-    Returns:
-        Inscripción actualizada
-    """
+    """Cambiar el estado de una inscripción (solo admin)"""
     enrollment = await Enrollment.get(enrollment_id)
     if not enrollment:
         raise ValueError(f"Inscripción {enrollment_id} no encontrada")
@@ -320,16 +278,7 @@ async def actualizar_saldo_enrollment(
     enrollment_id: PydanticObjectId,
     monto_pago_aprobado: float
 ):
-    """
-    Actualizar el saldo de una inscripción cuando se aprueba un pago
-    
-    Esta función es llamada automáticamente por payment_service
-    cuando se aprueba un pago.
-    
-    Args:
-        enrollment_id: ID de la inscripción
-        monto_pago_aprobado: Monto del pago que fue aprobado
-    """
+    """Actualizar el saldo de una inscripción cuando se aprueba un pago"""
     enrollment = await Enrollment.get(enrollment_id)
     if not enrollment:
         raise ValueError(f"Inscripción {enrollment_id} no encontrada")
@@ -346,3 +295,4 @@ async def actualizar_saldo_enrollment(
         enrollment.estado = EstadoInscripcion.COMPLETADO
     
     await enrollment.save()
+    
