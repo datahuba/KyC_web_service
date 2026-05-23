@@ -671,3 +671,69 @@ async def import_students(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
+
+# Esquema Pydantic local para recibir la lista de IDs a eliminar
+from pydantic import BaseModel
+
+class BulkDeleteRequest(BaseModel):
+    ids: List[PydanticObjectId]
+
+@router.post(
+    "/bulk-delete",
+    summary="Eliminar Estudiantes en Lote (Cascada)",
+    responses={
+        200: {"description": "Estudiantes eliminados con éxito en cascada"},
+        403: {"description": "Sin permisos - Solo SuperAdmin"}
+    }
+)
+async def bulk_delete_students(
+    *,
+    payload: BulkDeleteRequest,
+    current_user: User = Depends(require_admin)
+) -> Any:
+    """
+    Eliminar estudiantes en lote y en cascada (estudiante, inscripciones y pagos).
+    
+    **Requiere:** SOLO SuperAdmin
+    """
+    from models.enums import UserRole
+    from models.enrollment import Enrollment
+    try:
+        from models.payment import Payment
+    except ImportError:
+        Payment = None
+        
+    # 1. Validar permisos estrictos de SuperAdmin
+    if current_user.rol != UserRole.SUPERADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo el rol de SUPERADMIN está autorizado para realizar el borrado masivo de estudiantes"
+        )
+        
+    if not payload.ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Debe proporcionar al menos un ID de estudiante para eliminar"
+        )
+        
+    # 2. Obtener todas las inscripciones asociadas a estos estudiantes de forma masiva
+    enrollments = await Enrollment.find({"estudiante_id": {"$in": payload.ids}}).to_list()
+    enrollment_ids = [e.id for e in enrollments]
+    
+    # 3. Eliminar todos los pagos asociados a estas inscripciones en lote
+    if Payment:
+        if enrollment_ids:
+            await Payment.find({"enrollment_id": {"$in": enrollment_ids}}).delete()
+        # También borrar pagos si tienen referencia directa a estudiante_id
+        await Payment.find({"estudiante_id": {"$in": payload.ids}}).delete()
+        
+    # 4. Eliminar todas las inscripciones en lote
+    await Enrollment.find({"estudiante_id": {"$in": payload.ids}}).delete()
+    
+    # 5. Eliminar las cuentas de estudiantes en lote
+    await Student.find({"_id": {"$in": payload.ids}}).delete()
+    
+    return {
+        "message": f"Se eliminaron con éxito {len(payload.ids)} estudiantes y todos sus registros asociados en cascada.",
+        "deleted_count": len(payload.ids)
+    }

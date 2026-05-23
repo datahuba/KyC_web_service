@@ -10,12 +10,11 @@ from beanie import PydanticObjectId
 from models.user import User
 from schemas.user import UserCreate, UserUpdate
 
-
 from models.enums import UserRole
 from beanie.operators import Or
 
 async def get_users(page: int = 1, per_page: int = 10) -> tuple[List[User], int]:
-    """Obtener lista de usuarios con paginación"""
+    """Obtener lista de usuarios con paginación (incluye a todos los roles para administración global)"""
     query = User.find_all()
     total_count = await query.count()
     skip = (page - 1) * per_page
@@ -24,8 +23,20 @@ async def get_users(page: int = 1, per_page: int = 10) -> tuple[List[User], int]
 
 
 async def get_active_users() -> List[User]:
-    """Obtener todos los usuarios activos (potenciales docentes)"""
-    return await User.find(User.activo == True).sort("username").to_list()
+    """
+    Obtener todos los usuarios activos que sean DOCENTES reales.
+    
+    FILTRADO CORRECTO (Issue #11):
+    Excluye estrictamente a las cuentas administrativas (Admins y SuperAdmins)
+    de la lista de docentes.
+    """
+    from models.enums import UserRole
+    
+    return await User.find(
+        User.activo == True,
+        User.rol != UserRole.ADMIN,
+        User.rol != UserRole.SUPERADMIN
+    ).sort("username").to_list()
 
 
 async def get_user(id: PydanticObjectId) -> Optional[User]:
