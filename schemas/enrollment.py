@@ -68,6 +68,8 @@ class EnrollmentResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     
+    matricula_pagada: Optional[bool] = False
+
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True,

@@ -308,10 +308,6 @@ async def aprobar_pago(
     
     Returns:
         Pago aprobado
-    
-    Raises:
-        ValueError: Si el pago no existe
-        ValueError: Si el pago no está pendiente
     """
     
     # 1. Obtener pago
@@ -343,11 +339,22 @@ async def aprobar_pago(
             f"Este pago parece ser un duplicado. Considera rechazarlo en su lugar."
         )
     
-    # 4. Aprobar pago
+    # 4. Obtener inscripción relacionada
+    enrollment = await Enrollment.get(payment.inscripcion_id)
+    if not enrollment:
+        raise ValueError(f"Inscripción {payment.inscripcion_id} no encontrada")
+    
+    # CONTROL DE MATRÍCULA ÚNICA (Backend):
+    # Si el concepto del pago es 'Matrícula', marcamos el booleano en la inscripción
+    if payment.concepto == "Matrícula":
+        enrollment.matricula_pagada = True
+        await enrollment.save()
+    
+    # 5. Aprobar pago
     payment.aprobar_pago(admin_username)
     await payment.save()
     
-    # 5. Actualizar enrollment
+    # 6. Actualizar enrollment (Monto y balances financieros en cascada)
     await enrollment_service.actualizar_saldo_enrollment(
         enrollment_id=payment.inscripcion_id,
         monto_pago_aprobado=payment.cantidad_pago
@@ -376,10 +383,6 @@ async def rechazar_pago(
     
     Returns:
         Pago rechazado
-    
-    Raises:
-        ValueError: Si el pago no existe
-        ValueError: Si el pago no está pendiente
     """
     
     # 1. Obtener pago
