@@ -57,15 +57,19 @@ class StudentCreate(BaseModel):
     
     Uso: POST /students/
     
-    El carnet se usará como contraseña inicial (será hasheada automáticamente).
-    Solo registro y carnet son obligatorios.
+    El carnet se usará como contraseña inicial por defecto.
+    Se puede enviar un password personalizado y un course_id opcionalmente.
     """
     
     # Campos obligatorios
     registro: str = Field(..., description="Número de registro único del estudiante (usado como username)")
-    carnet: str = Field(..., description="Carnet de identidad (será usado como contraseña inicial y almacenado)")
+    carnet: str = Field(..., description="Carnet de identidad (será usado como contraseña inicial y almacenado si no se provee un password)")
     
-    # Campos opcionales
+    # Campos opcionales nuevos (Para formulario rápido)
+    password: Optional[str] = Field(None, min_length=5, description="Contraseña inicial del estudiante (opcional, fallback a carnet)")
+    course_id: Optional[PyObjectId] = Field(None, description="ID del curso para inscripción inicial (opcional)")
+    
+    # Campos opcionales estándar
     nombre: Optional[str] = Field(None, min_length=1, max_length=200, description="Nombre completo del estudiante")
     email: Optional[EmailStr] = Field(None, description="Correo electrónico")
     extension: Optional[str] = Field(None, description="Extension del carnet de identidad")
@@ -79,6 +83,8 @@ class StudentCreate(BaseModel):
             "example": {
                 "registro": "20240001",
                 "carnet": "12345678",
+                "password": "MiClaveSegura123",
+                "course_id": "507f1f77bcf86cd799439012",
                 "nombre": "María Fernanda López García",
                 "email": "maria.lopez@estudiante.edu.bo",
                 "extension": "LP",
@@ -114,7 +120,7 @@ class StudentResponse(BaseModel):
     carnet_url: Optional[str] = None
     afiliacion_url: Optional[str] = None
     
-    # OBJETO ANIDADO DEL TÍTULO PROFESIONAL (Espera una estructura de tipo dict)
+    # OBJETO ANIDADO DEL TÍTULO PROFESIONAL
     titulo: Optional[dict] = None
     
     # Estado y Metadata
@@ -142,7 +148,6 @@ class StudentResponse(BaseModel):
                 "es_estudiante_interno": "interno",
                 "activo": True,
                 "lista_cursos_ids": [],
-
                 "created_at": "2024-03-20T10:00:00",
                 "updated_at": "2024-03-20T10:00:00"
             }
@@ -154,14 +159,6 @@ class StudentResponse(BaseModel):
 class StudentUpdateSelf(BaseModel):
     """
     Schema para que un estudiante actualice su propio perfil
-    
-    Uso: PATCH /students/me o PATCH /students/{id} (si es el mismo estudiante)
-    
-    Permite actualizar información personal básica.
-    
-    Nota: 
-    - No se permite cambiar la contraseña desde este endpoint (usar POST /auth/change-password)
-    - Para subir foto de perfil: POST /students/me/upload/photo
     """
     
     celular: Optional[str] = None
@@ -181,12 +178,6 @@ class StudentUpdateSelf(BaseModel):
 class StudentUpdateAdmin(BaseModel):
     """
     Schema para que un admin actualice cualquier campo de un estudiante
-    
-    Uso: PATCH /students/{id} (solo admins)
-    
-    Permite actualizar todos los campos excepto: id, created_at, updated_at
-    
-    Nota: Los documentos ahora se manejan en Enrollment.requisitos
     """
     registro: Optional[str] = None
     password: Optional[str] = Field(None, min_length=5)
@@ -219,4 +210,4 @@ class StudentUpdateAdmin(BaseModel):
             }
         }
     }
-
+    
