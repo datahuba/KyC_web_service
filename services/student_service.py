@@ -154,12 +154,17 @@ async def delete_student(id: PydanticObjectId) -> Student:
 
 
 # ============================================================================
-# LOGICA DE IMPORTACIÓN MASIVA DESDE EXCEL
+# LOGICA DE IMPORTACIÓN MASIVA DESDE EXCEL OPTIMIZADA DE ALTA VELOCIDAD (Bulk Write)
 # ============================================================================
 
 async def import_students_from_excel(file_content: bytes) -> dict:
     """
     Importar estudiantes de forma masiva desde un archivo de Excel (.xlsx).
+    
+    ¡OPTIMIZACIÓN DE ALTO RENDIMIENTO!
+    1. Lee el archivo y valida datos básicos en memoria en una sola pasada.
+    2. Realiza EXACTAMENTE 1 consulta de red para verificar todos los duplicados (operador $in).
+    3. Realiza EXACTAMENTE 1 operación de red para insertar todos los registros (insert_many).
     """
     from core.security import get_password_hash
     from models.enums import TipoEstudiante
@@ -179,43 +184,29 @@ async def import_students_from_excel(file_content: bytes) -> dict:
         cell_val = sheet.cell(row=1, column=col_idx).value
         header_row.append(str(cell_val).strip().lower() if cell_val is not None else "")
         
-    col_nombre = 0
-    col_registro = 0
-    col_carnet = 0
-    col_extension = 0
-    col_email = 0
-    col_celular = 0
-    col_domicilio = 0
-    col_tipo = 0
+    col_nombre = col_registro = col_carnet = col_extension = col_email = col_celular = col_domicilio = col_tipo = 0
     
     for idx, header in enumerate(header_row, start=1):
-        if "nombre" in header:
-            col_nombre = idx
-        elif "registro" in header:
-            col_registro = idx
-        elif header == "ci" or "carnet" in header or "documento" in header:
-            col_carnet = idx
-        elif "extension" in header or "ext" in header:
-            col_extension = idx
-        elif "correo" in header or "email" in header or "mail" in header:
-            col_email = idx
-        elif "celular" in header or "telefono" in header or "telf" in header:
-            col_celular = idx
-        elif "domicilio" in header or "direccion" in header or "dir" in header:
-            col_domicilio = idx
-        elif "tipo" in header or "interno" in header:
-            col_tipo = idx
+        if "nombre" in header: col_nombre = idx
+        elif "registro" in header: col_registro = idx
+        elif header == "ci" or "carnet" in header or "documento" in header: col_carnet = idx
+        elif "extension" in header or "ext" in header: col_extension = idx
+        elif "correo" in header or "email" in header or "mail" in header: col_email = idx
+        elif "celular" in header or "telefono" in header or "telf" in header: col_celular = idx
+        elif "domicilio" in header or "direccion" in header or "dir" in header: col_domicilio = idx
+        elif "tipo" in header or "interno" in header: col_tipo = idx
             
     if col_nombre == 0:
         raise ValueError("No se encontró la columna de 'Nombre' en la fila de cabecera del Excel.")
     if col_carnet == 0:
         raise ValueError("No se encontró la columna de 'CI' o 'Carnet' en la fila de cabecera del Excel.")
         
-    success_count = 0
     errors = []
-    
+    candidates = []
+    registros_en_archivo = set()
     empty_row_streak = 0
     
+    # 2. ESCANEAR FILAS Y VALIDAR EN MEMORIA (FILTRANDO VACÍOS)
     for row_idx in range(2, sheet.max_row + 1):
         try:
             nombre_val = sheet.cell(row=row_idx, column=col_nombre).value if col_nombre > 0 else None
@@ -264,39 +255,70 @@ async def import_students_from_excel(file_content: bytes) -> dict:
             if not registro:
                 if not email:
                     errors.append(
-                        f"Fila {row_idx}: El estudiante '{nombre}' no tiene Registro académico. "
-                        f"Se intentó usar el correo como usuario, pero el campo 'Email' también está vacío."
+                        f"Fila {row_idx}: El estudiante '{nombre}' no tiene Registro académico ni Email de fallback."
                     )
                     continue
                 registro = email 
                 
-            existing_student = await Student.find_one(Student.registro == registro)
-            if existing_student:
-                errors.append(f"Fila {row_idx}: El usuario/registro '{registro}' ya existe en el sistema.")
+            # Controlar duplicados en el mismo archivo para no meter llaves repetidas a BD
+            if registro in registros_en_archivo:
+                errors.append(f"Fila {row_idx}: El registro/email '{registro}' está repetido dentro del mismo Excel.")
                 continue
                 
-            hashed_password = get_password_hash(carnet)
+            registros_en_archivo.add(registro)
             
-            student = Student(
-                registro=registro,
+            candidates.append({
+                "row_idx": row_idx,
+                "registro": registro,
+                "nombre": nombre,
+                "email": email,
+                "carnet": carnet,
+                "extension": extension,
+                "celular": celular,
+                "domicilio": domicilio,
+                "es_estudiante_interno": tipo_estudiante
+            })
+        except Exception as e:
+            errors.append(f"Fila {row_idx}: Error al procesar datos de la fila: {str(e)}")
+            
+    # 3. VERIFICAR DUPLICADOS EN BASE DE DATOS (1 SOLA CONSULTA DE RED)
+    existing_in_db = set()
+    if candidates:
+        all_registros_excel = [c["registro"] for c in candidates]
+        existing_students_db = await Student.find({"registro": {"$in": all_registros_excel}}).to_list()
+        existing_in_db = {s.registro for s in existing_students_db}
+        
+    # 4. PREPARAR OBJETOS DE INSERCIÓN Y HASHEAR CONTRASEÑAS (PROCESADOR CPU CONTINUO)
+    students_to_insert = []
+    for c in candidates:
+        if c["registro"] in existing_in_db:
+            errors.append(f"Fila {c['row_idx']}: El registro/usuario '{c['registro']}' ya existe en el sistema.")
+            continue
+            
+        hashed_password = get_password_hash(c["carnet"])
+        
+        students_to_insert.append(
+            Student(
+                registro=c["registro"],
                 password=hashed_password,
-                nombre=nombre,
-                email=email,
-                carnet=carnet,
-                extension=extension,
-                celular=celular,
-                domicilio=domicilio,
-                es_estudiante_interno=tipo_estudiante,
+                nombre=c["nombre"],
+                email=c["email"],
+                carnet=c["carnet"],
+                extension=c["extension"],
+                celular=c["celular"],
+                domicilio=c["domicilio"],
+                es_estudiante_interno=c["es_estudiante_interno"],
                 activo=True,
                 lista_cursos_ids=[]
             )
-            
-            await student.insert()
-            success_count += 1
-            
-        except Exception as ex:
-            errors.append(f"Fila {row_idx}: Error inesperado: {str(ex)}")
-            
+        )
+        
+    # 5. INSERCIÓN MASIVA DE ALTO RENDIMIENTO (1 SOLA ESCRITURA DE RED)
+    success_count = 0
+    if students_to_insert:
+        await Student.insert_many(students_to_insert)
+        success_count = len(students_to_insert)
+        
     return {
         "success_count": success_count,
         "errors": errors
