@@ -73,15 +73,56 @@ async def create_student(student_in: StudentCreate) -> Student:
     """
     Crear nuevo estudiante
     
-    La contraseña será el carnet (hasheado automáticamente).
+    Si se provee password, se usa; sino, se hashea el carnet (fallback).
+    Si se provee course_id, se inscribe automáticamente (y se validan los datos primero).
     """
     from core.security import get_password_hash
+    from models.course import Course
+    from schemas.enrollment import EnrollmentCreate
+    from services import enrollment_service
     
     student_data = student_in.model_dump(exclude_unset=True)
-    student_data["password"] = get_password_hash(student_data["carnet"])
     
+    # 1. Extraer campos opcionales sin romper el resto de la lógica
+    course_id = student_data.pop("course_id", None)
+    password_input = student_data.pop("password", None)
+    
+    # 2. Validar existencia del curso ANTES de crear al estudiante (Ahorro de BD)
+    course_obj = None
+    if course_id:
+        course_obj = await Course.get(course_id)
+        if not course_obj:
+            raise ValueError("Curso no encontrado")
+        if not course_obj.activo:
+            raise ValueError("El curso seleccionado está inactivo")
+
+    # 3. Lógica Inteligente de Contraseña
+    if password_input:
+        student_data["password"] = get_password_hash(password_input)
+    else:
+        student_data["password"] = get_password_hash(student_data["carnet"])
+        
+    # 4. Persistir Estudiante
     student = Student(**student_data)
     await student.insert()
+    
+    # 5. Puente de Inscripción Integrado
+    if course_obj:
+        try:
+            await enrollment_service.create_enrollment(
+                enrollment_in=EnrollmentCreate(
+                    estudiante_id=student.id,
+                    curso_id=course_obj.id,
+                    descuento_id=None,
+                    descuento_personalizado=None
+                ),
+                admin_username="system_student_create"
+            )
+        except Exception as e:
+            # Rollback compensatorio si la inscripción falla por error interno
+            await student.delete()
+            raise ValueError(f"Error en la auto-inscripción: {str(e)}")
+            
     return student
 
 
@@ -119,10 +160,6 @@ async def delete_student(id: PydanticObjectId) -> Student:
 async def import_students_from_excel(file_content: bytes) -> dict:
     """
     Importar estudiantes de forma masiva desde un archivo de Excel (.xlsx).
-    
-    ¡SOPORTE DE MAPEO DINÁMICO DE CABECERAS!
-    Busca de forma inteligente las palabras clave en la Fila 1 para asignar
-    las columnas sin importar el orden o si hay columnas complementarias.
     """
     from core.security import get_password_hash
     from models.enums import TipoEstudiante
@@ -137,13 +174,11 @@ async def import_students_from_excel(file_content: bytes) -> dict:
         raise ValueError(f"No se pudo parsear el archivo Excel: {str(e)}")
         
     # 1. ESCANEO DINÁMICO DE CABECERAS (FILA 1)
-    # Leemos la fila de cabecera y la convertimos a minúsculas
     header_row = []
     for col_idx in range(1, sheet.max_column + 1):
         cell_val = sheet.cell(row=1, column=col_idx).value
         header_row.append(str(cell_val).strip().lower() if cell_val is not None else "")
         
-    # Inicializar índices de columnas mapeadas (1-based index, 0 = no encontrado)
     col_nombre = 0
     col_registro = 0
     col_carnet = 0
@@ -153,7 +188,6 @@ async def import_students_from_excel(file_content: bytes) -> dict:
     col_domicilio = 0
     col_tipo = 0
     
-    # Mapear columnas buscando coincidencias en la cabecera
     for idx, header in enumerate(header_row, start=1):
         if "nombre" in header:
             col_nombre = idx
@@ -172,7 +206,6 @@ async def import_students_from_excel(file_content: bytes) -> dict:
         elif "tipo" in header or "interno" in header:
             col_tipo = idx
             
-    # Validaciones críticas de existencia de columnas indispensables
     if col_nombre == 0:
         raise ValueError("No se encontró la columna de 'Nombre' en la fila de cabecera del Excel.")
     if col_carnet == 0:
@@ -181,29 +214,24 @@ async def import_students_from_excel(file_content: bytes) -> dict:
     success_count = 0
     errors = []
     
-    # 2. EVITAR TIMEOUT: Protector contra celdas vacías formateadas
     empty_row_streak = 0
     
-    # Recorrer filas omitiendo la cabecera
     for row_idx in range(2, sheet.max_row + 1):
         try:
-            # Leer los dos campos críticos para verificar si la fila está vacía
             nombre_val = sheet.cell(row=row_idx, column=col_nombre).value if col_nombre > 0 else None
             carnet_val = sheet.cell(row=row_idx, column=col_carnet).value if col_carnet > 0 else None
             
             nombre_str = str(nombre_val).strip() if nombre_val is not None else ""
             carnet_str = str(carnet_val).strip() if carnet_val is not None else ""
             
-            # Si encontramos 5 filas completamente vacías consecutivas, detenemos el proceso
             if not nombre_str and not carnet_str:
                 empty_row_streak += 1
                 if empty_row_streak >= 5:
-                    break # Salir del bucle para no causar timeout
+                    break 
                 continue
             else:
-                empty_row_streak = 0 # Resetear contador si la fila tiene datos
+                empty_row_streak = 0
                 
-            # Leer el resto de los campos de forma dinámica según su columna mapeada
             registro = sheet.cell(row=row_idx, column=col_registro).value if col_registro > 0 else None
             extension = sheet.cell(row=row_idx, column=col_extension).value if col_extension > 0 else None
             email = sheet.cell(row=row_idx, column=col_email).value if col_email > 0 else None
@@ -211,7 +239,6 @@ async def import_students_from_excel(file_content: bytes) -> dict:
             domicilio = sheet.cell(row=row_idx, column=col_domicilio).value if col_domicilio > 0 else None
             tipo_raw = sheet.cell(row=row_idx, column=col_tipo).value if col_tipo > 0 else None
             
-            # Sanitizar textos definitivos
             nombre = nombre_str if nombre_str else None
             carnet = carnet_str if carnet_str else None
             registro = str(registro).strip() if registro is not None else None
@@ -220,14 +247,12 @@ async def import_students_from_excel(file_content: bytes) -> dict:
             celular = str(celular).strip() if celular is not None else None
             domicilio = str(domicilio).strip() if domicilio is not None else None
             
-            # Clasificar tipo de estudiante
             tipo_estudiante = TipoEstudiante.EXTERNO
             if tipo_raw:
                 tipo_clean = str(tipo_raw).strip().lower()
                 if "interno" in tipo_clean:
                     tipo_estudiante = TipoEstudiante.INTERNO
                     
-            # Validaciones obligatorias de fila
             if not nombre:
                 errors.append(f"Fila {row_idx}: El nombre completo es obligatorio.")
                 continue
@@ -236,8 +261,6 @@ async def import_students_from_excel(file_content: bytes) -> dict:
                 errors.append(f"Fila {row_idx}: El carnet (CI) de '{nombre}' es obligatorio.")
                 continue
                 
-            # REGLA DE FALLBACK SOLICITADA:
-            # Si no viene Registro académico, el Email se convierte en su nombre de usuario (registro)
             if not registro:
                 if not email:
                     errors.append(
@@ -245,18 +268,15 @@ async def import_students_from_excel(file_content: bytes) -> dict:
                         f"Se intentó usar el correo como usuario, pero el campo 'Email' también está vacío."
                     )
                     continue
-                registro = email # Aplicamos fallback
+                registro = email 
                 
-            # Validar duplicados por usuario/registro único en MongoDB
             existing_student = await Student.find_one(Student.registro == registro)
             if existing_student:
                 errors.append(f"Fila {row_idx}: El usuario/registro '{registro}' ya existe en el sistema.")
                 continue
                 
-            # Hashear la contraseña inicial (Carnet de identidad)
             hashed_password = get_password_hash(carnet)
             
-            # Instanciar modelo
             student = Student(
                 registro=registro,
                 password=hashed_password,
