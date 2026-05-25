@@ -14,8 +14,21 @@ from models.enums import UserRole
 from beanie.operators import Or
 
 async def get_users(page: int = 1, per_page: int = 10) -> tuple[List[User], int]:
-    """Obtener lista de usuarios con paginación (incluye a todos los roles para administración global)"""
-    query = User.find_all()
+    """
+    Obtener lista de usuarios administradores con paginación.
+    
+    FILTRADO DE DOCENTES (Issue E):
+    Restringe la consulta únicamente a cuentas con privilegios administrativos (ADMIN o SUPERADMIN),
+    excluyendo a los docentes de la lista de gestión global.
+    """
+    from models.enums import UserRole
+    
+    query = User.find(
+        Or(
+            User.rol == UserRole.ADMIN,
+            User.rol == UserRole.SUPERADMIN
+        )
+    )
     total_count = await query.count()
     skip = (page - 1) * per_page
     users = await query.sort("-created_at").skip(skip).limit(per_page).to_list()
