@@ -13,7 +13,7 @@ Permisos:
 
 from typing import List, Optional
 from datetime import datetime
-from models.enrollment import Enrollment
+from models.enrollment import Enrollment, ModuloEstado
 from models.student import Student
 from models.course import Course
 from models.enums import TipoEstudiante, EstadoInscripcion
@@ -32,7 +32,8 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
     2. Calcular precios según tipo de estudiante
     3. Aplicar descuentos (del curso + seleccionado) sobre el costo de colegiatura (módulos)
     4. Sumar el costo de la matrícula al total de la deuda definitiva
-    5. Crear inscripción con snapshot de precios
+    5. Clonar los módulos del curso adaptando sus precios y estados
+    6. Crear inscripción con snapshot de precios y módulos clonados
     """
     
     # 1. Obtener estudiante y curso
@@ -97,7 +98,36 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
     # 7. Copiar requisitos del curso y convertirlos a Requisito con estado PENDIENTE
     requisitos_enrollment = [template.to_requisito() for template in course.requisitos]
     
-    # 8. Crear inscripción con snapshot de precios corregido
+    # 8. Clonación y distribución de módulos A PRUEBA DE BALAS
+    modulos_enrollment = []
+    if course.modulos:
+        suma_costo_modulos = sum(mod.costo for mod in course.modulos)
+        total_asignado = 0.0
+        
+        for i, mod in enumerate(course.modulos):
+            if i == len(course.modulos) - 1:
+                # El último módulo absorbe el resto exacto. Se protege con max(0.0)
+                costo_final_mod = max(0.0, round(colegiatura_final - total_asignado, 2))
+            else:
+                if suma_costo_modulos > 0:
+                    # Distribución proporcional real según el peso de cada módulo
+                    costo_final_mod = round((mod.costo / suma_costo_modulos) * colegiatura_final, 2)
+                else:
+                    # Fallback: si el admin puso 0 Bs a todos los módulos, divide en partes iguales
+                    costo_final_mod = round(colegiatura_final / len(course.modulos), 2)
+                
+                total_asignado += costo_final_mod
+            
+            modulos_enrollment.append(
+                ModuloEstado(
+                    nombre=mod.nombre,
+                    costo=costo_final_mod,
+                    estado="Pendiente",
+                    monto_pagado=0.0
+                )
+            )
+    
+    # 9. Crear inscripción con snapshot de precios y módulos corregido
     enrollment = Enrollment(
         estudiante_id=enrollment_in.estudiante_id,
         curso_id=enrollment_in.curso_id,
@@ -105,6 +135,7 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
         costo_total=costo_total,
         costo_matricula=costo_matricula,
         cantidad_cuotas=course.cantidad_cuotas,
+        modulos=modulos_enrollment,
         
         # Descuento Curso
         descuento_curso_id=descuento_curso_id,
@@ -125,12 +156,12 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
     
     await enrollment.insert()
     
-    # 9. Agregar estudiante a la lista de inscritos del curso
+    # 10. Agregar estudiante a la lista de inscritos del curso
     if enrollment_in.estudiante_id not in course.inscritos:
         course.inscritos.append(enrollment_in.estudiante_id)
         await course.save()
     
-    # 10. Agregar curso a la lista de cursos del estudiante
+    # 11. Agregar curso a la lista de cursos del estudiante
     if enrollment_in.curso_id not in student.lista_cursos_ids:
         student.lista_cursos_ids.append(enrollment_in.curso_id)
         await student.save()
