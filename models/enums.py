@@ -330,4 +330,3 @@ class SubmissionStatus(str, Enum):
     PENDING = "pending"      # No ha entregado
     SUBMITTED = "submitted"  # Entregó, pendiente de calificación
     GRADED = "graded"        # Calificado por el docente
-    
