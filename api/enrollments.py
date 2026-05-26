@@ -29,13 +29,14 @@ from schemas.enrollment import (
     EnrollmentCreate,
     EnrollmentResponse,
     EnrollmentUpdate,
-    EnrollmentWithDetails
+    EnrollmentWithDetails,
+    ModuloNotaUpdate
 )
 from services import enrollment_service, payment_service
 from beanie import PydanticObjectId
 
 # Nuevas dependencias de seguridad del ISSUE L
-from api.dependencies import require_superadmin, require_cpd, require_staff, get_current_user
+from api.dependencies import require_superadmin, require_cpd, require_staff, require_docente, get_current_user
 
 router = APIRouter()
 
@@ -264,6 +265,33 @@ async def get_next_payment_info(
         return None
         
     return next_payment
+
+
+# ========================================================================
+# ENDPOINTS ACADÉMICOS (ISSUE P - NOTAS POR MÓDULO)
+# ========================================================================
+@router.patch("/{id}/modulos/{index}/nota", response_model=EnrollmentResponse, summary="Calificar Módulo")
+async def update_modulo_nota(
+    *, 
+    id: PydanticObjectId, 
+    index: int = Path(..., ge=0, description="Índice del módulo en el array (0, 1, 2...)"),
+    nota_update: ModuloNotaUpdate,
+    current_user: User = Depends(require_docente) # Docentes, CPD, Admins
+) -> Any:
+    """
+    Ingresa o actualiza la calificación de un módulo y recalcula el promedio.
+    """
+    try:
+        username = current_user.username if hasattr(current_user, 'username') else "docente_autorizado"
+        enrollment = await enrollment_service.actualizar_nota_modulo(
+            enrollment_id=id,
+            modulo_index=index,
+            nota=nota_update.nota,
+            evaluador_username=username
+        )
+        return await enrollment_service.enrich_enrollment_dates(enrollment)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ========================================================================
