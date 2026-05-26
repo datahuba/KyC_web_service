@@ -151,7 +151,7 @@ class TipoPago(str, Enum):
     -------------------------
     Los estudiantes pueden pagar de diferentes formas:
     - Algunos prefieren pagar todo de una vez (descuento)
-    - Otros necesitan pagar en cuotas (facilidad)
+    - Others necesitan pagar en cuotas (facilidad)
     
     Valores:
     -------
@@ -300,16 +300,23 @@ class EstadoRequisito(str, Enum):
 
 class UserRole(str, Enum):
     """
-    Roles de usuario para control de acceso (RBAC)
+    Roles de usuario para control de acceso (RBAC) en la UAGRM
 
     Valores:
     -------
-    - DOCENTE: gestiona materiales, tareas y calificaciones en classrooms
-    - ADMIN: crea estudiantes, cursos, descuentos, enrollments,
-    - SUPERADMIN: crea todo lo anterior y usuarios de tipo admin """
+    - DOCENTE: Gestiona materiales, tareas y calificaciones académicos en classrooms.
+    - ADMIN: Administrador general de control legacy del sistema.
+    - SUPERADMIN: Soporte técnico y control maestro total del sistema.
+    - MAE: Máxima Autoridad Ejecutiva (Decano, Director de Postgrado, JAF). Acceso de solo lectura global para la toma de decisiones.
+    - CPD: Centro de Procesamiento de Datos. Permisos de escritura académica (crear cursos, módulos e inscripciones) sin acceso a finanzas.
+    - COBRANZA: Responsable de cuentas por cobrar. Permisos de validación y aprobación de comprobantes de pago e ingresos sin modificación académica.
+    """
     DOCENTE = "docente"
     ADMIN = "admin"
     SUPERADMIN = "superadmin"
+    MAE = "mae"
+    CPD = "cpd"
+    COBRANZA = "cobranza"
 
 
 class AssignmentType(str, Enum):
@@ -323,4 +330,4 @@ class SubmissionStatus(str, Enum):
     PENDING = "pending"      # No ha entregado
     SUBMITTED = "submitted"  # Entregó, pendiente de calificación
     GRADED = "graded"        # Calificado por el docente
-
+    
