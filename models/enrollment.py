@@ -14,17 +14,23 @@ from .enums import EstadoInscripcion, TipoEstudiante
 from .requisito import Requisito
 
 # ========================================================================
-# SUB-MODELO: ESTADO DEL MÓDULO (NUEVO)
+# SUB-MODELO: ESTADO DEL MÓDULO (FINANCIERO Y ACADÉMICO)
 # ========================================================================
 class ModuloEstado(BaseModel):
     """
     Copia del módulo del curso para este estudiante específico.
-    Lleva el control de si el estudiante ya pagó esta cuota/módulo o no.
+    Lleva el control financiero (pagos) y académico (notas) del módulo.
     """
     nombre: str = Field(..., description="Nombre del módulo (Ej: Módulo 1)")
+    
+    # --- Control Financiero ---
     costo: float = Field(..., ge=0, description="Costo que debe pagar por este módulo")
     estado: str = Field(default="Pendiente", description="Puede ser: Pendiente, Parcial, Pagado")
     monto_pagado: float = Field(default=0.0, ge=0, description="Cuánto ha pagado de este módulo")
+    
+    # --- Control Académico (ISSUE P) ---
+    nota: Optional[float] = Field(default=None, ge=0, le=100, description="Calificación obtenida en el módulo (0-100)")
+    estado_academico: str = Field(default="Cursando", description="Puede ser: Cursando, Aprobado, Reprobado")
 
 
 class Enrollment(MongoBaseModel):
@@ -45,13 +51,13 @@ class Enrollment(MongoBaseModel):
     
     es_estudiante_interno: TipoEstudiante = Field(..., description="Tipo de estudiante al momento de inscribirse (snapshot)")
     
-    costo_total: float = Field(..., gt=0, description="Costo total del curso para este estudiante")
+    costo_total: float = Field(..., ge=0, description="Costo total del curso para este estudiante")
     costo_matricula: float = Field(..., ge=0, description="Costo de matrícula")
     cantidad_cuotas: int = Field(..., ge=1, description="Cantidad de cuotas para pagar")
     
     modulos: List[ModuloEstado] = Field(
         default_factory=list,
-        description="Fotocopia de los módulos del curso con el estado de pago del estudiante"
+        description="Fotocopia de los módulos del curso con el estado académico y financiero del estudiante"
     )
     
     # ========================================================================
@@ -86,7 +92,6 @@ class Enrollment(MongoBaseModel):
     requisitos: List['Requisito'] = Field(default_factory=list)
     nota_final: Optional[float] = Field(None, ge=0, le=100)
     
-# >>> AGREGAR ESTE CAMPO AL FINAL DE LOS ATRIBUTOS <<<
     matricula_pagada: bool = Field(default=False, description="¿Ya pagó la matrícula el estudiante para este curso?")
 
     # ========================================================================
@@ -133,7 +138,6 @@ class Enrollment(MongoBaseModel):
             if pendiente_matricula > 0.01:
                 return {"concepto": "Matrícula", "numero_cuota": 0, "monto_sugerido": round(pendiente_matricula, 2)}
         
-        # AHORA TAMBIÉN PODRÍA LEER LA LISTA DE MÓDULOS PENDIENTES
         for i, mod in enumerate(self.modulos):
             if mod.estado != "Pagado":
                 monto_sugerido = mod.costo - mod.monto_pagado
@@ -163,3 +167,4 @@ class Enrollment(MongoBaseModel):
     
     class Settings:
         name = "enrollments"
+        

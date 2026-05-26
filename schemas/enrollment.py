@@ -15,6 +15,13 @@ class ModuloEstadoSchema(BaseModel):
     costo: float
     estado: str
     monto_pagado: float
+    # Campos académicos (ISSUE P)
+    nota: Optional[float] = None
+    estado_academico: Optional[str] = "Cursando"
+
+class ModuloNotaUpdate(BaseModel):
+    """Schema para actualizar la calificación de un submódulo"""
+    nota: float = Field(..., ge=0, le=100, description="Calificación del módulo (0-100)")
 
 class EnrollmentCreate(BaseModel):
     """Schema para crear una nueva inscripción"""
@@ -97,3 +104,4 @@ class EnrollmentWithDetails(EnrollmentResponse):
         "arbitrary_types_allowed": True,
         "from_attributes": True
     }
+    

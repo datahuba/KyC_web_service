@@ -19,8 +19,6 @@ from models.course import Course
 from models.enums import TipoEstudiante, EstadoInscripcion
 from schemas.enrollment import EnrollmentCreate
 from beanie import PydanticObjectId
-
-
 from models.discount import Discount
 
 async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str) -> Enrollment:
@@ -123,7 +121,9 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
                     nombre=mod.nombre,
                     costo=costo_final_mod,
                     estado="Pendiente",
-                    monto_pagado=0.0
+                    monto_pagado=0.0,
+                    nota=None,
+                    estado_academico="Cursando"
                 )
             )
     
@@ -326,4 +326,43 @@ async def actualizar_saldo_enrollment(
         enrollment.estado = EstadoInscripcion.COMPLETADO
     
     await enrollment.save()
+
+
+# ========================================================================
+# LÓGICA ACADÉMICA (ISSUE P)
+# ========================================================================
+async def actualizar_nota_modulo(
+    enrollment_id: PydanticObjectId, 
+    modulo_index: int, 
+    nota: float, 
+    evaluador_username: str
+) -> Enrollment:
+    """
+    Actualiza la calificación de un módulo específico y recalcula el promedio final.
+    Regla de UAGRM Postgrado: Nota >= 64 es 'Aprobado'.
+    """
+    enrollment = await Enrollment.get(enrollment_id)
+    if not enrollment:
+        raise ValueError(f"Inscripción no encontrada")
+        
+    if modulo_index < 0 or modulo_index >= len(enrollment.modulos):
+        raise ValueError(f"Índice de módulo {modulo_index} fuera de rango")
+        
+    # Asignar nota y estado académico
+    enrollment.modulos[modulo_index].nota = round(nota, 2)
     
+    if nota >= 64.0:
+        enrollment.modulos[modulo_index].estado_academico = "Aprobado"
+    else:
+        enrollment.modulos[modulo_index].estado_academico = "Reprobado"
+        
+    # Recalcular Nota Final (Promedio simple de módulos evaluados)
+    notas_evaluadas = [m.nota for m in enrollment.modulos if m.nota is not None]
+    if notas_evaluadas:
+        promedio = sum(notas_evaluadas) / len(notas_evaluadas)
+        enrollment.nota_final = round(promedio, 2)
+        
+    enrollment.updated_at = datetime.utcnow()
+    await enrollment.save()
+    
+    return enrollment
