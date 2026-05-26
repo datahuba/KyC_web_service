@@ -9,24 +9,21 @@ from typing import List, Optional
 from beanie import PydanticObjectId
 from models.user import User
 from schemas.user import UserCreate, UserUpdate
-
 from models.enums import UserRole
 from beanie.operators import Or
 
 async def get_users(page: int = 1, per_page: int = 10) -> tuple[List[User], int]:
     """
     Obtener lista de usuarios administradores con paginación.
-    
-    FILTRADO DE DOCENTES (Issue E):
-    Restringe la consulta únicamente a cuentas con privilegios administrativos (ADMIN o SUPERADMIN),
-    excluyendo a los docentes de la lista de gestión global.
+    Trae a toda la jerarquía administrativa, excluyendo estrictamente a Docentes.
     """
-    from models.enums import UserRole
-    
     query = User.find(
         Or(
             User.rol == UserRole.ADMIN,
-            User.rol == UserRole.SUPERADMIN
+            User.rol == UserRole.SUPERADMIN,
+            User.rol == UserRole.MAE,
+            User.rol == UserRole.CPD,
+            User.rol == UserRole.COBRANZA
         )
     )
     total_count = await query.count()
@@ -38,17 +35,10 @@ async def get_users(page: int = 1, per_page: int = 10) -> tuple[List[User], int]
 async def get_active_users() -> List[User]:
     """
     Obtener todos los usuarios activos que sean DOCENTES reales.
-    
-    FILTRADO CORRECTO (Issue #11):
-    Excluye estrictamente a las cuentas administrativas (Admins y SuperAdmins)
-    de la lista de docentes.
     """
-    from models.enums import UserRole
-    
     return await User.find(
         User.activo == True,
-        User.rol != UserRole.ADMIN,
-        User.rol != UserRole.SUPERADMIN
+        User.rol == UserRole.DOCENTE
     ).sort("username").to_list()
 
 
@@ -68,11 +58,7 @@ async def get_user_by_email(email: str) -> Optional[User]:
 
 
 async def create_user(user_in: UserCreate) -> User:
-    """
-    Crear nuevo usuario
-    
-    La contraseña se hashea automáticamente antes de guardar.
-    """
+    """Crear nuevo usuario (hasheo automático)"""
     from core.security import get_password_hash
     
     user_data = user_in.model_dump()
@@ -90,7 +76,6 @@ async def update_user(
     """Actualizar usuario existente"""
     update_data = user_in.model_dump(exclude_unset=True)
     
-    # Si se actualiza la contraseña, hashearla
     if "password" in update_data:
         from core.security import get_password_hash
         update_data["password"] = get_password_hash(update_data["password"])

@@ -4,14 +4,16 @@ API de Inscripciones (Enrollments)
 
 Endpoints para gestionar inscripciones de estudiantes a cursos.
 
-Permisos:
+Permisos (Según Jerarquía UAGRM):
 ---------
-- POST /enrollments/: ADMIN/SUPERADMIN
-- GET /enrollments/: ADMIN (todas) / STUDENT (solo las suyas)
-- GET /enrollments/{id}: ADMIN / STUDENT (si es suya)
-- PATCH /enrollments/{id}: ADMIN/SUPERADMIN
-- GET /enrollments/student/{student_id}: ADMIN / STUDENT (si es él mismo)
-- GET /enrollments/course/{course_id}: ADMIN
+- POST /enrollments/: CPD, ADMIN, SUPERADMIN
+- GET /enrollments/: STAFF (todos) / STUDENT (solo las suyas)
+- GET /enrollments/{id}: STAFF / STUDENT (si es suya)
+- PATCH /enrollments/{id}: CPD, ADMIN, SUPERADMIN
+- DELETE /enrollments/{id}: SOLO SUPERADMIN
+- GET /enrollments/student/{student_id}: STAFF / STUDENT (si es él mismo)
+- GET /enrollments/course/{course_id}: STAFF
+- Requisitos KYC: CPD aprueba/rechaza
 """
 
 from typing import List, Any, Optional
@@ -31,39 +33,33 @@ from schemas.enrollment import (
 )
 from services import enrollment_service, payment_service
 from beanie import PydanticObjectId
-from api.dependencies import require_admin, get_current_user
-from schemas.common import PaginatedResponse, PaginationMeta
-import math
+
+# Nuevas dependencias de seguridad del ISSUE L
+from api.dependencies import require_superadmin, require_cpd, require_staff, get_current_user
 
 router = APIRouter()
+
+from schemas.common import PaginatedResponse, PaginationMeta
+import math
 
 
 @router.post(
     "/",
     response_model=EnrollmentResponse,
     status_code=201,
-    summary="Crear Inscripción",
-    responses={
-        201: {"description": "Inscripción creada exitosamente. Los requisitos del curso se copian automáticamente."},
-        400: {"description": "Error de validación: estudiante ya inscrito, curso/estudiante no existe, etc."},
-        403: {"description": "Sin permisos - Solo Admin/SuperAdmin"},
-        404: {"description": "Estudiante o curso no encontrado"}
-    }
+    summary="Crear Inscripción"
 )
 async def create_enrollment(
     *,
     enrollment_in: EnrollmentCreate,
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_cpd) # <-- CPD CREA INSCRIPCIONES
 ) -> Any:
-    """
-    Crear nueva inscripción de estudiante a un curso
-    """
+    """Crear nueva inscripción de estudiante a un curso"""
     try:
         enrollment = await enrollment_service.create_enrollment(
             enrollment_in=enrollment_in,
             admin_username=current_user.username
         )
-        # Convertir fechas a hora boliviana
         enriched_enrollment = await enrollment_service.enrich_enrollment_dates(enrollment)
         return enriched_enrollment
     except ValueError as e:
@@ -87,6 +83,7 @@ async def list_enrollments(
 ) -> Any:
     """Listar inscripciones con paginación y filtros avanzados"""
     if isinstance(current_user, User):
+        # Todo el STAFF (Mae, Cobranza, Cpd, Admin) puede leer la tabla
         enrollments, total_count = await enrollment_service.get_all_enrollments(
             page=page, per_page=per_page, q=q, estado=estado,
             curso_id=curso_id, estudiante_id=estudiante_id
@@ -154,7 +151,7 @@ async def update_enrollment(
     *,
     id: PydanticObjectId,
     enrollment_in: EnrollmentUpdate,
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_cpd) # <-- CPD ACTUALIZA INSCRIPCIONES
 ) -> Any:
     """Actualizar inscripción existente"""
     try:
@@ -185,29 +182,14 @@ async def update_enrollment(
 @router.delete(
     "/{id}",
     response_model=EnrollmentResponse,
-    summary="Eliminar Inscripción",
-    responses={
-        200: {"description": "Inscripción y referencias eliminadas exitosamente"},
-        403: {"description": "Sin permisos - Solo SuperAdmin"},
-        404: {"description": "Inscripción no encontrada"}
-    }
+    summary="Eliminar Inscripción"
 )
 async def delete_enrollment(
     *,
     id: PydanticObjectId,
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_superadmin) # <-- SOLO SUPERADMIN BORRA
 ) -> Any:
-    """
-    Eliminar inscripción manualmente
-    
-    **Requiere:** SOLO SuperAdmin
-    
-    **Borrado seguro:**
-    - Se conservan los pagos en la base de datos por motivos de auditoría financiera.
-    - Limpia el ID del curso en el estudiante
-    - Limpia el ID del estudiante en el curso
-    - Borra la inscripción
-    """
+    """Eliminar inscripción manualmente"""
     from models.enums import UserRole
     if current_user.rol != UserRole.SUPERADMIN:
         raise HTTPException(
@@ -219,21 +201,17 @@ async def delete_enrollment(
     if not enrollment:
         raise HTTPException(status_code=404, detail="Inscripción no encontrada")
     
-    # 1. Limpiar referencia en el Estudiante
     student = await Student.get(enrollment.estudiante_id)
     if student and enrollment.curso_id in student.lista_cursos_ids:
         student.lista_cursos_ids.remove(enrollment.curso_id)
         await student.save()
 
-    # 2. Limpiar referencia en el Curso
     course = await Course.get(enrollment.curso_id)
     if course and enrollment.estudiante_id in course.inscritos:
         course.inscritos.remove(enrollment.estudiante_id)
         await course.save()
         
-    # 3. Eliminar el documento de inscripción
     await enrollment.delete()
-    
     return enrollment
 
 
@@ -256,9 +234,9 @@ async def get_enrollments_by_student(
 async def get_enrollments_by_course(
     *,
     course_id: PydanticObjectId,
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_staff) # <-- TODOS LOS ADMINISTRATIVOS
 ) -> Any:
-    """Obtener todas las inscripciones de un curso (solo admins)"""
+    """Obtener todas las inscripciones de un curso"""
     enrollments = await enrollment_service.get_enrollments_by_course(course_id)
     return enrollments
 
@@ -289,7 +267,7 @@ async def get_next_payment_info(
 
 
 # ========================================================================
-# ENDPOINTS DE REQUISITOS
+# ENDPOINTS DE REQUISITOS (KYC)
 # ========================================================================
 
 @router.get("/{id}/requisitos", response_model=RequisitoListResponse)
@@ -356,7 +334,7 @@ async def subir_requisito(
 
 @router.put("/{id}/requisitos/{index}/aprobar", response_model=RequisitoResponse)
 async def aprobar_requisito(
-    *, id: PydanticObjectId, index: int = Path(..., ge=0), current_user: User = Depends(require_admin)
+    *, id: PydanticObjectId, index: int = Path(..., ge=0), current_user: User = Depends(require_cpd) # <-- CPD APRUEBA
 ) -> Any:
     enrollment = await Enrollment.get(id)
     if not enrollment:
@@ -379,7 +357,7 @@ async def aprobar_requisito(
 @router.put("/{id}/requisitos/{index}/rechazar", response_model=RequisitoResponse)
 async def rechazar_requisito(
     *, id: PydanticObjectId, index: int = Path(..., ge=0), rechazo: RequisitoRechazarRequest,
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_cpd) # <-- CPD RECHAZA
 ) -> Any:
     enrollment = await Enrollment.get(id)
     if not enrollment:

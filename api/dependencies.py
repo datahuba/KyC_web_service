@@ -171,6 +171,76 @@ def require_admin(
     return current_user
 
 
+def require_cpd(
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> User:
+    """
+    Requiere que el usuario pertenezca al Centro de Procesamiento de Datos (CPD) o superior
+    
+    Permite el acceso a roles: CPD, ADMIN y SUPERADMIN
+    """
+    if not isinstance(current_user, User):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Se requiere credenciales de nivel CPD o superior administrativo"
+        )
+    
+    if current_user.rol not in [UserRole.CPD, UserRole.ADMIN, UserRole.SUPERADMIN]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso restringido. Esta acción académica está reservada para el CPD o Administración"
+        )
+    
+    return current_user
+
+
+def require_cobranza(
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> User:
+    """
+    Requiere que el usuario pertenezca al área de Cobranzas o superior
+    
+    Permite el acceso a roles: COBRANZA, ADMIN y SUPERADMIN
+    """
+    if not isinstance(current_user, User):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Se requiere credenciales del área de Cobranzas o superior"
+        )
+    
+    if current_user.rol not in [UserRole.COBRANZA, UserRole.ADMIN, UserRole.SUPERADMIN]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso restringido. Esta acción de conciliación de caja está reservada para Cobranzas o Administración"
+        )
+    
+    return current_user
+
+
+def require_mae(
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> User:
+    """
+    Requiere que el usuario sea Máxima Autoridad Ejecutiva (MAE) o superior
+    
+    Permite el acceso a roles: MAE, ADMIN y SUPERADMIN
+    Uso: Adecuado para endpoints analíticos y estadísticos de solo lectura (ingresos, desgloses)
+    """
+    if not isinstance(current_user, User):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Se requiere nivel de acceso MAE (Lector) o superior"
+        )
+    
+    if current_user.rol not in [UserRole.MAE, UserRole.ADMIN, UserRole.SUPERADMIN]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso restringido. Esta sección analítica de toma de decisiones está reservada para MAE o Administración"
+        )
+    
+    return current_user
+
+
 def get_current_active_user(
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Union[User, Student]:
@@ -189,7 +259,7 @@ def check_student_access(
     """
     Verificar si el usuario puede acceder a un recurso de estudiante
     
-    - SUPERADMIN/ADMIN: Pueden acceder a cualquier recurso
+    - SUPERADMIN/ADMIN/MAE/CPD/COBRANZA (Cuentas tipo User): Pueden acceder a cualquier recurso
     - STUDENT: Solo puede acceder a sus propios recursos
     
     Args:
@@ -202,7 +272,7 @@ def check_student_access(
     Raises:
         HTTPException 403: Si no tiene acceso
     """
-    # Admins tienen acceso total
+    # Admins y personal administrativo con cuenta tipo User tienen acceso total a recursos de estudiantes
     if isinstance(current_user, User):
         return True
     
@@ -219,3 +289,25 @@ def check_student_access(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Acceso denegado"
     )
+def require_staff(
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> User:
+    """
+    Requiere cualquier rol del personal administrativo de Postgrado.
+    Permite el acceso a: ADMIN, SUPERADMIN, MAE, CPD y COBRANZA.
+    (Docentes y Estudiantes son bloqueados).
+    """
+    if not isinstance(current_user, User):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Se requiere cuenta de personal administrativo."
+        )
+    
+    staff_roles = [UserRole.ADMIN, UserRole.SUPERADMIN, UserRole.MAE, UserRole.CPD, UserRole.COBRANZA]
+    if current_user.rol not in staff_roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado. No tienes permisos para ver esta sección administrativa."
+        )
+    
+    return current_user
