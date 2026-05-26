@@ -147,8 +147,9 @@ async def create_payment(
     Proceso:
     1. Validar que la inscripción existe
     2. Validar que el estudiante sea dueño de la inscripción
-    3. Determinar concepto/cuota a pagar (usa get_next_pending_payment)
-    4. Crear pago con estado PENDIENTE
+    3. Validación Anti-Fraude de Comprobantes Duplicados
+    4. Determinar concepto/cuota a pagar
+    5. Crear pago con estado PENDIENTE
     """
     
     # 1. Obtener inscripción
@@ -161,14 +162,29 @@ async def create_payment(
         raise ValueError(
             "No puedes crear un pago para una inscripción que no te pertenece"
         )
+
+    # ✅ 3. VALIDACIÓN ANTI-FRAUDE (ISSUE O)
+    # Verificar si el número de transacción bancaria ya existe en el sistema
+    # Permite reutilizar solo si el pago anterior fue RECHAZADO (ej. por foto borrosa)
+    existing_transaction = await Payment.find_one(
+        Payment.numero_transaccion == payment_in.numero_transaccion,
+        Payment.estado_pago != EstadoPago.RECHAZADO
+    )
     
-    # 3. Determinar concepto y cuota a pagar (ESTRATEGIA CHECKLIST REUTILIZADA)
+    if existing_transaction:
+        raise ValueError(
+            f"El número de transacción bancaria '{payment_in.numero_transaccion}' ya "
+            f"ha sido registrado en el sistema y se encuentra '{existing_transaction.estado_pago}'. "
+            "No se permiten comprobantes duplicados."
+        )
+    
+    # 4. Determinar concepto y cuota a pagar (ESTRATEGIA CHECKLIST REUTILIZADA)
     next_payment = await get_next_pending_payment(payment_in.inscripcion_id)
     
     if not next_payment:
          raise ValueError("Esta inscripción ya tiene todos los pagos (Matrícula y Cuotas) en proceso o aprobados.")
 
-    # 4. Crear pago
+    # 5. Crear pago
     payment = Payment(
         inscripcion_id=payment_in.inscripcion_id,
         estudiante_id=enrollment.estudiante_id,
@@ -235,14 +251,6 @@ async def get_all_payments(
 ) -> tuple[List[Payment], int]:
     """
     Obtener todos los pagos con paginación y filtros
-    
-    Args:
-        page: Número de página
-        per_page: Elementos por página
-        q: Búsqueda por número de transacción o comprobante
-        estado: Filtrar por estado
-        curso_id: Filtrar por Curso ID
-        estudiante_id: Filtrar por Estudiante ID
     """
     query = Payment.find()
     
@@ -280,8 +288,6 @@ async def get_all_payments(
 async def get_payments_pendientes() -> List[Payment]:
     """
     Obtener todos los pagos pendientes de revisión (solo admins)
-    
-    Útil para mostrar al admin los pagos que necesitan aprobación
     """
     return await Payment.find(
         Payment.estado_pago == EstadoPago.PENDIENTE
@@ -294,20 +300,6 @@ async def aprobar_pago(
 ) -> Payment:
     """
     Aprobar un pago (solo admin)
-    
-    Proceso:
-    1. Obtener pago
-    2. Validar que esté PENDIENTE
-    3. Cambiar estado a APROBADO
-    4. Actualizar enrollment (total_pagado, saldo_pendiente)
-    5. Cambiar estado de enrollment si corresponde
-    
-    Args:
-        payment_id: ID del pago
-        admin_username: Username del admin que aprueba
-    
-    Returns:
-        Pago aprobado
     """
     
     # 1. Obtener pago
@@ -321,10 +313,9 @@ async def aprobar_pago(
             f"No se puede aprobar un pago que está en estado {payment.estado_pago}"
         )
     
-    # ✅ 3. VALIDACIÓN ANTI-DUPLICADOS
-    # Verificar que NO exista otro pago APROBADO para el mismo concepto/cuota
+    # 3. VALIDACIÓN ANTI-DUPLICADOS INTERNA
     existing_approved = await Payment.find_one(
-        Payment.id != payment_id,  # Excluir el pago actual
+        Payment.id != payment_id,
         Payment.inscripcion_id == payment.inscripcion_id,
         Payment.concepto == payment.concepto,
         Payment.numero_cuota == payment.numero_cuota,
@@ -344,8 +335,7 @@ async def aprobar_pago(
     if not enrollment:
         raise ValueError(f"Inscripción {payment.inscripcion_id} no encontrada")
     
-    # CONTROL DE MATRÍCULA ÚNICA (Backend):
-    # Si el concepto del pago es 'Matrícula', marcamos el booleano en la inscripción
+    # CONTROL DE MATRÍCULA ÚNICA
     if payment.concepto == "Matrícula":
         enrollment.matricula_pagada = True
         await enrollment.save()
@@ -370,19 +360,6 @@ async def rechazar_pago(
 ) -> Payment:
     """
     Rechazar un pago (solo admin)
-    
-    Proceso:
-    1. Obtener pago
-    2. Validar que esté PENDIENTE
-    3. Cambiar estado a RECHAZADO con motivo
-    
-    Args:
-        payment_id: ID del pago
-        admin_username: Username del admin que rechaza
-        motivo: Razón del rechazo
-    
-    Returns:
-        Pago rechazado
     """
     
     # 1. Obtener pago
@@ -406,14 +383,6 @@ async def rechazar_pago(
 async def get_resumen_pagos_enrollment(enrollment_id: PydanticObjectId) -> dict:
     """
     Obtener resumen de pagos de una inscripción
-    
-    Returns:
-        dict con estadísticas:
-        - total_pagos: cantidad total de pagos
-        - pendientes: cantidad pendientes
-        - aprobados: cantidad aprobados
-        - rechazados: cantidad rechazados
-        - monto_total_aprobado: suma de pagos aprobados
     """
     payments = await get_payments_by_enrollment(enrollment_id)
     
