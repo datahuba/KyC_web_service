@@ -6,7 +6,9 @@ from models.student import Student
 from schemas.course import CourseCreate, CourseResponse, CourseUpdate, CourseEnrolledStudent
 from services import course_service
 from beanie import PydanticObjectId
-from api.dependencies import require_admin, require_superadmin, get_current_user
+
+# Nuevas dependencias de seguridad del ISSUE L
+from api.dependencies import require_superadmin, require_cpd, require_staff, get_current_user
 
 router = APIRouter()
 
@@ -20,10 +22,7 @@ from typing import Optional
 @router.get(
     "/",
     response_model=PaginatedResponse[CourseResponse],
-    summary="Listar Cursos",
-    responses={
-        200: {"description": "Lista de cursos con paginación y filtros"}
-    }
+    summary="Listar Cursos"
 )
 async def read_courses(
     page: int = Query(1, ge=1, description="Número de página"),
@@ -32,19 +31,9 @@ async def read_courses(
     activo: Optional[bool] = Query(None, description="Filtrar por estado activo"),
     tipo_curso: Optional[TipoCurso] = Query(None, description="Filtrar por tipo de curso"),
     modalidad: Optional[Modalidad] = Query(None, description="Filtrar por modalidad"),
-    current_user: Union[User, Student] = Depends(get_current_user)
+    current_user: Union[User, Student] = Depends(get_current_user) # Abierto para todos
 ) -> Any:
-    """
-    Listar cursos con paginación y filtros
-    
-    **Requiere:** Usuario autenticado (cualquier rol)
-    
-    **Filtros disponibles:**
-    - `q`: Búsqueda por nombre o código del curso
-    - `activo`: True/False
-    - `tipo_curso`: diplomado, curso, taller, seminario
-    - `modalidad`: presencial, virtual, híbrido
-    """
+    """Listar cursos con paginación y filtros"""
     courses, total_count = await course_service.get_courses(
         page=page,
         per_page=per_page,
@@ -54,10 +43,7 @@ async def read_courses(
         modalidad=modalidad
     )
     
-    # Calcular metadatos
-    total_pages = math.ceil(total_count / per_page)
-    has_next = page < total_pages
-    has_prev = page > 1
+    total_pages = math.ceil(total_count / per_page) if total_count > 0 else 0
     
     return {
         "data": courses,
@@ -66,8 +52,8 @@ async def read_courses(
             limit=per_page,
             totalItems=total_count,
             totalPages=total_pages,
-            hasNextPage=has_next,
-            hasPrevPage=has_prev
+            hasNextPage=(page < total_pages),
+            hasPrevPage=(page > 1)
         )
     }
 
@@ -75,57 +61,28 @@ async def read_courses(
     "/",
     response_model=CourseResponse,
     status_code=201,
-    summary="Crear Curso",
-    responses={
-        201: {"description": "Curso creado exitosamente con requisitos configurados"},
-        400: {"description": "Error de validación"},
-        403: {"description": "Sin permisos - Solo Admin"}
-    }
+    summary="Crear Curso"
 )
 async def create_course(
     *,
     course_in: CourseCreate,
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_cpd) # <-- CPD CREA LOS PROGRAMAS
 ) -> Any:
-    """
-    Crear nuevo curso
-    
-    **Requiere:** Admin o SuperAdmin
-    
-    **Puede incluir:**
-    - Requisitos dinámicos (documentos que deben presentar los estudiantes)
-    - Precios diferenciados (interno/externo)
-    - Descuento del curso
-    - Fechas de inicio/fin
-    """
+    """Crear nuevo curso"""
     course = await course_service.create_course(course_in=course_in)
     return course
 
 @router.get(
     "/{id}",
     response_model=CourseResponse,
-    summary="Ver Curso",
-    responses={
-        200: {"description": "Detalles completos del curso incluyendo requisitos"},
-        404: {"description": "Curso no encontrado"}
-    }
+    summary="Ver Curso"
 )
 async def read_course(
     *,
     id: PydanticObjectId,
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
-    """
-    Ver detalles de un curso
-    
-    **Requiere:** Usuario autenticado
-    
-    **Incluye:**
-    - Información del curso
-    - Requisitos configurados
-    - Precios (interno/externo)
-    - Lista de inscritos
-    """
+    """Ver detalles de un curso"""
     course = await course_service.get_course(id=id)
     if not course:
         raise HTTPException(status_code=404, detail="Curso no encontrado")
@@ -134,30 +91,15 @@ async def read_course(
 @router.put(
     "/{id}",
     response_model=CourseResponse,
-    summary="Actualizar Curso",
-    responses={
-        200: {"description": "Curso actualizado exitosamente"},
-        403: {"description": "Sin permisos - Solo Admin"},
-        404: {"description": "Curso no encontrado"}
-    }
+    summary="Actualizar Curso"
 )
 async def update_course(
     *,
     id: PydanticObjectId,
     course_in: CourseUpdate,
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_cpd) # <-- CPD EDITA LOS PROGRAMAS
 ) -> Any:
-    """
-    Actualizar curso existente
-    
-    **Requiere:** Admin o SuperAdmin
-    
-    **Se puede actualizar:**
-    - Información del curso
-    - Requisitos (agregar/quitar/modificar)
-    - Precios
-    - Estado (activo/inactivo)
-    """
+    """Actualizar curso existente"""
     course = await course_service.get_course(id=id)
     if not course:
         raise HTTPException(status_code=404, detail="Curso no encontrado")
@@ -167,25 +109,14 @@ async def update_course(
 @router.delete(
     "/{id}",
     response_model=CourseResponse,
-    summary="Eliminar Curso",
-    responses={
-        200: {"description": "Curso eliminado exitosamente"},
-        403: {"description": "Sin permisos - Solo SuperAdmin"},
-        404: {"description": "Curso no encontrado"}
-    }
+    summary="Eliminar Curso"
 )
 async def delete_course(
     *,
     id: PydanticObjectId,
-    current_user: User = Depends(require_superadmin)
+    current_user: User = Depends(require_superadmin) # <-- SOLO SUPERADMIN BORRA
 ) -> Any:
-    """
-    Eliminar curso
-    
-    **Requiere:** SOLO SuperAdmin
-    
-    **Nota:** No se puede eliminar un curso con inscripciones activas
-    """
+    """Eliminar curso"""
     course = await course_service.get_course(id=id)
     if not course:
         raise HTTPException(status_code=404, detail="Curso no encontrado")
@@ -195,34 +126,14 @@ async def delete_course(
 @router.get(
     "/{id}/students",
     response_model=List[CourseEnrolledStudent],
-    summary="Ver Inscritos del Curso",
-    responses={
-        200: {"description": "Lista de estudiantes inscritos con información financiera"},
-        403: {"description": "Sin permisos - Solo Admin"},
-        404: {"description": "Curso no encontrado"}
-    }
+    summary="Ver Inscritos del Curso"
 )
 async def get_course_students(
     *,
     id: PydanticObjectId,
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_staff) # <-- TODOS LOS ADMINISTRATIVOS VEN EL REPORTE
 ) -> Any:
-    """
-    Reporte detallado de estudiantes inscritos en un curso
-    
-    **Requiere:** Admin o SuperAdmin
-    
-    **Para cada estudiante incluye:**
-    - Datos personales (nombre, carnet, contacto)
-    - Datos de inscripción (fecha, estado, tipo)
-    - Datos financieros (total, pagado, saldo, % avance)
-    
-    **Útil para:**
-    - Dashboard del curso
-    - Reportes financieros
-    - Seguimiento de pagos
-    """
-    # Verificar que el curso existe
+    """Reporte detallado de estudiantes inscritos en un curso"""
     course = await course_service.get_course(id=id)
     if not course:
         raise HTTPException(status_code=404, detail="Curso no encontrado")

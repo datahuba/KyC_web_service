@@ -5,7 +5,9 @@ from models.user import User
 from schemas.discount import DiscountCreate, DiscountResponse, DiscountUpdate
 from services import discount_service
 from beanie import PydanticObjectId
-from api.dependencies import require_admin, require_superadmin
+
+# Nuevas dependencias de seguridad del ISSUE L
+from api.dependencies import require_superadmin, require_cobranza, require_staff
 
 router = APIRouter()
 
@@ -18,28 +20,17 @@ from typing import Optional
 @router.get(
     "/",
     response_model=PaginatedResponse[DiscountResponse],
-    summary="Listar Descuentos",
-    responses={
-        200: {"description": "Lista de descuentos con paginación"},
-        403: {"description": "Sin permisos - Solo Admin"}
-    }
+    summary="Listar Descuentos"
 )
 async def read_discounts(
     page: int = Query(1, ge=1, description="Número de página"),
     per_page: int = Query(10, ge=1, le=100, description="Elementos por página"),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_staff) # <-- TODOS LOS ADMINISTRATIVOS PUEDEN LEER
 ) -> Any:
-    """
-    Listar descuentos con paginación
-    
-    **Requiere:** Admin o SuperAdmin
-    
-    **Retorna:** Descuentos disponibles para asignar a estudiantes
-    """
+    """Listar descuentos con paginación"""
     discounts, total_count = await discount_service.get_discounts(page=page, per_page=per_page)
     
-    # Calcular metadatos
-    total_pages = math.ceil(total_count / per_page)
+    total_pages = math.ceil(total_count / per_page) if total_count > 0 else 0
     has_next = page < total_pages
     has_prev = page > 1
     
@@ -59,50 +50,28 @@ async def read_discounts(
     "/",
     response_model=DiscountResponse,
     status_code=201,
-    summary="Crear Descuento",
-    responses={
-        201: {"description": "Descuento creado exitosamente"},
-        400: {"description": "Error de validación"},
-        403: {"description": "Sin permisos - Solo Admin"}
-    }
+    summary="Crear Descuento"
 )
 async def create_discount(
     *,
     discount_in: DiscountCreate,
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_cobranza) # <-- COBRANZA CREA DESCUENTOS
 ) -> Any:
-    """
-    Crear nuevo descuento
-    
-    **Requiere:** Admin o SuperAdmin
-    
-    **Campos:**
-    - `nombre`: Nombre del descuento  
-    - `porcentaje`: Porcentaje (0-100)
-    """
+    """Crear nuevo descuento"""
     discount = await discount_service.create_discount(discount_in=discount_in)
     return discount
 
 @router.get(
     "/{id}",
     response_model=DiscountResponse,
-    summary="Ver Descuento",
-    responses={
-        200: {"description": "Detalles del descuento"},
-        403: {"description": "Sin permisos - Solo Admin"},
-        404: {"description": "Descuento no encontrado"}
-    }
+    summary="Ver Descuento"
 )
 async def read_discount(
     *,
     id: PydanticObjectId,
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_staff) # <-- LECTURA GLOBAL
 ) -> Any:
-    """
-    Ver detalles de un descuento
-    
-    **Requiere:** Admin o SuperAdmin
-    """
+    """Ver detalles de un descuento"""
     discount = await discount_service.get_discount(id=id)
     if not discount:
         raise HTTPException(status_code=404, detail="Descuento no encontrado")
@@ -111,24 +80,15 @@ async def read_discount(
 @router.put(
     "/{id}",
     response_model=DiscountResponse,
-    summary="Actualizar Descuento",
-    responses={
-        200: {"description": "Descuento actualizado exitosamente"},
-        403: {"description": "Sin permisos - Solo Admin"},
-        404: {"description": "Descuento no encontrado"}
-    }
+    summary="Actualizar Descuento"
 )
 async def update_discount(
     *,
     id: PydanticObjectId,
     discount_in: DiscountUpdate,
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_cobranza) # <-- COBRANZA ACTUALIZA
 ) -> Any:
-    """
-    Actualizar descuento existente
-    
-    **Requiere:** Admin o SuperAdmin
-    """
+    """Actualizar descuento existente"""
     discount = await discount_service.get_discount(id=id)
     if not discount:
         raise HTTPException(status_code=404, detail="Descuento no encontrado")
@@ -138,23 +98,14 @@ async def update_discount(
 @router.delete(
     "/{id}",
     response_model=DiscountResponse,
-    summary="Eliminar Descuento",
-    responses={
-        200: {"description": "Descuento eliminado exitosamente"},
-        403: {"description": "Sin permisos - Solo SuperAdmin"},
-        404: {"description": "Descuento no encontrado"}
-    }
+    summary="Eliminar Descuento"
 )
 async def delete_discount(
     *,
     id: PydanticObjectId,
-    current_user: User = Depends(require_superadmin)
+    current_user: User = Depends(require_superadmin) # <-- SOLO SUPERADMIN BORRA
 ) -> Any:
-    """
-    Eliminar descuento
-    
-    **Requiere:** SOLO SuperAdmin
-    """
+    """Eliminar descuento"""
     discount = await discount_service.get_discount(id=id)
     if not discount:
         raise HTTPException(status_code=404, detail="Descuento no encontrado")
@@ -166,13 +117,9 @@ async def add_student_to_discount(
     *,
     id: PydanticObjectId,
     student_id: PydanticObjectId,
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_cobranza) # <-- COBRANZA ASIGNA BECAS
 ) -> Any:
-    """
-    Agregar un estudiante a un descuento.
-    
-    Requiere: ADMIN o SUPERADMIN
-    """
+    """Agregar un estudiante a un descuento"""
     discount = await discount_service.add_student_to_discount(
         discount_id=id,
         student_id=student_id
@@ -186,13 +133,9 @@ async def remove_student_from_discount(
     *,
     id: PydanticObjectId,
     student_id: PydanticObjectId,
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_cobranza) # <-- COBRANZA RETIRA BECAS
 ) -> Any:
-    """
-    Remover un estudiante de un descuento.
-    
-    Requiere: ADMIN o SUPERADMIN
-    """
+    """Remover un estudiante de un descuento"""
     discount = await discount_service.remove_student_from_discount(
         discount_id=id,
         student_id=student_id

@@ -286,3 +286,25 @@ def check_student_access(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Acceso denegado"
     )
+def require_staff(
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> User:
+    """
+    Requiere cualquier rol del personal administrativo de Postgrado.
+    Permite el acceso a: ADMIN, SUPERADMIN, MAE, CPD y COBRANZA.
+    (Docentes y Estudiantes son bloqueados).
+    """
+    if not isinstance(current_user, User):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Se requiere cuenta de personal administrativo."
+        )
+    
+    staff_roles = [UserRole.ADMIN, UserRole.SUPERADMIN, UserRole.MAE, UserRole.CPD, UserRole.COBRANZA]
+    if current_user.rol not in staff_roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado. No tienes permisos para ver esta sección administrativa."
+        )
+    
+    return current_user
