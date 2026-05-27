@@ -1,7 +1,9 @@
 from typing import List, Any, Union, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, status
+from pydantic import BaseModel
 from models.student import Student
 from models.user import User
+from models.enums import TipoEstudiante
 from schemas.student import StudentCreate, StudentResponse, StudentUpdateSelf, StudentUpdateAdmin, ChangePassword
 from services import student_service
 from beanie import PydanticObjectId
@@ -21,7 +23,7 @@ import math
 )
 async def read_students(
     page: int = Query(1, ge=1, description="Número de página"),
-    per_page: int = Query(10, ge=1, le=100, description="Elementos por página"),
+    per_page: int = Query(10, ge=1, le=500, description="Elementos por página"),
     q: Optional[str] = Query(None, description="Buscar por nombre, email, carnet o registro"),
     activo: Optional[bool] = Query(None, description="Filtrar por estado activo/inactivo"),
     estado_titulo: Optional[str] = Query(None, description="Filtrar por estado del título"),
@@ -126,6 +128,31 @@ async def update_student_admin(
     if not student:
         raise HTTPException(status_code=404, detail="Estudiante no encontrado")
     student = await student_service.update_student(student=student, student_in=student_in)
+    return student
+
+# ============================================================================
+# ISSUE H: Mutación rápida del tipo de estudiante
+# ============================================================================
+class ToggleTipoRequest(BaseModel):
+    tipo: TipoEstudiante
+
+@router.patch(
+    "/{id}/toggle-tipo", 
+    response_model=StudentResponse, 
+    summary="Cambio rápido de tipo de estudiante"
+)
+async def toggle_student_tipo(
+    *, 
+    id: PydanticObjectId, 
+    payload: ToggleTipoRequest,
+    current_user: User = Depends(require_cpd)
+) -> Any:
+    student = await student_service.get_student(id)
+    if not student:
+        raise HTTPException(status_code=404, detail="Estudiante no encontrado")
+        
+    student.es_estudiante_interno = payload.tipo
+    await student.save()
     return student
 
 
@@ -287,16 +314,24 @@ async def rechazar_titulo_estudiante(*, id: PydanticObjectId, motivo: str = Form
     await student.save()
     return student
 
+
+# ============================================================================
+# ISSUE G: Selector en Importación Masiva
+# ============================================================================
 @router.post("/import/excel", summary="Importar Estudiantes de forma Masiva desde Excel")
-async def import_students(file: UploadFile = File(...), current_user: User = Depends(require_cpd)) -> Any:
+async def import_students(
+    file: UploadFile = File(...), 
+    tipo_estudiante: TipoEstudiante = Form(...), # Recibe Interno/Externo desde el frontend
+    current_user: User = Depends(require_cpd)
+) -> Any:
     if not file.filename.endswith(('.xlsx', '.xls')): raise HTTPException(400, "Formato no permitido")
     contents = await file.read()
     try:
-        return await student_service.import_students_from_excel(contents)
+        return await student_service.import_students_from_excel(contents, tipo_estudiante)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
-from pydantic import BaseModel
+
 class BulkDeleteRequest(BaseModel):
     ids: List[PydanticObjectId]
 
