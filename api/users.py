@@ -1,4 +1,4 @@
-from typing import List, Any
+from typing import List, Any, Optional
 from fastapi import APIRouter, HTTPException, Depends, Query
 from models.user import User
 from schemas.user import UserCreate, UserResponse, UserUpdate
@@ -6,13 +6,23 @@ from services import user_service
 from beanie import PydanticObjectId
 
 # Importamos las nuevas dependencias creadas en el ISSUE L
-from api.dependencies import require_superadmin, require_cpd
+from api.dependencies import require_superadmin, require_cpd, get_current_user
+
+# Para el cambio de contraseña (Bug 5)
+from core.security import verify_password, get_password_hash
+from pydantic import BaseModel, Field
 
 router = APIRouter()
 
 from schemas.common import PaginatedResponse, PaginationMeta
 import math
-from typing import Optional
+
+
+class UserChangePassword(BaseModel):
+    current_password: str = Field(..., description="Contraseña actual")
+    new_password: str = Field(..., description="Nueva contraseña")
+    confirm_password: str = Field(..., description="Confirmación de nueva contraseña")
+
 
 @router.get(
     "/teachers",
@@ -139,3 +149,34 @@ async def delete_user(
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     user = await user_service.delete_user(id=id)
     return user
+
+
+@router.post(
+    "/me/change-password",
+    summary="Cambiar Mi Contraseña (Personal/Docentes)"
+)
+async def change_my_password(
+    *,
+    data: UserChangePassword,
+    current_user: User = Depends(get_current_user)
+) -> Any:
+    """
+    Cambiar la contraseña del usuario administrativo actual (Docentes, CPD, Cobranzas, Admin, MAE)
+    """
+    if not isinstance(current_user, User):
+        raise HTTPException(status_code=403, detail="Ruta solo para personal administrativo")
+        
+    # Verificar contraseña actual
+    if not verify_password(data.current_password, current_user.password):
+        raise HTTPException(status_code=400, detail="La contraseña actual es incorrecta")
+        
+    if data.new_password != data.confirm_password:
+        raise HTTPException(status_code=400, detail="Las nuevas contraseñas no coinciden")
+        
+    if len(data.new_password) < 5:
+        raise HTTPException(status_code=400, detail="La nueva contraseña debe tener al menos 5 caracteres")
+        
+    current_user.password = get_password_hash(data.new_password)
+    await current_user.save()
+    
+    return {"message": "Contraseña actualizada correctamente"}

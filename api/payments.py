@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 API de Pagos (Payments)
 =======================
@@ -9,10 +10,10 @@ Permisos:
 - POST /payments/: STUDENT (solo sus pagos)
 - GET /payments/: STAFF (todos) / STUDENT (solo los suyos)
 - GET /payments/{id}: STAFF / STUDENT (si es suyo)
-- PUT /payments/{id}/aprobar: COBRANZAS, ADMIN, SUPERADMIN
-- PUT /payments/{id}/rechazar: COBRANZAS, ADMIN, SUPERADMIN
+- PUT /payments/{id}/aprobar: COBRANZAS, CPD, ADMIN, SUPERADMIN (según concepto)
+- PUT /payments/{id}/rechazar: COBRANZAS, CPD, ADMIN, SUPERADMIN (según concepto)
 - GET /payments/enrollment/{enrollment_id}: STAFF / STUDENT (si es suya)
-- GET /payments/pendientes: COBRANZAS, ADMIN, SUPERADMIN
+- GET /payments/pendientes: COBRANZAS, CPD, ADMIN, SUPERADMIN (según concepto)
 """
 
 from typing import List, Any, Optional
@@ -134,16 +135,36 @@ async def list_payments(
     """
     Listar pagos con paginación y filtros
     """
-    # Si es personal administrativo (Staff/MAE/Cobranza/Admin), retorna todos
+    # Si es personal administrativo (Staff/MAE/Cobranza/Admin), retorna todos con segregación
     if isinstance(current_user, User):
-        payments, total_count = await payment_service.get_all_payments(
-            page=page,
-            per_page=per_page,
-            q=q,
-            estado=estado,
-            curso_id=curso_id,
-            estudiante_id=estudiante_id
-        )
+        filters_dict = {}
+        
+        if q:
+            filters_dict["$or"] = [
+                {"numero_transaccion": {"$regex": q, "$options": "i"}},
+                {"remitente": {"$regex": q, "$options": "i"}},
+                {"banco": {"$regex": q, "$options": "i"}}
+            ]
+            
+        if estado:
+            filters_dict["estado_pago"] = estado
+            
+        if curso_id:
+            filters_dict["curso_id"] = curso_id
+            
+        if estudiante_id:
+            filters_dict["estudiante_id"] = estudiante_id
+            
+        # Segregación estricta de roles: CPD vs Cobranza
+        if current_user.rol == "cpd":
+            filters_dict["concepto"] = {"$regex": r"^matr[ií]cula$", "$options": "i"}
+        elif current_user.rol == "cobranza":
+            filters_dict["concepto"] = {"$not": {"$regex": r"^matr[ií]cula$", "$options": "i"}}
+            
+        query = Payment.find(filters_dict)
+        
+        total_count = await query.count()
+        payments = await query.sort("-fecha_subida").skip((page - 1) * per_page).limit(per_page).to_list()
     
     # Si es estudiante, solo sus pagos
     elif isinstance(current_user, Student):
@@ -203,6 +224,22 @@ async def get_payment(
                 status_code=403,
                 detail="No tienes permiso para ver este pago"
             )
+            
+    # Restricción de lectura para CPD y Cobranzas en base al concepto
+    if isinstance(current_user, User):
+        concepto_lower = (payment.concepto or "").lower().strip()
+        is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
+        
+        if current_user.rol == "cpd" and not is_matricula:
+            raise HTTPException(
+                status_code=403,
+                detail="El rol CPD solo tiene acceso a pagos de concepto Matrícula"
+            )
+        elif current_user.rol == "cobranza" and is_matricula:
+            raise HTTPException(
+                status_code=403,
+                detail="El rol Cobranza no tiene acceso a pagos de concepto Matrícula"
+            )
     
     return await payment_service.enrich_payment_with_details(payment)
 
@@ -215,9 +252,33 @@ async def get_payment(
 async def aprobar_pago(
     *,
     id: PydanticObjectId,
-    current_user: User = Depends(require_cobranza) # <-- COBRANZAS APRUEBA
+    current_user: User = Depends(require_staff)  # <-- CPD y COBRANZAS ACCEDEN MEDIANTE require_staff
 ) -> Any:
-    """Aprobar un pago (Solo Cobranzas o Superior)"""
+    """Aprobar un pago (Restringido por concepto: CPD -> Matrícula, Cobranzas -> Módulos/Cuotas)"""
+    if current_user.rol not in ["superadmin", "admin", "cpd", "cobranza"]:
+        raise HTTPException(status_code=403, detail="Su rol no tiene permisos para aprobar pagos")
+        
+    payment = await payment_service.get_payment(id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+        
+    concepto_lower = (payment.concepto or "").lower().strip()
+    is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
+    
+    # Restricción CPD
+    if current_user.rol == "cpd" and not is_matricula:
+        raise HTTPException(
+            status_code=403,
+            detail="El rol CPD solo puede aprobar pagos con concepto de Matrícula."
+        )
+        
+    # Restricción Cobranza
+    if current_user.rol == "cobranza" and is_matricula:
+        raise HTTPException(
+            status_code=403,
+            detail="El rol Cobranza no puede aprobar pagos con concepto de Matrícula."
+        )
+        
     try:
         payment = await payment_service.aprobar_pago(
             payment_id=id,
@@ -237,9 +298,33 @@ async def rechazar_pago(
     *,
     id: PydanticObjectId,
     rejection: PaymentRejection,
-    current_user: User = Depends(require_cobranza) # <-- COBRANZAS RECHAZA
+    current_user: User = Depends(require_staff)  # <-- CPD y COBRANZAS ACCEDEN MEDIANTE require_staff
 ) -> Any:
-    """Rechazar un pago con motivo (Solo Cobranzas o Superior)"""
+    """Rechazar un pago con motivo (Restringido por concepto: CPD -> Matrícula, Cobranzas -> Módulos/Cuotas)"""
+    if current_user.rol not in ["superadmin", "admin", "cpd", "cobranza"]:
+        raise HTTPException(status_code=403, detail="Su rol no tiene permisos para rechazar pagos")
+        
+    payment = await payment_service.get_payment(id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+        
+    concepto_lower = (payment.concepto or "").lower().strip()
+    is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
+    
+    # Restricción CPD
+    if current_user.rol == "cpd" and not is_matricula:
+        raise HTTPException(
+            status_code=403,
+            detail="El rol CPD solo puede rechazar pagos con concepto de Matrícula."
+        )
+        
+    # Restricción Cobranza
+    if current_user.rol == "cobranza" and is_matricula:
+        raise HTTPException(
+            status_code=403,
+            detail="El rol Cobranza no puede rechazar pagos con concepto de Matrícula."
+        )
+        
     try:
         payment = await payment_service.rechazar_pago(
             payment_id=id,
@@ -265,10 +350,28 @@ async def get_payments_by_enrollment(
             raise HTTPException(status_code=404, detail="Inscripción no encontrada")
         if enrollment.estudiante_id != current_user.id:
             raise HTTPException(status_code=403, detail="No tienes permiso")
+            
+    # Restricción CPD / Cobranzas
+    if isinstance(current_user, User):
+        if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
+            raise HTTPException(status_code=403, detail="No autorizado")
     
     payments = await payment_service.get_payments_by_enrollment(enrollment_id)
-    enriched = []
+    
+    # Filtrado por rol
+    filtered_payments = []
     for p in payments:
+        if isinstance(current_user, User):
+            concepto_lower = (p.concepto or "").lower().strip()
+            is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
+            if current_user.rol == "cpd" and not is_matricula:
+                continue
+            if current_user.rol == "cobranza" and is_matricula:
+                continue
+        filtered_payments.append(p)
+        
+    enriched = []
+    for p in filtered_payments:
         enriched.append(await payment_service.enrich_payment_with_details(p))
     return enriched
 
@@ -287,6 +390,13 @@ async def get_resumen_pagos(
             raise HTTPException(status_code=404, detail="Inscripción no encontrada")
         if enrollment.estudiante_id != current_user.id:
             raise HTTPException(status_code=403, detail="No tienes permiso")
+            
+    # CPD no puede ver ingresos o flujos de caja (Sección 2.4 de Reglas de Negocio)
+    if isinstance(current_user, User) and current_user.rol == "cpd":
+        raise HTTPException(
+            status_code=403,
+            detail="El rol CPD tiene estrictamente prohibido visualizar flujos de caja y estados financieros"
+        )
     
     resumen = await payment_service.get_resumen_pagos_enrollment(enrollment_id)
     return resumen
@@ -295,12 +405,31 @@ async def get_resumen_pagos(
 @router.get("/pendientes/list", response_model=List[PaymentResponse])
 async def get_payments_pendientes(
     *,
-    current_user: User = Depends(require_cobranza) # <-- COBRANZAS LEE PENDIENTES
+    current_user: User = Depends(require_staff)  # <-- CPD y COBRANZAS ACCEDEN MEDIANTE require_staff
 ) -> Any:
     """Obtener todos los pagos pendientes de aprobación"""
+    if current_user.rol not in ["superadmin", "admin", "cpd", "cobranza"]:
+        raise HTTPException(status_code=403, detail="No autorizado para listar pagos pendientes")
+        
     payments = await payment_service.get_payments_pendientes()
-    enriched = []
+    
+    filtered_payments = []
     for p in payments:
+        concepto_lower = (p.concepto or "").lower().strip()
+        is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
+        
+        if current_user.rol == "cpd":
+            if is_matricula:
+                filtered_payments.append(p)
+        elif current_user.rol == "cobranza":
+            if not is_matricula:
+                filtered_payments.append(p)
+        else:
+            # admin, superadmin
+            filtered_payments.append(p)
+            
+    enriched = []
+    for p in filtered_payments:
         enriched.append(await payment_service.enrich_payment_with_details(p))
     return enriched
 
@@ -313,7 +442,7 @@ async def generar_reporte_excel_pagos(
     *,
     fecha_desde: Optional[str] = Query(None, description="Fecha inicio (YYYY-MM-DD)"),
     fecha_hasta: Optional[str] = Query(None, description="Fecha fin (YYYY-MM-DD)"),
-    current_user: User = Depends(require_cobranza) # <-- COBRANZAS EXPORTA EXCEL
+    current_user: User = Depends(require_staff)  # <-- CPD y COBRANZAS ACCEDEN MEDIANTE require_staff
 ):
     """Generar reporte Excel de pagos para cruce de datos"""
     from datetime import datetime, date, timedelta
@@ -323,6 +452,9 @@ async def generar_reporte_excel_pagos(
     from io import BytesIO
     from models.enrollment import Enrollment
     
+    if current_user.rol not in ["superadmin", "admin", "cpd", "cobranza", "mae"]:
+        raise HTTPException(status_code=403, detail="No autorizado para generar reportes")
+        
     if not fecha_desde:
         fecha_desde = date.today().isoformat()
     if not fecha_hasta:
@@ -333,11 +465,22 @@ async def generar_reporte_excel_pagos(
         fecha_hasta_dt = datetime.fromisoformat(fecha_hasta).replace(hour=23, minute=59, second=59)
     except:
         raise HTTPException(status_code=400, detail="Formato de fecha inválido. Usar YYYY-MM-DD")
+        
+    # Construir criterios de búsqueda dinámicos
+    criteria = {
+        "fecha_subida": {
+            "$gte": fecha_desde_dt,
+            "$lte": fecha_hasta_dt
+        }
+    }
     
-    payments = await Payment.find(
-        Payment.fecha_subida >= fecha_desde_dt,
-        Payment.fecha_subida <= fecha_hasta_dt
-    ).sort("-fecha_subida").to_list()
+    # Aplicar segregación de visualización en el excel
+    if current_user.rol == "cpd":
+        criteria["concepto"] = {"$regex": r"^matr[ií]cula$", "$options": "i"}
+    elif current_user.rol == "cobranza":
+        criteria["concepto"] = {"$not": {"$regex": r"^matr[ií]cula$", "$options": "i"}}
+    
+    payments = await Payment.find(criteria).sort("-fecha_subida").to_list()
     
     wb = Workbook()
     ws = wb.active
