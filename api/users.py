@@ -131,6 +131,18 @@ async def update_user(
     user = await user_service.get_user(id=id)
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    # Validación de unicidad al editar (evita duplicar correo/username de otro usuario)
+    if user_in.email is not None:
+        existing_email = await user_service.get_user_by_email_excluding_id(user_in.email, id)
+        if existing_email:
+            raise HTTPException(status_code=400, detail="Email ya existe")
+
+    if user_in.username is not None:
+        existing_username = await user_service.get_user_by_username_excluding_id(user_in.username, id)
+        if existing_username:
+            raise HTTPException(status_code=400, detail="Username ya existe")
+
     user = await user_service.update_user(user=user, user_in=user_in)
     return user
 
