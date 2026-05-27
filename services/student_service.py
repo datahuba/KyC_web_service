@@ -9,7 +9,7 @@ import openpyxl
 from io import BytesIO
 from typing import List, Optional, Union
 from models.student import Student
-from models.enums import EstadoTitulo
+from models.enums import EstadoTitulo, TipoEstudiante
 from schemas.student import StudentCreate, StudentUpdateSelf, StudentUpdateAdmin
 from beanie import PydanticObjectId
 from beanie.operators import Or, RegEx
@@ -157,17 +157,15 @@ async def delete_student(id: PydanticObjectId) -> Student:
 # LOGICA DE IMPORTACIÓN MASIVA DESDE EXCEL OPTIMIZADA DE ALTA VELOCIDAD (Bulk Write)
 # ============================================================================
 
-async def import_students_from_excel(file_content: bytes) -> dict:
+async def import_students_from_excel(file_content: bytes, force_tipo: TipoEstudiante) -> dict:
     """
     Importar estudiantes de forma masiva desde un archivo de Excel (.xlsx).
     
-    ¡OPTIMIZACIÓN DE ALTO RENDIMIENTO!
-    1. Lee el archivo y valida datos básicos en memoria en una sola pasada.
-    2. Realiza EXACTAMENTE 1 consulta de red para verificar todos los duplicados (operador $in).
-    3. Realiza EXACTAMENTE 1 operación de red para insertar todos los registros (insert_many).
+    ¡OPTIMIZACIÓN DE ALTO RENDIMIENTO (ISSUE G)!
+    Forzará el tipo de estudiante basado en `force_tipo` (INTERNO/EXTERNO) enviado desde el frontend,
+    ignorando cualquier columna que diga "tipo" en el Excel, previniendo errores de digitación de los administrativos.
     """
     from core.security import get_password_hash
-    from models.enums import TipoEstudiante
     
     try:
         # Cargar libro en memoria de forma optimizada
@@ -184,7 +182,7 @@ async def import_students_from_excel(file_content: bytes) -> dict:
         cell_val = sheet.cell(row=1, column=col_idx).value
         header_row.append(str(cell_val).strip().lower() if cell_val is not None else "")
         
-    col_nombre = col_registro = col_carnet = col_extension = col_email = col_celular = col_domicilio = col_tipo = 0
+    col_nombre = col_registro = col_carnet = col_extension = col_email = col_celular = col_domicilio = 0
     
     for idx, header in enumerate(header_row, start=1):
         if "nombre" in header: col_nombre = idx
@@ -194,7 +192,6 @@ async def import_students_from_excel(file_content: bytes) -> dict:
         elif "correo" in header or "email" in header or "mail" in header: col_email = idx
         elif "celular" in header or "telefono" in header or "telf" in header: col_celular = idx
         elif "domicilio" in header or "direccion" in header or "dir" in header: col_domicilio = idx
-        elif "tipo" in header or "interno" in header: col_tipo = idx
             
     if col_nombre == 0:
         raise ValueError("No se encontró la columna de 'Nombre' en la fila de cabecera del Excel.")
@@ -228,7 +225,6 @@ async def import_students_from_excel(file_content: bytes) -> dict:
             email = sheet.cell(row=row_idx, column=col_email).value if col_email > 0 else None
             celular = sheet.cell(row=row_idx, column=col_celular).value if col_celular > 0 else None
             domicilio = sheet.cell(row=row_idx, column=col_domicilio).value if col_domicilio > 0 else None
-            tipo_raw = sheet.cell(row=row_idx, column=col_tipo).value if col_tipo > 0 else None
             
             nombre = nombre_str if nombre_str else None
             carnet = carnet_str if carnet_str else None
@@ -237,12 +233,6 @@ async def import_students_from_excel(file_content: bytes) -> dict:
             email = str(email).strip() if email is not None else None
             celular = str(celular).strip() if celular is not None else None
             domicilio = str(domicilio).strip() if domicilio is not None else None
-            
-            tipo_estudiante = TipoEstudiante.EXTERNO
-            if tipo_raw:
-                tipo_clean = str(tipo_raw).strip().lower()
-                if "interno" in tipo_clean:
-                    tipo_estudiante = TipoEstudiante.INTERNO
                     
             if not nombre:
                 errors.append(f"Fila {row_idx}: El nombre completo es obligatorio.")
@@ -276,7 +266,7 @@ async def import_students_from_excel(file_content: bytes) -> dict:
                 "extension": extension,
                 "celular": celular,
                 "domicilio": domicilio,
-                "es_estudiante_interno": tipo_estudiante
+                "es_estudiante_interno": force_tipo # ISSUE G
             })
         except Exception as e:
             errors.append(f"Fila {row_idx}: Error al procesar datos de la fila: {str(e)}")
