@@ -12,11 +12,11 @@ Permisos (Según Jerarquía UAGRM):
 - PATCH /enrollments/{id}: CPD, ADMIN, SUPERADMIN
 - DELETE /enrollments/{id}: SOLO SUPERADMIN
 - GET /enrollments/student/{student_id}: STAFF / STUDENT (si es él mismo)
-- GET /enrollments/course/{course_id}: STAFF
+- GET /enrollments/course/{course_id}: DOCENTES, STAFF
 - Requisitos KYC: CPD aprueba/rechaza
 """
 
-from typing import List, Any, Optional
+from typing import List, Any, Optional, Union
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Path
 from models.enrollment import Enrollment
 from models.student import Student
@@ -80,7 +80,7 @@ async def list_enrollments(
     estado: Optional[EstadoInscripcion] = Query(None, description="Filtrar por estado"),
     curso_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por Curso ID"),
     estudiante_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por Estudiante ID"),
-    current_user: User | Student = Depends(get_current_user)
+    current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
     """Listar inscripciones con paginación y filtros avanzados"""
     if isinstance(current_user, User):
@@ -128,7 +128,7 @@ async def list_enrollments(
 async def get_enrollment(
     *,
     id: PydanticObjectId,
-    current_user: User | Student = Depends(get_current_user)
+    current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
     """Ver detalles completos de una inscripción"""
     enrollment = await enrollment_service.get_enrollment(id)
@@ -220,7 +220,7 @@ async def delete_enrollment(
 async def get_enrollments_by_student(
     *,
     student_id: PydanticObjectId,
-    current_user: User | Student = Depends(get_current_user)
+    current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
     """Obtener todas las inscripciones de un estudiante"""
     if isinstance(current_user, Student):
@@ -235,9 +235,12 @@ async def get_enrollments_by_student(
 async def get_enrollments_by_course(
     *,
     course_id: PydanticObjectId,
-    current_user: User = Depends(require_staff) # <-- TODOS LOS ADMINISTRATIVOS
+    current_user: Union[User, Student] = Depends(get_current_user) # <-- PERMISO ABIERTO PARA QUE DOCENTES INGRESEN
 ) -> Any:
-    """Obtener todas las inscripciones de un curso"""
+    """Obtener todas las inscripciones de un curso (Planilla)"""
+    if isinstance(current_user, Student):
+        raise HTTPException(status_code=403, detail="Los estudiantes no tienen acceso a planillas de cursos.")
+        
     enrollments = await enrollment_service.get_enrollments_by_course(course_id)
     return enrollments
 
@@ -249,7 +252,7 @@ async def get_enrollments_by_course(
 async def get_next_payment_info(
     *,
     id: PydanticObjectId,
-    current_user: User | Student = Depends(get_current_user)
+    current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
     """Obtiene la información sugerida para el próximo pago."""
     enrollment = await Enrollment.get(id)
@@ -282,14 +285,32 @@ async def update_modulo_nota(
     Ingresa o actualiza la calificación de un módulo y recalcula el promedio.
     """
     try:
+        # BUG R FIX: Verificación de desfase de array y existencia de módulos
+        enrollment = await Enrollment.get(id)
+        if not enrollment:
+            raise HTTPException(status_code=404, detail="Inscripción no encontrada")
+            
+        if not enrollment.modulos or len(enrollment.modulos) == 0:
+            raise HTTPException(
+                status_code=400, 
+                detail="El estudiante tiene una inscripción antigua (sin módulos). Solicita al CPD que actualice su inscripción."
+            )
+            
+        if index >= len(enrollment.modulos):
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Índice del módulo ({index}) inválido. El estudiante solo tiene {len(enrollment.modulos)} módulos registrados."
+            )
+            
         username = current_user.username if hasattr(current_user, 'username') else "docente_autorizado"
-        enrollment = await enrollment_service.actualizar_nota_modulo(
+        
+        updated_enrollment = await enrollment_service.actualizar_nota_modulo(
             enrollment_id=id,
             modulo_index=index,
             nota=nota_update.nota,
             evaluador_username=username
         )
-        return await enrollment_service.enrich_enrollment_dates(enrollment)
+        return await enrollment_service.enrich_enrollment_dates(updated_enrollment)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -300,7 +321,7 @@ async def update_modulo_nota(
 
 @router.get("/{id}/requisitos", response_model=RequisitoListResponse)
 async def listar_requisitos(
-    *, id: PydanticObjectId, current_user: User | Student = Depends(get_current_user)
+    *, id: PydanticObjectId, current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
     enrollment = await Enrollment.get(id)
     if not enrollment:
