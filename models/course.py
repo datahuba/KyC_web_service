@@ -34,6 +34,12 @@ class Modulo(BaseModel):
     """
     nombre: str = Field(..., description="Nombre del módulo (Ej: Módulo 1: IA)")
     costo: float = Field(..., ge=0, description="Costo individual de este módulo")
+    
+    # ISSUE R: Asignación granular de docente a nivel de módulo
+    docente_id: Optional[PyObjectId] = Field(
+        None, 
+        description="ID del docente asignado a impartir y calificar este módulo"
+    )
 
 
 class Course(MongoBaseModel):
@@ -213,8 +219,7 @@ class Course(MongoBaseModel):
                 "matricula_externo": 500.0,
                 "cantidad_cuotas": 5,
                 "modulos": [
-                    {"nombre": "Módulo 1", "costo": 500.0},
-                    {"nombre": "Módulo 2", "costo": 500.0}
+                    {"nombre": "Módulo 1", "costo": 500.0, "docente_id": "60a7f1c4e1f4b8c9d4b8e5c1"}
                 ],
                 "descuento_curso": 10.0,
                 "observacion": "Incluye certificación internacional",
@@ -223,3 +228,4 @@ class Course(MongoBaseModel):
                 "activo": True
             }
         }
+        

@@ -22,6 +22,9 @@ from schemas.requisito import RequisitoTemplateCreate
 class ModuloCreate(BaseModel):
     nombre: str
     costo: float
+    # ISSUE R: PERMITIR QUE EL BACKEND RECIBA Y VALIDE EL DOCENTE_ID
+    docente_id: Optional[PyObjectId] = Field(None, description="ID del docente asignado al módulo")
+
 
 class CourseCreate(BaseModel):
     """
@@ -77,7 +80,7 @@ class CourseCreate(BaseModel):
                 "costo_total_externo": 4500.0,
                 "matricula_externo": 700.0,
                 "cantidad_cuotas": 5,
-                "modulos": [{"nombre": "Módulo 1", "costo": 580}],
+                "modulos": [{"nombre": "Módulo 1", "costo": 580, "docente_id": "664cbb0a22a3e6181fcd3155"}],
                 "descuento_id": "507f1f77bcf86cd799439077",
                 "observacion": "Incluye materiales didácticos",
                 "fecha_inicio": "2024-03-15T00:00:00",
@@ -240,3 +243,4 @@ class CourseEnrolledStudent(BaseModel):
         "arbitrary_types_allowed": True,
         "from_attributes": True
     }
+    

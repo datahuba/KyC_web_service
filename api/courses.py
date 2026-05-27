@@ -140,3 +140,48 @@ async def get_course_students(
         
     report = await course_service.get_course_students(course_id=id)
     return report
+
+# ========================================================================
+# NUEVO ENDPOINT (ISSUE R): Obtener Módulos por Docente
+# ========================================================================
+@router.get(
+    "/modules/by-teacher/{teacher_id}",
+    summary="Obtener módulos asignados a un docente"
+)
+async def get_modules_by_teacher(
+    *,
+    teacher_id: PydanticObjectId,
+    current_user: Union[User, Student] = Depends(get_current_user) # <-- PERMISO ABIERTO PARA DOCENTE Y STAFF
+) -> Any:
+    """
+    Obtiene todos los módulos que un docente tiene asignados, iterando sobre los cursos activos.
+    """
+    # Verificación de seguridad: Evitar que estudiantes vean esto
+    if isinstance(current_user, Student):
+        raise HTTPException(status_code=403, detail="Acceso denegado para estudiantes.")
+        
+    # Validar que si es un docente, solo pueda solicitar ver sus PROPIOS módulos
+    if current_user.rol.value not in ["superadmin", "admin", "cpd", "mae", "cobranza"]:
+        if str(current_user.id) != str(teacher_id):
+            raise HTTPException(status_code=403, detail="No tienes permisos para ver esta sección administrativa.")
+
+    # Buscamos todos los cursos activos en la base de datos
+    courses = await Course.find(Course.activo == True).to_list()
+    
+    assigned_modules = []
+    
+    for course in courses:
+        # Iteramos sobre el array de módulos de cada curso
+        for index, module in enumerate(course.modulos):
+            # Si el módulo tiene un docente asociado y coincide con el solicitado
+            if module.docente_id and str(module.docente_id) == str(teacher_id):
+                assigned_modules.append({
+                    "curso_id": str(course.id),
+                    "curso_nombre": course.nombre_programa,
+                    "curso_codigo": course.codigo,
+                    "modulo_nombre": module.nombre,
+                    "modulo_costo": module.costo,
+                    "modulo_index": index + 1
+                })
+                
+    return assigned_modules
