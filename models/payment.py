@@ -8,6 +8,7 @@ Colección MongoDB: payments
 
 from datetime import datetime
 from typing import Optional
+import pymongo
 from pydantic import Field
 from .base import MongoBaseModel, PyObjectId
 from .enums import EstadoPago
@@ -164,3 +165,16 @@ class Payment(MongoBaseModel):
     
     class Settings:
         name = "payments"
+        indexes = [
+            # Índices de referencias cruzadas para queries ágiles de listados y conciliaciones
+            "inscripcion_id",
+            "estudiante_id",
+            "curso_id",
+            # Índice para la búsqueda antifraude por número de depósito/transferencia
+            "numero_transaccion",
+            "concepto",
+            # Índice compuesto de alto rendimiento para el panel de conciliación (Cobranzas)
+            [("estado_pago", pymongo.ASCENDING), ("fecha_subida", pymongo.DESCENDING)],
+            # Índice temporal simple para ordenación de caja histórica
+            [("fecha_subida", pymongo.DESCENDING)]
+        ]

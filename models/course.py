@@ -19,6 +19,7 @@ Colección MongoDB: courses
 
 from datetime import datetime
 from typing import Optional, List
+import pymongo
 from pydantic import BaseModel, Field, validator
 from .base import MongoBaseModel, PyObjectId
 from .enums import TipoCurso, Modalidad
@@ -204,6 +205,16 @@ class Course(MongoBaseModel):
     
     class Settings:
         name = "courses"
+        indexes = [
+            # Índice único para búsquedas rápidas de validación de código
+            pymongo.IndexModel([("codigo", pymongo.ASCENDING)], unique=True),
+            # Índice simple para búsquedas de texto por nombre de diplomado
+            "nombre_programa",
+            # Índice compuesto para optimizar el filtrado de cursos activos en inscripciones
+            [("activo", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)],
+            # Índice simple de ordenamiento temporal
+            [("created_at", pymongo.DESCENDING)]
+        ]
 
     class Config:
         """Configuración y ejemplo de uso"""
@@ -228,4 +239,3 @@ class Course(MongoBaseModel):
                 "activo": True
             }
         }
-        
