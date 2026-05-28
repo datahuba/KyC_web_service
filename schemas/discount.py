@@ -13,7 +13,7 @@ Schemas incluidos:
 
 from datetime import datetime
 from typing import Optional, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from models.base import PyObjectId
 
 
@@ -42,6 +42,20 @@ class DiscountCreate(BaseModel):
         default=True,
         description="Si el descuento está activo"
     )
+
+    @field_validator("nombre")
+    @classmethod
+    def validate_nombre(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("El nombre del descuento no puede estar vacío ni contener solo espacios.")
+        return v.strip()
+
+    @field_validator("porcentaje")
+    @classmethod
+    def validate_porcentaje(cls, v: float) -> float:
+        if v < 0.0 or v > 100.0:
+            raise ValueError("El porcentaje de descuento debe estar entre 0.0 y 100.0.")
+        return v
     
     model_config = {
         "json_schema_extra": {
@@ -95,6 +109,23 @@ class DiscountUpdate(BaseModel):
     nombre: Optional[str] = Field(None, min_length=1, max_length=200)
     porcentaje: Optional[float] = Field(None, ge=0, le=100)
     activo: Optional[bool] = None
+
+    @field_validator("nombre")
+    @classmethod
+    def validate_nombre(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            if not v.strip():
+                raise ValueError("El nombre del descuento no puede estar vacío ni contener solo espacios.")
+            return v.strip()
+        return v
+
+    @field_validator("porcentaje")
+    @classmethod
+    def validate_porcentaje(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None:
+            if v < 0.0 or v > 100.0:
+                raise ValueError("El porcentaje de descuento debe estar entre 0.0 y 100.0.")
+        return v
     
     model_config = {
         "json_schema_extra": {
@@ -105,3 +136,4 @@ class DiscountUpdate(BaseModel):
             }
         }
     }
+    
