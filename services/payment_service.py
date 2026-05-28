@@ -12,6 +12,7 @@ Permisos:
 """
 
 from typing import List, Optional
+import asyncio
 from datetime import datetime
 from models.payment import Payment
 from models.enrollment import Enrollment
@@ -20,37 +21,24 @@ from models.course import Course
 from models.enums import EstadoPago
 from schemas.payment import PaymentCreate
 from beanie import PydanticObjectId
+from beanie.operators import In, Or
 from services import enrollment_service
 
 
 async def enrich_payment_with_details(payment: Payment) -> dict:
     """
-    Enriquecer un pago con datos legibles para la API
-    
-    Agrega campos como nombre_estudiante, fecha, moneda, monto, estado, progreso
-    (los mismos que el reporte Excel)
-    
-    Args:
-        payment: Objeto Payment de la base de datos
-    
-    Returns:
-        dict con todos los campos del Payment + campos enriquecidos
+    Enriquecer un pago individual (usado para vistas de un solo ítem)
     """
-    # Convertir Payment a dict
     payment_dict = payment.model_dump(by_alias=True)
     
-    # 1. Obtener nombre del estudiante
     student = await Student.get(payment.estudiante_id)
     nombre_estudiante = student.nombre if student and student.nombre else "Sin nombre"
     
-    # 2. Formatear fechas a hora boliviana (UTC-4)
     from core.timezone_utils import to_bolivia_time
-    
     fecha = to_bolivia_time(payment.fecha_subida)
     created_at_bolivia = to_bolivia_time(payment.created_at)
     updated_at_bolivia = to_bolivia_time(payment.updated_at)
     
-    # 3. Calcular total de cuotas
     total_cuotas = 0
     try:
         enrollment = await enrollment_service.get_enrollment(payment.inscripcion_id)
@@ -59,16 +47,13 @@ async def enrich_payment_with_details(payment: Payment) -> dict:
     except:
         total_cuotas = 0
     
-    # 4. Agregar campos enriquecidos
     payment_dict.update({
-        # Dados legibles (mismos que reporte Excel)
         "nombre_estudiante": nombre_estudiante,
         "fecha": fecha,
         "moneda": "Bs",
         "monto": payment.cantidad_pago,
         "estado": payment.estado_pago.value if payment.estado_pago else "",
         "total_cuotas": total_cuotas,
-        # Campos de auditoría en hora boliviana
         "created_at": created_at_bolivia,
         "updated_at": updated_at_bolivia
     })
@@ -76,27 +61,64 @@ async def enrich_payment_with_details(payment: Payment) -> dict:
     return payment_dict
 
 
+async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dict]:
+    """
+    ¡RESOLUCIÓN DE CUELLO DE BOTELLA CRÍTICO N+1!
+    Enriquece una lista de pagos en lote realizando solo 2 consultas agrupadas a la base de datos
+    mediante el operador $in, en lugar de 2 * N consultas secuenciales de red.
+    """
+    if not payments:
+        return []
+
+    # 1. Agrupar IDs únicos a buscar
+    student_ids = list({p.estudiante_id for p in payments if p.estudiante_id})
+    enrollment_ids = list({p.inscripcion_id for p in payments if p.inscripcion_id})
+
+    # 2. Consultas concurrentes en paralelo
+    students_task = Student.find(In(Student.id, student_ids)).to_list()
+    enrollments_task = Enrollment.find(In(Enrollment.id, enrollment_ids)).to_list()
+    
+    students, enrollments = await asyncio.gather(students_task, enrollments_task)
+
+    # 3. Mapeos O(1) en memoria para resolución ultrarrápida
+    students_map = {s.id: s for s in students}
+    enrollments_map = {e.id: e for e in enrollments}
+
+    from core.timezone_utils import to_bolivia_time
+
+    enriched_list = []
+    for payment in payments:
+        p_dict = payment.model_dump(by_alias=True)
+        
+        student = students_map.get(payment.estudiante_id)
+        nombre_estudiante = student.nombre if student and student.nombre else "Sin nombre"
+        
+        enrollment = enrollments_map.get(payment.inscripcion_id)
+        total_cuotas = enrollment.cantidad_cuotas if enrollment else 0
+
+        p_dict.update({
+            "nombre_estudiante": nombre_estudiante,
+            "fecha": to_bolivia_time(payment.fecha_subida),
+            "moneda": "Bs",
+            "monto": payment.cantidad_pago,
+            "estado": payment.estado_pago.value if payment.estado_pago else "",
+            "total_cuotas": total_cuotas,
+            "created_at": to_bolivia_time(payment.created_at),
+            "updated_at": to_bolivia_time(payment.updated_at)
+        })
+        enriched_list.append(p_dict)
+
+    return enriched_list
 
 
 async def get_next_pending_payment(enrollment_id: PydanticObjectId) -> dict:
     """
-    Calcula cual es el SIGUIENTE pago que le corresponde hacer al estudiante
-    basado en la estrategia 'Checklist' (llenar huecos vacíos).
-    
-    Returns:
-        dict: {
-            "concepto": str,
-            "numero_cuota": int|None,
-            "monto_sugerido": float
-        }
-        o None si ya pagó todo.
+    Calcula el siguiente pago pendiente.
     """
     enrollment = await enrollment_service.get_enrollment(enrollment_id)
     if not enrollment:
         raise ValueError("Inscripción no encontrada")
 
-    # Obtener todos los pagos activos de esta inscripción
-    from beanie.operators import Or
     pagos_activos = await Payment.find(
         Payment.inscripcion_id == enrollment_id,
         Or(
@@ -105,16 +127,10 @@ async def get_next_pending_payment(enrollment_id: PydanticObjectId) -> dict:
         )
     ).to_list()
     
-    # Crear set de conceptos cubiertos para búsqueda rápida
     conceptos_cubiertos = {
         (p.concepto, p.numero_cuota) for p in pagos_activos
     }
     
-    concepto_final = None
-    numero_cuota_final = None
-    cantidad_final = 0.0
-    
-    # 1. Verificar Matrícula
     if enrollment.costo_matricula > 0:
         if ("Matrícula", None) not in conceptos_cubiertos:
             return {
@@ -123,7 +139,6 @@ async def get_next_pending_payment(enrollment_id: PydanticObjectId) -> dict:
                 "monto_sugerido": enrollment.costo_matricula
             }
     
-    # 2. Verificar Cuotas
     if enrollment.cantidad_cuotas > 0:
         monto_cuota = enrollment.calcular_monto_cuota()
         
@@ -137,35 +152,24 @@ async def get_next_pending_payment(enrollment_id: PydanticObjectId) -> dict:
                 
     return None
 
+
 async def create_payment(
     payment_in: PaymentCreate,
     student_id: PydanticObjectId
 ) -> Payment:
     """
-    Crear un nuevo pago (estudiante sube comprobante)
-    
-    Proceso:
-    1. Validar que la inscripción existe
-    2. Validar que el estudiante sea dueño de la inscripción
-    3. Validación Anti-Fraude de Comprobantes Duplicados
-    4. Determinar concepto/cuota a pagar
-    5. Crear pago con estado PENDIENTE
+    Crear un nuevo pago.
     """
-    
-    # 1. Obtener inscripción
     enrollment = await Enrollment.get(payment_in.inscripcion_id)
     if not enrollment:
         raise ValueError(f"Inscripción {payment_in.inscripcion_id} no encontrada")
     
-    # 2. Validar que el estudiante sea dueño de la inscripción
     if enrollment.estudiante_id != student_id:
         raise ValueError(
             "No puedes crear un pago para una inscripción que no te pertenece"
         )
 
-    # ✅ 3. VALIDACIÓN ANTI-FRAUDE (ISSUE O)
-    # Verificar si el número de transacción bancaria ya existe en el sistema
-    # Permite reutilizar solo si el pago anterior fue RECHAZADO (ej. por foto borrosa)
+    # Validación anti-fraude
     existing_transaction = await Payment.find_one(
         Payment.numero_transaccion == payment_in.numero_transaccion,
         Payment.estado_pago != EstadoPago.RECHAZADO
@@ -178,39 +182,29 @@ async def create_payment(
             "No se permiten comprobantes duplicados."
         )
     
-    # 4. Determinar concepto y cuota a pagar (ESTRATEGIA CHECKLIST REUTILIZADA)
     next_payment = await get_next_pending_payment(payment_in.inscripcion_id)
-    
     if not next_payment:
-         raise ValueError("Esta inscripción ya tiene todos los pagos (Matrícula y Cuotas) en proceso o aprobados.")
+         raise ValueError("Esta inscripción ya tiene todos los pagos en proceso o aprobados.")
 
-    # 5. Crear pago
     payment = Payment(
         inscripcion_id=payment_in.inscripcion_id,
         estudiante_id=enrollment.estudiante_id,
         curso_id=enrollment.curso_id,
-
-        # Datos lógicos
         concepto=next_payment["concepto"],
         cantidad_pago=next_payment["monto_sugerido"],
         numero_cuota=next_payment["numero_cuota"],
-
         numero_transaccion=payment_in.numero_transaccion,
         comprobante_url=payment_in.comprobante_url,
-        
-        # Campos nuevos
         remitente=payment_in.remitente,
         banco=payment_in.banco,
         monto_comprobante=payment_in.monto_comprobante,
         fecha_comprobante=payment_in.fecha_comprobante,
         cuenta_destino=payment_in.cuenta_destino,
-        
         estado_pago=EstadoPago.PENDIENTE
     )
     
     await payment.insert()
     return payment
-
 
 
 async def get_payment(id: PydanticObjectId) -> Optional[Payment]:
@@ -219,27 +213,25 @@ async def get_payment(id: PydanticObjectId) -> Optional[Payment]:
 
 
 async def get_payments_by_student(student_id: PydanticObjectId) -> List[Payment]:
-    """Obtener todos los pagos de un estudiante (ordenados por más reciente primero)"""
+    """Obtener todos los pagos de un estudiante"""
     return await Payment.find(
         Payment.estudiante_id == student_id
     ).sort("-fecha_subida").to_list()
 
 
 async def get_payments_by_enrollment(enrollment_id: PydanticObjectId) -> List[Payment]:
-    """Obtener todos los pagos de una inscripción (ordenados por más reciente primero)"""
+    """Obtener todos los pagos de una inscripción"""
     return await Payment.find(
         Payment.inscripcion_id == enrollment_id
     ).sort("-fecha_subida").to_list()
 
 
 async def get_payments_by_course(course_id: PydanticObjectId) -> List[Payment]:
-    """Obtener todos los pagos de un curso (ordenados por más reciente primero)"""
+    """Obtener todos los pagos de un curso"""
     return await Payment.find(
         Payment.curso_id == course_id
     ).sort("-fecha_subida").to_list()
 
-
-from beanie.operators import Or
 
 async def get_all_payments(
     page: int = 1,
@@ -254,19 +246,13 @@ async def get_all_payments(
     """
     query = Payment.find()
     
-    # 1. Filtro Estado
     if estado:
         query = query.find(Payment.estado_pago == estado)
-        
-    # 2. Filtro Curso ID
     if curso_id:
         query = query.find(Payment.curso_id == curso_id)
-        
-    # 3. Filtro Estudiante ID
     if estudiante_id:
         query = query.find(Payment.estudiante_id == estudiante_id)
         
-    # 4. Búsqueda por texto (q)
     if q:
         regex_pattern = {"$regex": q, "$options": "i"}
         query = query.find(
@@ -279,15 +265,13 @@ async def get_all_payments(
     
     total_count = await query.count()
     skip = (page - 1) * per_page
-    
-    # Ordenar por fecha descendente (más reciente primero)
     payments = await query.sort("-fecha_subida").skip(skip).limit(per_page).to_list()
     return payments, total_count
 
 
 async def get_payments_pendientes() -> List[Payment]:
     """
-    Obtener todos los pagos pendientes de revisión (solo admins)
+    Obtener todos los pagos pendientes de revisión
     """
     return await Payment.find(
         Payment.estado_pago == EstadoPago.PENDIENTE
@@ -299,21 +283,17 @@ async def aprobar_pago(
     admin_username: str
 ) -> Payment:
     """
-    Aprobar un pago (solo admin)
+    Aprobar un pago
     """
-    
-    # 1. Obtener pago
     payment = await Payment.get(payment_id)
     if not payment:
         raise ValueError(f"Pago {payment_id} no encontrado")
     
-    # 2. Validar estado
     if payment.estado_pago != EstadoPago.PENDIENTE:
         raise ValueError(
             f"No se puede aprobar un pago que está en estado {payment.estado_pago}"
         )
     
-    # 3. VALIDACIÓN ANTI-DUPLICADOS INTERNA
     existing_approved = await Payment.find_one(
         Payment.id != payment_id,
         Payment.inscripcion_id == payment.inscripcion_id,
@@ -326,25 +306,20 @@ async def aprobar_pago(
         cuota_texto = f" (Cuota {payment.numero_cuota})" if payment.numero_cuota else ""
         raise ValueError(
             f"No se puede aprobar: ya existe un pago aprobado para {payment.concepto}{cuota_texto}. "
-            f"Pago aprobado existente: {existing_approved.id}. "
-            f"Este pago parece ser un duplicado. Considera rechazarlo en su lugar."
+            f"Pago aprobado existente: {existing_approved.id}."
         )
     
-    # 4. Obtener inscripción relacionada
     enrollment = await Enrollment.get(payment.inscripcion_id)
     if not enrollment:
         raise ValueError(f"Inscripción {payment.inscripcion_id} no encontrada")
     
-    # CONTROL DE MATRÍCULA ÚNICA
     if payment.concepto == "Matrícula":
         enrollment.matricula_pagada = True
         await enrollment.save()
     
-    # 5. Aprobar pago
     payment.aprobar_pago(admin_username)
     await payment.save()
     
-    # 6. Actualizar enrollment (Monto y balances financieros en cascada)
     await enrollment_service.actualizar_saldo_enrollment(
         enrollment_id=payment.inscripcion_id,
         monto_pago_aprobado=payment.cantidad_pago
@@ -359,24 +334,19 @@ async def rechazar_pago(
     motivo: str
 ) -> Payment:
     """
-    Rechazar un pago (solo admin)
+    Rechazar un pago
     """
-    
-    # 1. Obtener pago
     payment = await Payment.get(payment_id)
     if not payment:
         raise ValueError(f"Pago {payment_id} no encontrado")
     
-    # 2. Validar estado
     if payment.estado_pago != EstadoPago.PENDIENTE:
         raise ValueError(
             f"No se puede rechazar un pago que está en estado {payment.estado_pago}"
         )
     
-    # 3. Rechazar pago
     payment.rechazar_pago(admin_username, motivo)
     await payment.save()
-    
     return payment
 
 
@@ -395,5 +365,4 @@ async def get_resumen_pagos_enrollment(enrollment_id: PydanticObjectId) -> dict:
             p.cantidad_pago for p in payments if p.estado_pago == EstadoPago.APROBADO
         ),
     }
-    
     return resumen
