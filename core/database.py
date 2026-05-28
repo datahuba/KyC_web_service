@@ -148,9 +148,14 @@ async def init_db():
 
     Esta función debe ser llamada al inicio de la aplicación (startup event).
     """
-    # Crear cliente de Motor
+    # Crear cliente de Motor con pool optimizado para concurrencia
+    # Evita el handshaking TCP costoso por cada petición de la API
     client = motor.motor_asyncio.AsyncIOMotorClient(
-        settings.MONGODB_URL
+        settings.MONGODB_URL,
+        maxPoolSize=50,       # Máximo de conexiones concurrentes activas
+        minPoolSize=10,       # Mantener un mínimo de 10 conexiones pre-abiertas en caliente
+        maxIdleTimeMS=10000,  # Cerrar conexiones inactivas tras 10 segundos
+        waitQueueTimeoutMS=5000  # Evita bloqueos indefinidos si el pool se satura
     )
 
     db = client[settings.DATABASE_NAME]
@@ -176,5 +181,5 @@ async def init_db():
             Submission,
         ]
     )
-    print(f"[OK] Conectado a MongoDB ({settings.DATABASE_NAME}) y Beanie inicializado.")
+    print(f"[OK] Conectado a MongoDB ({settings.DATABASE_NAME}) y Beanie inicializado con Connection Pool optimizado.")
     
