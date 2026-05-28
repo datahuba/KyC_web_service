@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from core.config import settings
 from core.database import init_db
 from api.api import api_router
@@ -8,6 +9,10 @@ app = FastAPI(
     title=settings.APP_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json"
 )
+
+# Compresión Gzip para todas las respuestas mayores a 1000 bytes (1 KB)
+# Reduce drásticamente el tamaño de los payloads JSON grandes de la API
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # Set all CORS enabled origins
 if settings.DEBUG:
