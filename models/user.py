@@ -8,6 +8,7 @@ Colección MongoDB: users
 
 from datetime import datetime
 from typing import Optional
+import pymongo
 from pydantic import Field, EmailStr
 from .base import MongoBaseModel
 from .enums import UserRole
@@ -30,6 +31,11 @@ class User(MongoBaseModel):
     
     class Settings:
         name = "users"
+        indexes = [
+            # Índices únicos estrictos a nivel BD para evitar duplicados en login administrativo
+            pymongo.IndexModel([("username", pymongo.ASCENDING)], unique=True),
+            pymongo.IndexModel([("email", pymongo.ASCENDING)], unique=True)
+        ]
 
     class Config:
         schema_extra = {
@@ -41,3 +47,4 @@ class User(MongoBaseModel):
                 "activo": True
             }
         }
+        
