@@ -17,6 +17,7 @@ Colección MongoDB: students
 
 from datetime import datetime
 from typing import Optional, List
+import pymongo
 from pydantic import Field, EmailStr
 from .base import MongoBaseModel, PyObjectId
 from .enums import TipoEstudiante
@@ -98,7 +99,7 @@ class Student(MongoBaseModel):
     activo: bool = Field(default=True,description="Si el estudiante puede acceder al sistema y realizar acciones")
     lista_cursos_ids: List[PyObjectId] = Field(default_factory=list,description="Lista de IDs de cursos en los que el estudiante está inscrito")
 
-# ========================================================================
+    # ========================================================================
     # DOCUMENTACIÓN (Cargados desde el Panel de Admin)
     # ========================================================================
     cv_url: Optional[str] = Field(None, description="URL del Currículum Vitae (PDF)")
@@ -113,6 +114,21 @@ class Student(MongoBaseModel):
     
     class Settings:
         name = "students"
+        indexes = [
+            # Índices únicos estrictos para evitar colisiones de registros
+            pymongo.IndexModel([("registro", pymongo.ASCENDING)], unique=True),
+            # Índices condicionales dispersos (sparse) de unicidad en campos opcionales
+            pymongo.IndexModel([("carnet", pymongo.ASCENDING)], unique=True, sparse=True),
+            pymongo.IndexModel([("email", pymongo.ASCENDING)], unique=True, sparse=True),
+            # Índice para la consulta textual regular y búsquedas por coincidencia parcial de nombres
+            "nombre",
+            # Índice Multikey optimizado para búsquedas por filtrado de cursos de posgrado inscritos
+            "lista_cursos_ids",
+            # Índice compuesto optimizado para el paginador administrativo
+            [("activo", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)],
+            # Índice temporal simple para ordenación por defecto
+            [("created_at", pymongo.DESCENDING)]
+        ]
 
     class Config:
         """Configuración y ejemplo de uso"""
