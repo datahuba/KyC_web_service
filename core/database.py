@@ -25,8 +25,8 @@ from models.submission import Submission
 
 async def _sanitize_legacy_database(db):
     """
-    Sanea de forma asíncrona la base de datos de registros duplicados legacy
-    antes de la construcción e inicialización de índices únicos de Beanie.
+    Sanea de forma asíncrona la base de datos de registros duplicados y conflictos
+    de índices legacy antes de la construcción e inicialización de índices de Beanie.
     """
     student_col = db["students"]
     course_col = db["courses"]
@@ -129,6 +129,18 @@ async def _sanitize_legacy_database(db):
             await course_col.delete_many({"_id": {"$in": ids_to_delete}})
             print(f"[STARTUP-CLEANUP] Se purgaron {len(ids_to_delete)} programas duplicados con Código: '{item['_id']}'")
 
+    # 5. RESOLUCIÓN DE CONFLICTOS DE NOMBRES DE ÍNDICES LEGACY (IndexOptionsConflict / Error 85)
+    # Dropeamos índices antiguos de colecciones modificadas para que Beanie los re-cree limpiamente con nombres estándar
+    collections_to_reset_indexes = ["classrooms", "classroom_students", "enrollments", "users", "payments"]
+    for col_name in collections_to_reset_indexes:
+        try:
+            # Eliminamos los índices existentes para evitar colisiones por nombres customizados (ej: 'idx_classrooms_teacher')
+            await db[col_name].drop_indexes()
+            print(f"[STARTUP-CLEANUP] Índices antiguos de '{col_name}' eliminados para prevenir conflictos de nombres.")
+        except Exception:
+            # Falla silenciosamente si la colección aún no tiene índices o no existe en esta BD
+            pass
+
 
 async def init_db():
     """
@@ -143,7 +155,7 @@ async def init_db():
 
     db = client[settings.DATABASE_NAME]
 
-    # Ejecutar saneamiento de duplicados históricos antes de inicializar Beanie
+    # Ejecutar saneamiento de duplicados e índices históricos antes de inicializar Beanie
     await _sanitize_legacy_database(db)
 
     # Inicializar Beanie con la base de datos y los modelos
