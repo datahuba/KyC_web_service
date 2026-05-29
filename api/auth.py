@@ -181,7 +181,9 @@ async def get_me(
             role=current_user.rol.value,
             user_type="user",
             activo=current_user.activo,
-            ultimo_acceso=current_user.ultimo_acceso
+            ultimo_acceso=current_user.ultimo_acceso,
+            nombre=current_user.username,  # Fallback de nombre para el personal administrativo
+            registro=None
         )
     else:  # Student
         return CurrentUserResponse(
@@ -191,5 +193,8 @@ async def get_me(
             role="student",
             user_type="student",
             activo=current_user.activo,
-            ultimo_acceso=None
+            ultimo_acceso=None,
+            nombre=current_user.nombre,  # Inyección del nombre real desde la ficha del estudiante
+            registro=current_user.registro  # Inyección del código de registro oficial
         )
+    

@@ -56,8 +56,11 @@ async def create_student(
     current_user: User = Depends(require_cpd) # <-- SOLO EL CPD (Y ADMINS) PUEDEN CREAR ALUMNOS
 ) -> Any:
     """Crear nuevo estudiante"""
-    student = await student_service.create_student(student_in=student_in)
-    return student
+    try:
+        student = await student_service.create_student(student_in=student_in)
+        return student
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @router.get(
     "/{id}",
@@ -90,8 +93,11 @@ async def update_student_self(
 ) -> Any:
     if not isinstance(current_user, Student):
         raise HTTPException(status_code=403, detail="Solo estudiantes")
-    student = await student_service.update_student(student=current_user, student_in=student_in)
-    return student
+    try:
+        student = await student_service.update_student(student=current_user, student_in=student_in)
+        return student
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post(
@@ -127,8 +133,11 @@ async def update_student_admin(
     student = await student_service.get_student(id=id)
     if not student:
         raise HTTPException(status_code=404, detail="Estudiante no encontrado")
-    student = await student_service.update_student(student=student, student_in=student_in)
-    return student
+    try:
+        student = await student_service.update_student(student=student, student_in=student_in)
+        return student
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 # ============================================================================
 # ISSUE H: Mutación rápida del tipo de estudiante

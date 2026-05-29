@@ -8,6 +8,7 @@ Colección MongoDB: enrollments
 
 from datetime import datetime
 from typing import Optional, List
+import pymongo
 from pydantic import BaseModel, Field, field_validator
 from .base import MongoBaseModel, PyObjectId
 from .enums import EstadoInscripcion, TipoEstudiante
@@ -53,6 +54,7 @@ class Enrollment(MongoBaseModel):
     
     costo_total: float = Field(..., ge=0, description="Costo total del curso para este estudiante")
     costo_matricula: float = Field(..., ge=0, description="Costo de matrícula")
+    amount_cuotas: Optional[int] = None # Campo deprecado, mantenido para compatibilidad
     cantidad_cuotas: int = Field(..., ge=1, description="Cantidad de cuotas para pagar")
     
     modulos: List[ModuloEstado] = Field(
@@ -147,7 +149,6 @@ class Enrollment(MongoBaseModel):
                     "monto_sugerido": round(monto_sugerido, 2)
                 }
                 
-        # Fallback
         return {"concepto": "Pago Pendiente", "numero_cuota": 1, "monto_sugerido": round(self.saldo_pendiente, 2)}
     
     @property
@@ -167,4 +168,14 @@ class Enrollment(MongoBaseModel):
     
     class Settings:
         name = "enrollments"
+        indexes = [
+            # Índices de referencia cruzada acelerada para kyardex
+            "estudiante_id",
+            "curso_id",
+            # Índice único compuesto para evitar doble inscripción del mismo alumno al mismo curso
+            pymongo.IndexModel([("estudiante_id", pymongo.ASCENDING), ("curso_id", pymongo.ASCENDING)], unique=True),
+            # Índices para ordenación temporal y filtrado por estado operacional
+            [("estado", pymongo.ASCENDING), ("fecha_inscripcion", pymongo.DESCENDING)],
+            [("fecha_inscripcion", pymongo.DESCENDING)]
+        ]
         

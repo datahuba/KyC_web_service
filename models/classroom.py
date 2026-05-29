@@ -8,6 +8,7 @@ ClassroomStudent: relación muchos-a-muchos classroom ↔ student.
 
 from datetime import datetime
 from typing import Optional
+import pymongo
 from pydantic import Field
 from beanie import PydanticObjectId
 
@@ -29,6 +30,10 @@ class Classroom(MongoBaseModel):
 
     class Settings:
         name = "classrooms"
+        indexes = [
+            "teacher_user_id",
+            "course_id"
+        ]
 
 
 class ClassroomStudent(MongoBaseModel):
@@ -41,3 +46,10 @@ class ClassroomStudent(MongoBaseModel):
 
     class Settings:
         name = "classroom_students"
+        indexes = [
+            "classroom_id",
+            "student_id",
+            # Índice único compuesto para impedir la duplicidad de un alumno en un mismo aula
+            pymongo.IndexModel([("classroom_id", pymongo.ASCENDING), ("student_id", pymongo.ASCENDING)], unique=True)
+        ]
+        
