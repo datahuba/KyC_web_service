@@ -9,20 +9,15 @@ jobs:
     steps:
       - name: Sincronizar Backlog Histórico y Futuro
         env:
-          # GitHub CLI detecta automáticamente esta variable
           GH_TOKEN: ${{ secrets.PROJECT_PAT_TOKEN }}
         run: |
-          # 1. VALIDADOR DE SEGURIDAD (Caza-errores)
           if [ -z "$GH_TOKEN" ]; then
             echo "❌ ERROR CRÍTICO: El token PROJECT_PAT_TOKEN no se detectó."
-            echo "Por favor, ve a la pestaña 'Settings' > 'Secrets and variables' > 'Actions'."
-            echo "Asegúrate de crear un 'New repository secret' con el nombre exacto PROJECT_PAT_TOKEN."
             exit 1
           fi
 
-          echo "✅ Token detectado. Iniciando orquestación de Backlog en la organización 'datahuba'..."
+          echo "✅ Token detectado. Iniciando orquestación de Backlog..."
 
-          # Formato: "ESTADO | REPOSITORIO | TITULO | CUERPO | ETIQUETAS"
           declare -a BACKLOG=(
             "CLOSED|datahuba/KyC_web_service|✅ Infraestructura y DevOps Cloud|Contenerización Docker, Proxy Nginx, SSL Let's Encrypt y CI/CD.|done,devops"
             "CLOSED|datahuba/KyC_web_service|✅ Jerarquía de Roles (RBAC) UAGRM|Segregación estricta para Superadmin, Admin, MAE, CPD y Cobranza.|done,backend,seguridad"
@@ -63,7 +58,15 @@ jobs:
             BODY=$(echo "$item" | awk -F'|' '{print $4}')
             LABELS=$(echo "$item" | awk -F'|' '{print $5}')
 
-            # Ejecución protegida con captura de errores
+            # 1. Separar las etiquetas por comas
+            IFS=',' read -r -a label_array <<< "$LABELS"
+            
+            # 2. Forzar la creación de cada etiqueta en el repositorio remoto primero
+            for label in "${label_array[@]}"; do
+              gh label create "$label" --repo "$REPO" --color "0366d6" --force > /dev/null 2>&1 || true
+            done
+
+            # 3. Crear el issue de manera segura
             if gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label "$LABELS" > issue_url.txt 2> error.log; then
               ISSUE_URL=$(cat issue_url.txt)
               if [ "$STATE" == "CLOSED" ]; then
@@ -74,7 +77,6 @@ jobs:
               fi
             else
               echo "❌ FALLÓ la creación de: $TITLE"
-              echo "Causa:"
               cat error.log
               exit 1
             fi
@@ -82,3 +84,4 @@ jobs:
             sleep 2
           done
           echo "¡Sincronización finalizada!"
+          
