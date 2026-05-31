@@ -1,6 +1,5 @@
 name: 1-Time Auto-Inject Issues to DataHub
 
-# Este workflow se ejecuta manualmente desde la pestaña "Actions" de GitHub
 on:
   workflow_dispatch:
 
@@ -10,16 +9,21 @@ jobs:
     steps:
       - name: Sincronizar Backlog Histórico y Futuro
         env:
-          # Usamos un token nativo de GitHub para tener permisos de escritura
-          GITHUB_TOKEN: ${{ secrets.PROJECT_PAT_TOKEN }}
+          # GitHub CLI detecta automáticamente esta variable
+          GH_TOKEN: ${{ secrets.PROJECT_PAT_TOKEN }}
         run: |
-          echo "Iniciando orquestación de Backlog en la organización 'datahuba'..."
+          # 1. VALIDADOR DE SEGURIDAD (Caza-errores)
+          if [ -z "$GH_TOKEN" ]; then
+            echo "❌ ERROR CRÍTICO: El token PROJECT_PAT_TOKEN no se detectó."
+            echo "Por favor, ve a la pestaña 'Settings' > 'Secrets and variables' > 'Actions'."
+            echo "Asegúrate de crear un 'New repository secret' con el nombre exacto PROJECT_PAT_TOKEN."
+            exit 1
+          fi
+
+          echo "✅ Token detectado. Iniciando orquestación de Backlog en la organización 'datahuba'..."
 
           # Formato: "ESTADO | REPOSITORIO | TITULO | CUERPO | ETIQUETAS"
           declare -a BACKLOG=(
-            # ==========================================
-            # 1. HISTÓRICO COMPLETADO (CERRADOS)
-            # ==========================================
             "CLOSED|datahuba/KyC_web_service|✅ Infraestructura y DevOps Cloud|Contenerización Docker, Proxy Nginx, SSL Let's Encrypt y CI/CD.|done,devops"
             "CLOSED|datahuba/KyC_web_service|✅ Jerarquía de Roles (RBAC) UAGRM|Segregación estricta para Superadmin, Admin, MAE, CPD y Cobranza.|done,backend,seguridad"
             "CLOSED|datahuba/KyC_web_service|✅ Optimización N+1 en Pagos y BD|Script auto-curativo Beanie y pre-carga paralela de MongoDB.|done,backend,performance"
@@ -27,9 +31,6 @@ jobs:
             "CLOSED|datahuba/kyc-client|✅ Calculadora Dinámica de Cursos|Generación de módulos matemáticos al vuelo en el formulario de cursos.|done,frontend"
             "CLOSED|datahuba/KyC_web_service|✅ Borrado Masivo y Retención Financiera|Protección de transacciones históricas al borrar estudiantes en lote.|done,backend,database"
 
-            # ==========================================
-            # 2. BUGS DEL PASANTE (ABIERTOS)
-            # ==========================================
             "OPEN|datahuba/kyc-client|🐛 Bug 1: Visor y Validación de Contraseña (Estudiante)|Implementar botón de visibilidad y validar que la nueva no sea igual a la actual.|bug,frontend,seguridad"
             "OPEN|datahuba/kyc-client|🐛 Bug 2: Caída en Planilla de Docente|Error 404 de alumno eliminado congela el Dashboard. Manejar try/catch aislado.|bug,frontend"
             "OPEN|datahuba/kyc-client|🐛 Bug 3: Descuentos Inactivos Seleccionables|Filtrar el combo box de creación de curso para ignorar becas inactivas.|bug,frontend"
@@ -37,13 +38,10 @@ jobs:
             "OPEN|datahuba/kyc-client|🐛 Bug 5: Responsividad Dashboard Estudiante|Ajustar grid fluido para que no colapse en resoluciones de Tablet/iPad.|bug,frontend,ui"
             "OPEN|datahuba/kyc-client|🐛 Bug 6: Responsividad Dashboard Cobranza|Evitar que el texto de 'Ingresos' colisione con los iconos vectoriales.|bug,frontend,ui"
             "OPEN|datahuba/KyC_web_service|🐛 Bug 7: Auto-desactivación de Superadmin|Bloquear en backend que el admin activo pueda desactivarse o bajarse de rol.|bug,backend,seguridad"
-            "OPEN|datahuba/KyC_web_service|🐛 Bug 8: Filtros de Pagos Defectuosos|Corregir operador \$or en MongoDB para relacionar estudiante y programa.|bug,backend"
+            "OPEN|datahuba/KyC_web_service|🐛 Bug 8: Filtros de Pagos Defectuosos|Corregir operador or en MongoDB para relacionar estudiante y programa.|bug,backend"
             "OPEN|datahuba/KyC_web_service|🐛 Bug 9: Creación de Descuentos 0%|Añadir validador estricto gt=0.0 en el esquema Pydantic.|bug,backend"
             "OPEN|datahuba/kyc-client|🐛 Bug 10: Input de Transacción Alfanumérico|Bloquear letras y símbolos con regex reactiva en el formulario de pago.|bug,frontend"
 
-            # ==========================================
-            # 3. BACKLOG DE NUEVAS CARACTERÍSTICAS (ABIERTOS)
-            # ==========================================
             "OPEN|datahuba/KyC_web_service|🚀 ISSUE-F-PRORRATEO: Algoritmo de Prorrateo|Distribución de pagos variables en cascada sobre matrícula y módulos.|enhancement,backend,financiero"
             "OPEN|datahuba/KyC_web_service|🚀 ISSUE-P-CANALES: Reversión de Pagos|Tipificar Caja, Transferencia y lógica de rollback financiero.|enhancement,backend,financiero"
             "OPEN|datahuba/kyc-client|🚀 ISSUE-P-FICHA: Estado de Cuenta Unificado|Vista de inversión, pagado y pendiente desglosando los 18 módulos.|enhancement,frontend,financiero"
@@ -65,21 +63,22 @@ jobs:
             BODY=$(echo "$item" | awk -F'|' '{print $4}')
             LABELS=$(echo "$item" | awk -F'|' '{print $5}')
 
-            # Autenticación explícita vía CLI en el Runner de GitHub
-            echo "$GITHUB_TOKEN" | gh auth login --with-token
-
-            # Crear Issue forzando el repositorio correcto
-            ISSUE_URL=$(gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label "$LABELS")
-            
-            if [ "$STATE" == "CLOSED" ]; then
-              gh issue close "$ISSUE_URL" --reason "completed" > /dev/null
-              echo "[✔ CERRADO en $REPO] $TITLE"
+            # Ejecución protegida con captura de errores
+            if gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label "$LABELS" > issue_url.txt 2> error.log; then
+              ISSUE_URL=$(cat issue_url.txt)
+              if [ "$STATE" == "CLOSED" ]; then
+                gh issue close "$ISSUE_URL" --reason "completed" > /dev/null
+                echo "🟢 [CERRADO] $TITLE"
+              else
+                echo "🔵 [CREADO] $TITLE"
+              fi
             else
-              echo "[📝 CREADO en $REPO] $TITLE"
+              echo "❌ FALLÓ la creación de: $TITLE"
+              echo "Causa:"
+              cat error.log
+              exit 1
             fi
             
-            sleep 2 # Pausa para no saturar la API
+            sleep 2
           done
-
-          echo "¡Sincronización masiva finalizada con éxito!"
-          
+          echo "¡Sincronización finalizada!"
