@@ -131,6 +131,32 @@ async def update_user(
     user = await user_service.get_user(id=id)
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    # Regla de seguridad crítica: evitar auto-bloqueo del superadmin autenticado
+    if str(current_user.id) == str(id) and user_in.activo is False:
+        raise HTTPException(
+            status_code=400,
+            detail="No puedes desactivar tu propia cuenta mientras estás autenticado"
+        )
+
+    # Regla de seguridad crítica: evitar auto-degradación de rol (ej. superadmin -> admin)
+    if str(current_user.id) == str(id) and user_in.rol is not None and user_in.rol != current_user.rol:
+        raise HTTPException(
+            status_code=400,
+            detail="No puedes cambiar tu propio rol mientras estás autenticado"
+        )
+
+    # Validación de unicidad al editar (evita duplicar correo/username de otro usuario)
+    if user_in.email is not None:
+        existing_email = await user_service.get_user_by_email_excluding_id(user_in.email, id)
+        if existing_email:
+            raise HTTPException(status_code=400, detail="Email ya existe")
+
+    if user_in.username is not None:
+        existing_username = await user_service.get_user_by_username_excluding_id(user_in.username, id)
+        if existing_username:
+            raise HTTPException(status_code=400, detail="Username ya existe")
+
     user = await user_service.update_user(user=user, user_in=user_in)
     return user
 
@@ -175,6 +201,9 @@ async def change_my_password(
         
     if len(data.new_password) < 5:
         raise HTTPException(status_code=400, detail="La nueva contraseña debe tener al menos 5 caracteres")
+
+    if data.current_password == data.new_password:
+        raise HTTPException(status_code=400, detail="La nueva contraseña debe ser diferente a la actual")
         
     current_user.password = get_password_hash(data.new_password)
     await current_user.save()

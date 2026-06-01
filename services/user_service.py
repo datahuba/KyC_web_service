@@ -57,6 +57,22 @@ async def get_user_by_email(email: str) -> Optional[User]:
     return await User.find_one(User.email == email)
 
 
+async def get_user_by_email_excluding_id(email: str, user_id: PydanticObjectId) -> Optional[User]:
+    """Buscar usuario por email excluyendo un ID específico (para updates)."""
+    existing = await User.find_one(User.email == email)
+    if existing and existing.id != user_id:
+        return existing
+    return None
+
+
+async def get_user_by_username_excluding_id(username: str, user_id: PydanticObjectId) -> Optional[User]:
+    """Buscar usuario por username excluyendo un ID específico (para updates)."""
+    existing = await User.find_one(User.username == username)
+    if existing and existing.id != user_id:
+        return existing
+    return None
+
+
 async def create_user(user_in: UserCreate) -> User:
     """Crear nuevo usuario (hasheo automático)"""
     from core.security import get_password_hash
