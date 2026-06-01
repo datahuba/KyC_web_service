@@ -1,0 +1,17 @@
+name: Sincronizar Issue a Tablero
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  assign_to_project:
+    name: Añadir al Proyecto General
+    runs-on: ubuntu-latest
+    steps:
+      - name: Vincular Issue al Tablero
+        uses: actions/add-to-project@v1.0.2
+        with:
+          # URL extraída de tu captura de pantalla (Proyecto #2 de datahuba)
+          project-url: 'https://github.com/users/datahuba/projects/2'
+          github-token: ${{ secrets.PROJECT_PAT_TOKEN }}
+          

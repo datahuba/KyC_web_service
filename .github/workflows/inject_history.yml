@@ -1,0 +1,66 @@
+name: 2-Time Auto-Inject History to DataHub
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inject_history:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inyectar Historial Monumental de Trabajo
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_PAT_TOKEN }}
+        run: |
+          echo "Iniciando inyección del historial consolidado..."
+
+          declare -a BACKLOG=(
+            "CLOSED|datahuba/KyC_web_service|✅ Refactor: Saneamiento y Auto-curación de BD|Implementación de _sanitize_legacy_database para purgar duplicados en startup y evitar Error 85.|done,backend,database"
+            "CLOSED|datahuba/KyC_web_service|✅ Optimización: Batch Fetching N+1 en Pagos|Creación de enrich_payments_with_details_bulk y asyncio.gather para reportes masivos.|done,backend,performance"
+            "CLOSED|datahuba/KyC_web_service|✅ Feature: ISSUE A - Puente de Módulos|Clonación automática de estructura académica en Enrollment con prorrateo.|done,backend"
+            "CLOSED|datahuba/KyC_web_service|✅ Feature: ISSUE I - Auditoría Financiera Segura|Eliminación de borrado en cascada descontrolado; retención de pagos aprobados.|done,backend,seguridad"
+            "CLOSED|datahuba/KyC_web_service|✅ Feature: ISSUE J - Importador Masivo Optimizado|Lectura de Excel en una sola consulta \$in y escritura bulk insert_many.|done,backend,performance"
+            "CLOSED|datahuba/KyC_web_service|✅ Feature: ISSUE O - Validador Antifraude|Bloqueo de reutilización de números de comprobante bancario en pagos.|done,backend,seguridad"
+            "CLOSED|datahuba/KyC_web_service|✅ Feature: ISSUE R - Asignación de Docentes|Endpoints by-teacher y guardado granular de docentes por módulo.|done,backend"
+            "CLOSED|datahuba/KyC_web_service|✅ Fix: BUG 2 - Segregación de Cobros CPD|Restricción de vistas financieras exclusivas para CPD y Cobranzas mediante regex.|done,backend,seguridad"
+            "CLOSED|datahuba/KyC_web_service|✅ Fix: BUG 5 - Cambio Seguro de Contraseña|Nueva ruta POST users/me/change-password con hasheo independiente.|done,backend,seguridad"
+            "CLOSED|datahuba/kyc-client|✅ Feature: ISSUE F - Edición Manual de Módulos|Toggle reactivo en Svelte para liberar estado readonly y personalizar costos.|done,frontend"
+            "CLOSED|datahuba/kyc-client|✅ Feature: ISSUE K - Enrutador Inteligente|Dashboard Wrapper con renderizado dinámico según RBAC.|done,frontend"
+            "CLOSED|datahuba/kyc-client|✅ Feature: ISSUE N - Capa de Permisos Visuales|Ocultamiento dinámico de botones de mutación en base al store de Svelte.|done,frontend,seguridad"
+            "CLOSED|datahuba/kyc-client|✅ Feature: Libreta y Planilla de Calificaciones|Modales interactivos para alumnos (Kardex) y docentes (Notas por módulo).|done,frontend"
+            "CLOSED|datahuba/kyc-client|✅ Fix: BUG 1 - Mapeo Docentes y Fallback N/A|Cruce de datos de auth.py y componente Svelte para mostrar nombre real y registro.|done,frontend"
+            "CLOSED|datahuba/kyc-client|✅ Fix: BUG 3 - Selectores Fantasmas|Ocultamiento de selección de curso en edición y clases break-words en modales.|done,frontend,ui"
+            "CLOSED|datahuba/kyc-client|✅ Fix: BUG 6 - Interpolación y Símbolos|Regex reactiva en pagos y fix de brackets dinámicos en títulos Svelte 5.|done,frontend"
+            "CLOSED|datahuba/kyc-client|✅ Refactor: Modularización de Estudiantes|Desestructuración de +page.svelte en subcomponentes Svelte 5 atómicos.|done,frontend,arquitectura"
+            "CLOSED|datahuba/kyc-client|✅ Fix: Parche de Paginación 422|Loteado de 100 en 100 para sortear limitación per_page del backend.|done,frontend,performance"
+            "CLOSED|datahuba/kyc-client|✅ Arquitectura: SvelteKit Optimizado|Precarga en hover, compresión GZip y Connection Pool para MongoDB.|done,frontend,performance"
+          )
+
+          for item in "${BACKLOG[@]}"; do
+            STATE=$(echo "$item" | awk -F'|' '{print $1}')
+            REPO=$(echo "$item" | awk -F'|' '{print $2}')
+            TITLE=$(echo "$item" | awk -F'|' '{print $3}')
+            BODY=$(echo "$item" | awk -F'|' '{print $4}')
+            LABELS=$(echo "$item" | awk -F'|' '{print $5}')
+
+            IFS=',' read -r -a label_array <<< "$LABELS"
+            
+            for label in "${label_array[@]}"; do
+              gh label create "$label" --repo "$REPO" --color "009900" --force > /dev/null 2>&1 || true
+            done
+
+            if gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label "$LABELS" > issue_url.txt 2> error.log; then
+              ISSUE_URL=$(cat issue_url.txt)
+              if [ "$STATE" == "CLOSED" ]; then
+                gh issue close "$ISSUE_URL" --reason "completed" > /dev/null
+                echo "🟢 [HISTORIAL REGISTRADO] $TITLE"
+              fi
+            else
+              echo "❌ FALLÓ la creación de: $TITLE"
+              cat error.log
+              exit 1
+            fi
+            
+            sleep 2
+          done
+          echo "¡Historial sincronizado!"
+          
