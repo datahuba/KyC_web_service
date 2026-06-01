@@ -132,6 +132,20 @@ async def update_user(
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
+    # Regla de seguridad crítica: evitar auto-bloqueo del superadmin autenticado
+    if str(current_user.id) == str(id) and user_in.activo is False:
+        raise HTTPException(
+            status_code=400,
+            detail="No puedes desactivar tu propia cuenta mientras estás autenticado"
+        )
+
+    # Regla de seguridad crítica: evitar auto-degradación de rol (ej. superadmin -> admin)
+    if str(current_user.id) == str(id) and user_in.rol is not None and user_in.rol != current_user.rol:
+        raise HTTPException(
+            status_code=400,
+            detail="No puedes cambiar tu propio rol mientras estás autenticado"
+        )
+
     # Validación de unicidad al editar (evita duplicar correo/username de otro usuario)
     if user_in.email is not None:
         existing_email = await user_service.get_user_by_email_excluding_id(user_in.email, id)
