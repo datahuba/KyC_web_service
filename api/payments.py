@@ -18,7 +18,9 @@ Permisos:
 
 from typing import List, Any, Optional
 import asyncio
+import re
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
+from models.course import Course
 from models.payment import Payment
 from models.student import Student
 from models.user import User
@@ -139,10 +141,33 @@ async def list_payments(
         filters_dict = {}
         
         if q:
+            escaped_q = re.escape(q.strip())
+            regex_filter = {"$regex": escaped_q, "$options": "i"}
+
+            matching_students = await Student.find({
+                "$or": [
+                    {"nombre": regex_filter},
+                    {"email": regex_filter},
+                    {"registro": regex_filter}
+                ]
+            }).to_list()
+
+            matching_courses = await Course.find({
+                "$or": [
+                    {"nombre_programa": regex_filter},
+                    {"codigo": regex_filter}
+                ]
+            }).to_list()
+
+            student_ids = [student.id for student in matching_students if student.id]
+            course_ids = [course.id for course in matching_courses if course.id]
+
             filters_dict["$or"] = [
-                {"numero_transaccion": {"$regex": q, "$options": "i"}},
-                {"remitente": {"$regex": q, "$options": "i"}},
-                {"banco": {"$regex": q, "$options": "i"}}
+                {"numero_transaccion": regex_filter},
+                {"remitente": regex_filter},
+                {"banco": regex_filter},
+                {"estudiante_id": {"$in": student_ids}},
+                {"curso_id": {"$in": course_ids}}
             ]
             
         if estado:

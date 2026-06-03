@@ -33,9 +33,9 @@ class DiscountCreate(BaseModel):
     
     porcentaje: float = Field(
         ...,
-        ge=0,
+        gt=0.0,
         le=100,
-        description="Porcentaje de descuento (0-100)"
+        description="Porcentaje de descuento (mayor a 0 y hasta 100)"
     )
     
     activo: bool = Field(
@@ -53,8 +53,8 @@ class DiscountCreate(BaseModel):
     @field_validator("porcentaje")
     @classmethod
     def validate_porcentaje(cls, v: float) -> float:
-        if v < 0.0 or v > 100.0:
-            raise ValueError("El porcentaje de descuento debe estar entre 0.0 y 100.0.")
+        if v <= 0.0 or v > 100.0:
+            raise ValueError("El porcentaje de descuento debe ser mayor a 0.0 y menor o igual a 100.0.")
         return v
     
     model_config = {
@@ -107,7 +107,7 @@ class DiscountUpdate(BaseModel):
     """
     
     nombre: Optional[str] = Field(None, min_length=1, max_length=200)
-    porcentaje: Optional[float] = Field(None, ge=0, le=100)
+    porcentaje: Optional[float] = Field(None, gt=0.0, le=100)
     activo: Optional[bool] = None
 
     @field_validator("nombre")
@@ -123,8 +123,8 @@ class DiscountUpdate(BaseModel):
     @classmethod
     def validate_porcentaje(cls, v: Optional[float]) -> Optional[float]:
         if v is not None:
-            if v < 0.0 or v > 100.0:
-                raise ValueError("El porcentaje de descuento debe estar entre 0.0 y 100.0.")
+            if v <= 0.0 or v > 100.0:
+                raise ValueError("El porcentaje de descuento debe ser mayor a 0.0 y menor o igual a 100.0.")
         return v
     
     model_config = {
