@@ -1,5 +1,5 @@
 name: Sincronizar Issue a Tablero
-on:
+"on":
   issues:
     types: [opened]
 
@@ -14,4 +14,3 @@ jobs:
           # URL extraída de tu captura de pantalla (Proyecto #2 de datahuba)
           project-url: 'https://github.com/users/datahuba/projects/2'
           github-token: ${{ secrets.PROJECT_PAT_TOKEN }}
-          
