@@ -183,3 +183,4 @@ async def init_db():
     )
     print(f"[OK] Conectado a MongoDB ({settings.DATABASE_NAME}) y Beanie inicializado con Connection Pool optimizado.")
     
+    
