@@ -1,5 +1,5 @@
 from typing import List, Any, Optional
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, status
 from models.user import User
 from schemas.user import UserCreate, UserResponse, UserUpdate
 from services import user_service
@@ -132,30 +132,21 @@ async def update_user(
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
-    # Regla de seguridad crítica: evitar auto-bloqueo del superadmin autenticado
-    if str(current_user.id) == str(id) and user_in.activo is False:
-        raise HTTPException(
-            status_code=400,
-            detail="No puedes desactivar tu propia cuenta mientras estás autenticado"
-        )
-
-    # Regla de seguridad crítica: evitar auto-degradación de rol (ej. superadmin -> admin)
-    if str(current_user.id) == str(id) and user_in.rol is not None and user_in.rol != current_user.rol:
-        raise HTTPException(
-            status_code=400,
-            detail="No puedes cambiar tu propio rol mientras estás autenticado"
-        )
-
-    # Validación de unicidad al editar (evita duplicar correo/username de otro usuario)
-    if user_in.email is not None:
-        existing_email = await user_service.get_user_by_email_excluding_id(user_in.email, id)
-        if existing_email:
-            raise HTTPException(status_code=400, detail="Email ya existe")
-
-    if user_in.username is not None:
-        existing_username = await user_service.get_user_by_username_excluding_id(user_in.username, id)
-        if existing_username:
-            raise HTTPException(status_code=400, detail="Username ya existe")
+    # BUG 7 FIX: Protección contra Auto-desactivación y Auto-degradación de permisos
+    if current_user.id == user.id:
+        # 1. El superadmin no puede marcar su cuenta como inactiva
+        if user_in.activo is not None and user_in.activo is False:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, 
+                detail="Operación prohibida: No puedes desactivar tu propia cuenta administrativa."
+            )
+        
+        # 2. El superadmin no puede rebajarse de rol a sí mismo (ej. de superadmin a docente)
+        if user_in.role is not None and user_in.role != user.role:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, 
+                detail="Operación prohibida: No puedes alterar tu propio nivel de privilegios."
+            )
 
     user = await user_service.update_user(user=user, user_in=user_in)
     return user
@@ -173,6 +164,14 @@ async def delete_user(
     user = await user_service.get_user(id=id)
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        
+    # BUG 7 FIX: Protección extrema contra el borrado físico de la propia cuenta
+    if current_user.id == user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Operación prohibida: Un superadministrador no puede eliminar su propia cuenta en sesión."
+        )
+        
     user = await user_service.delete_user(id=id)
     return user
 
