@@ -69,8 +69,11 @@ async def create_course(
     current_user: User = Depends(require_cpd) # <-- CPD CREA LOS PROGRAMAS
 ) -> Any:
     """Crear nuevo curso"""
-    course = await course_service.create_course(course_in=course_in)
-    return course
+    try:
+        course = await course_service.create_course(course_in=course_in)
+        return course
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @router.get(
     "/{id}",
@@ -103,8 +106,11 @@ async def update_course(
     course = await course_service.get_course(id=id)
     if not course:
         raise HTTPException(status_code=404, detail="Curso no encontrado")
-    course = await course_service.update_course(course=course, course_in=course_in)
-    return course
+    try:
+        course = await course_service.update_course(course=course, course_in=course_in)
+        return course
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @router.delete(
     "/{id}",

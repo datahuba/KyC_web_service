@@ -9,8 +9,22 @@ from typing import List, Optional, Dict, Any, Union
 from models.course import Course
 from models.enrollment import Enrollment
 from models.student import Student
+from models.discount import Discount
 from schemas.course import CourseCreate, CourseUpdate, CourseEnrolledStudent
 from beanie import PydanticObjectId
+
+
+async def _validate_active_discount(discount_id: Optional[PydanticObjectId]) -> None:
+    """Valida que el descuento exista y esté activo cuando se usa en cursos."""
+    if not discount_id:
+        return
+
+    discount = await Discount.get(discount_id)
+    if not discount:
+        raise ValueError("El descuento seleccionado no existe")
+
+    if not discount.activo:
+        raise ValueError("El descuento seleccionado está inactivo y no puede aplicarse al curso")
 
 async def get_course(id: PydanticObjectId) -> Optional[Course]:
     """Obtiene un curso por su ID"""
@@ -71,6 +85,9 @@ async def create_course(course_in: CourseCreate) -> Course:
     """Crea un nuevo curso"""
     payload = course_in.dict()
 
+    # Seguridad de negocio: impedir asociar descuentos inactivos
+    await _validate_active_discount(payload.get("descuento_id"))
+
     # Normalización defensiva: costos externos opcionales se persisten en 0
     if payload.get("costo_total_externo") is None:
         payload["costo_total_externo"] = 0
@@ -90,6 +107,10 @@ async def update_course(
         update_data = course_in
     else:
         update_data = course_in.dict(exclude_unset=True)
+
+    # Seguridad de negocio: impedir asociar descuentos inactivos
+    if "descuento_id" in update_data:
+        await _validate_active_discount(update_data.get("descuento_id"))
         
     for field, value in update_data.items():
         setattr(course, field, value)

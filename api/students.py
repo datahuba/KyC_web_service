@@ -113,6 +113,9 @@ async def change_password(
     from core.security import verify_password, get_password_hash
     if not verify_password(password_data.current_password, current_user.password):
         raise HTTPException(status_code=400, detail="La contraseña actual es incorrecta")
+
+    if password_data.current_password == password_data.new_password:
+        raise HTTPException(status_code=400, detail="La nueva contraseña debe ser diferente a la actual")
     
     current_user.password = get_password_hash(password_data.new_password)
     await current_user.save()

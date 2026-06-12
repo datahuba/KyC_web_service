@@ -40,6 +40,8 @@ class PaymentCreate(BaseModel):
 
     numero_transaccion: str = Field(
         ...,
+        min_length=6,
+        max_length=30,
         description="Número de transacción bancaria del comprobante"
     )
 
@@ -95,7 +97,7 @@ class PaymentCreate(BaseModel):
         "json_schema_extra": {
             "example": {
                 "inscripcion_id": "507f1f77bcf86cd799439013",
-                "numero_transaccion": "BNB-2024-001234"
+                "numero_transaccion": "BNB2024A1234"
             }
         }
     }
@@ -215,7 +217,7 @@ class PaymentResponse(BaseModel):
                 "moneda": "Bs",
                 "monto": 600.0,
                 "concepto": "Matrícula",
-                "numero_transaccion": "BNB-2024-001234",
+                "numero_transaccion": "BNB2024A1234",
                 "estado": "pendiente",
                 "progreso": "0/12",
                 "numero_cuota": None,
@@ -342,7 +344,7 @@ class PaymentWithDetails(PaymentResponse):
                 "curso_codigo": "DIP-SGC-2024",
                 "concepto": "Cuota 1",
                 "numero_cuota": 1,
-                "numero_transaccion": "BNB-2024-002567",
+                "numero_transaccion": "MSC2024B2567",
                 "cantidad_pago": 478.5,
                 "comprobante_url": "https://res.cloudinary.com/kyc/voucher_2024_002567.pdf",
                 "estado_pago": "aprobado",

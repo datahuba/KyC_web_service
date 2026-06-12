@@ -200,6 +200,9 @@ async def change_my_password(
         
     if len(data.new_password) < 5:
         raise HTTPException(status_code=400, detail="La nueva contraseña debe tener al menos 5 caracteres")
+
+    if data.current_password == data.new_password:
+        raise HTTPException(status_code=400, detail="La nueva contraseña debe ser diferente a la actual")
         
     current_user.password = get_password_hash(data.new_password)
     await current_user.save()
