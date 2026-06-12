@@ -237,35 +237,60 @@ async def get_all_payments(
     page: int = 1,
     per_page: int = 10,
     q: Optional[str] = None,
-    estado: Optional[EstadoPago] = None,
+    estado: Optional[str] = None,
     curso_id: Optional[PydanticObjectId] = None,
     estudiante_id: Optional[PydanticObjectId] = None
 ) -> tuple[List[Payment], int]:
     """
-    Obtener todos los pagos con paginación y filtros
+    Obtener todos los pagos con paginación y filtros complejos (Bug 8 Fix).
     """
-    query = Payment.find()
+    # Usamos diccionarios de consulta planos para soportar consultas más robustas en Beanie
+    query_dict = {}
     
-    if estado:
-        query = query.find(Payment.estado_pago == estado)
-    if curso_id:
-        query = query.find(Payment.curso_id == curso_id)
+    # Filtro de Estado exacto
+    if estado and estado != "Todos los estados":
+        query_dict["estado_pago"] = estado
+
+    # Filtro de Estudiante exacto
     if estudiante_id:
-        query = query.find(Payment.estudiante_id == estudiante_id)
+        query_dict["estudiante_id"] = estudiante_id
+
+    # Filtro de Programa Académico (Curso)
+    # Buscamos todas las inscripciones (enrollments) que pertenezcan a ese curso
+    if curso_id:
+        enrollments = await Enrollment.find(Enrollment.curso_id == curso_id).to_list()
+        enrollment_ids = [e.id for e in enrollments]
+        query_dict["inscripcion_id"] = {"$in": enrollment_ids}
         
+    # Filtro Dinámico (Buscador general)
     if q:
         regex_pattern = {"$regex": q, "$options": "i"}
-        query = query.find(
+        
+        # Sub-consulta: Encontrar estudiantes que coincidan en nombre, registro o carnet
+        matching_students = await Student.find(
             Or(
-                Payment.numero_transaccion == regex_pattern,
-                Payment.comprobante_url == regex_pattern,
-                Payment.concepto == regex_pattern
+                Student.nombre == regex_pattern,
+                Student.registro == regex_pattern,
+                Student.carnet == regex_pattern,
+                Student.email == regex_pattern
             )
-        )
+        ).to_list()
+        
+        matching_student_ids = [s.id for s in matching_students]
+
+        # Combinar búsquedas de texto: Que coincida en los campos del pago O que sea uno de esos estudiantes
+        query_dict["$or"] = [
+            {"numero_transaccion": regex_pattern},
+            {"concepto": regex_pattern},
+            {"remitente": regex_pattern},
+            {"banco": regex_pattern},
+            {"estudiante_id": {"$in": matching_student_ids}}
+        ]
     
-    total_count = await query.count()
+    total_count = await Payment.find(query_dict).count()
     skip = (page - 1) * per_page
-    payments = await query.sort("-fecha_subida").skip(skip).limit(per_page).to_list()
+    payments = await Payment.find(query_dict).sort("-fecha_subida").skip(skip).limit(per_page).to_list()
+    
     return payments, total_count
 
 
