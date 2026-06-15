@@ -443,3 +443,4 @@ async def get_student_financial_summary(student_id: PydanticObjectId) -> dict:
         "en_proceso": round(en_proceso, 2),
         "saldo_pendiente": round(saldo_pendiente, 2)
     }
+
