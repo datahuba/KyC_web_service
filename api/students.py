@@ -407,3 +407,4 @@ async def read_student_financial_summary(
         
     summary = await student_service.get_student_financial_summary(student_id=id)
     return summary
+
