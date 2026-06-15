@@ -369,3 +369,41 @@ async def bulk_delete_students(*, payload: BulkDeleteRequest, current_user: User
     await Student.find({"_id": {"$in": payload.ids}}).delete()
     
     return {"message": f"Se eliminaron {len(payload.ids)} estudiantes.", "deleted_count": len(payload.ids)}
+
+
+@router.get(
+    "/{id}/financial-summary",
+    response_model=dict,
+    summary="Resumen Financiero del Estudiante"
+)
+async def read_student_financial_summary(
+    *,
+    id: PydanticObjectId,
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> Any:
+    """
+    Obtener ficha de estado de cuenta unificada del estudiante (Total Invertido, Pagado, En Proceso, Saldo Pendiente).
+    Excluye explícitamente al rol CPD según políticas de segregación de funciones.
+    """
+    # 1. Si el usuario actual es un Estudiante, solo puede consultar su propia ficha
+    if isinstance(current_user, Student) and current_user.id != id:
+        raise HTTPException(
+            status_code=403,
+            detail="Acceso denegado: No tienes permiso para visualizar el estado financiero de otro estudiante."
+        )
+    
+    # 2. Si el usuario es un personal de la institución (User), validar segregación de funciones (CPD restringido)
+    if isinstance(current_user, User):
+        from models.enums import UserRole
+        if current_user.rol == UserRole.CPD:
+            raise HTTPException(
+                status_code=403,
+                detail="Acceso denegado: El rol de Gestión Académica (CPD) no tiene permisos para visualizar datos financieros."
+            )
+            
+    student = await student_service.get_student(id=id)
+    if not student:
+        raise HTTPException(status_code=404, detail="Estudiante no encontrado")
+        
+    summary = await student_service.get_student_financial_summary(student_id=id)
+    return summary

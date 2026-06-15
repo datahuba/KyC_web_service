@@ -411,3 +411,35 @@ async def import_students_from_excel(file_content: bytes, force_tipo: TipoEstudi
         "success_count": success_count,
         "errors": errors
     }
+
+
+async def get_student_financial_summary(student_id: PydanticObjectId) -> dict:
+    """
+    Obtener resumen financiero unificado de todas las inscripciones del estudiante (Ficha de Estado de Cuenta).
+    Retorna: total_invertido, pagado, en_proceso, saldo_pendiente
+    """
+    from models.enrollment import Enrollment
+    from models.payment import Payment
+    from models.enums import EstadoPago
+
+    # 1. Obtener todas las inscripciones del estudiante
+    enrollments = await Enrollment.find(Enrollment.estudiante_id == student_id).to_list()
+
+    total_invertido = sum(e.total_a_pagar for e in enrollments)
+    pagado = sum(e.total_pagado for e in enrollments)
+    saldo_pendiente = sum(e.saldo_pendiente for e in enrollments)
+
+    # 2. Obtener la suma de pagos en estado PENDIENTE
+    pending_payments = await Payment.find(
+        Payment.estudiante_id == student_id,
+        Payment.estado_pago == EstadoPago.PENDIENTE
+    ).to_list()
+
+    en_proceso = sum(p.cantidad_pago for p in pending_payments)
+
+    return {
+        "total_invertido": round(total_invertido, 2),
+        "pagado": round(pagado, 2),
+        "en_proceso": round(en_proceso, 2),
+        "saldo_pendiente": round(saldo_pendiente, 2)
+    }
