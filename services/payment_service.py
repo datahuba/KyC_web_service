@@ -422,3 +422,4 @@ async def get_resumen_pagos_enrollment(enrollment_id: PydanticObjectId) -> dict:
         ),
     }
     return resumen
+
