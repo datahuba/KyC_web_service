@@ -19,16 +19,9 @@ class Payment(MongoBaseModel):
     Modelo de Pago - Registra cada transacción individual
     
     Cada pago representa:
-    - Un comprobante subido por el estudiante
+    - Un comprobante subido por el estudiante (o registrado en Caja)
     - Una verificación del admin (aprobar/rechazar)
     - Un concepto específico (matrícula, cuota 1, cuota 2, etc.)
-    
-    ¿Por qué un modelo separado?
-    ---------------------------
-    - Trazabilidad completa (historial de cada transacción)
-    - Permite rechazar pagos incorrectos
-    - Auditoría clara (quién aprobó, cuándo, qué voucher)
-    - Puede haber múltiples intentos (si se rechaza el primero)
     """
     
     # ========================================================================
@@ -57,7 +50,7 @@ class Payment(MongoBaseModel):
     concepto: str = Field(
         ...,
         min_length=1,
-        description="Concepto del pago: 'MATRICULA', 'CUOTA', etc."
+        description="Concepto del pago: 'Matrícula', 'Módulo', etc."
     )
     
     numero_cuota: Optional[int] = Field(
@@ -67,18 +60,23 @@ class Payment(MongoBaseModel):
     )
     
     # ========================================================================
-    # DATOS DE LA TRANSACCIÓN
+    # DATOS DE LA TRANSACCIÓN FINANCIERA (ISSUE-P-CANALES)
     # ========================================================================
     
-    numero_transaccion: str = Field(
-        ...,
-        description="Número de transacción bancaria del comprobante"
+    metodo_pago: str = Field(
+        default="Transferencia", 
+        description="Puede ser: 'Transferencia', 'Caja', 'Depósito'"
+    )
+    
+    numero_transaccion: Optional[str] = Field(
+        None,
+        description="Número de transacción bancaria (Nulo si fue en Caja física)"
     )
     
     cantidad_pago: float = Field(
         ...,
         gt=0,
-        description="Monto del pago en Bs"
+        description="Monto del pago en Bs (El valor REAL pagado/prorrateable)"
     )
     
     descuento_aplicado: Optional[float] = Field(
@@ -87,26 +85,25 @@ class Payment(MongoBaseModel):
         description="Descuento aplicado en este pago específico (si aplica)"
     )
     
+    remitente: Optional[str] = Field(None, description="Persona que figura en el voucher o que pagó en caja")
+    banco: Optional[str] = Field(None, description="Banco origen (Nulo si fue Caja)")
+    monto_comprobante: Optional[float] = None
+    fecha_comprobante: Optional[datetime] = None 
+    cuenta_destino: Optional[str] = Field(None, description="Cuenta institucional receptora o nombre de Caja")
+    
     # ========================================================================
     # COMPROBANTE Y ESTADO
     # ========================================================================
     
-    comprobante_url: str = Field(
-        ...,
-        description="URL del comprobante/voucher de pago (PDF en Cloudinary)"
+    comprobante_url: Optional[str] = Field(
+        None,
+        description="URL del comprobante/voucher en la nube (Nulo si pagó en Caja física)"
     )
     
     estado_pago: EstadoPago = Field(
         default=EstadoPago.PENDIENTE,
-        description="Estado: PENDIENTE, APROBADO, RECHAZADO"
+        description="Estado: PENDIENTE, APROBADO, RECHAZADO, ANULADO"
     )
-
-    # Nuevos campos en el modelo
-    remitente: Optional[str] = None
-    banco: Optional[str] = None
-    monto_comprobante: Optional[float] = None
-    fecha_comprobante: Optional[datetime] = None # En el modelo es datetime
-    cuenta_destino: Optional[str] = None
     
     # ========================================================================
     # TIMESTAMPS Y AUDITORÍA
@@ -114,17 +111,17 @@ class Payment(MongoBaseModel):
     
     fecha_subida: datetime = Field(
         default_factory=datetime.utcnow,
-        description="Cuándo el estudiante subió el comprobante"
+        description="Cuándo se registró el comprobante en el sistema"
     )
     
     fecha_verificacion: Optional[datetime] = Field(
         None,
-        description="Cuándo el admin verificó el pago"
+        description="Cuándo el admin verificó o anuló el pago"
     )
     
     verificado_por: Optional[str] = Field(
         None,
-        description="Username del admin que verificó/rechazó"
+        description="Username del admin que verificó/rechazó/anuló"
     )
     
     motivo_rechazo: Optional[str] = Field(
@@ -132,49 +129,50 @@ class Payment(MongoBaseModel):
         description="Razón del rechazo (si estado_pago = RECHAZADO)"
     )
     
+    motivo_reversion: Optional[str] = Field(
+        None,
+        description="Razón de la anulación (si estado_pago = ANULADO, e.j: Cheque sin fondos)"
+    )
+    
     # ========================================================================
     # MÉTODOS
     # ========================================================================
     
     def aprobar_pago(self, admin_username: str):
-        """
-        Aprueba el pago
-        
-        Args:
-            admin_username: Username del admin que aprueba
-        """
         self.estado_pago = EstadoPago.APROBADO
         self.fecha_verificacion = datetime.utcnow()
         self.verificado_por = admin_username
         self.motivo_rechazo = None
+        self.motivo_reversion = None
         self.updated_at = datetime.utcnow()
     
     def rechazar_pago(self, admin_username: str, motivo: str):
-        """
-        Rechaza el pago
-        
-        Args:
-            admin_username: Username del admin que rechaza
-            motivo: Razón del rechazo
-        """
         self.estado_pago = EstadoPago.RECHAZADO
         self.fecha_verificacion = datetime.utcnow()
         self.verificado_por = admin_username
         self.motivo_rechazo = motivo
         self.updated_at = datetime.utcnow()
+
+    def anular_pago(self, admin_username: str, motivo: str):
+        """
+        Anula un pago que YA ESTABA APROBADO (Rollback financiero)
+        """
+        self.estado_pago = EstadoPago.ANULADO  # Requerirá agregar ANULADO al enum EstadoPago
+        self.fecha_verificacion = datetime.utcnow()
+        self.verificado_por = admin_username
+        self.motivo_reversion = motivo
+        self.updated_at = datetime.utcnow()
     
     class Settings:
         name = "payments"
         indexes = [
-            # Índices de referencias cruzadas para queries ágiles de listados y conciliaciones
             "inscripcion_id",
             "estudiante_id",
             "curso_id",
-            # Índice para la búsqueda antifraude por número de depósito/transferencia
             "numero_transaccion",
             "concepto",
-            # Índice compuesto de alto rendimiento para el panel de conciliación (Cobranzas)
+            "metodo_pago",
             [("estado_pago", pymongo.ASCENDING), ("fecha_subida", pymongo.DESCENDING)],
-            # Índice temporal simple para ordenación de caja histórica
             [("fecha_subida", pymongo.DESCENDING)]
         ]
+        
