@@ -3,23 +3,14 @@
 API de Pagos (Payments)
 =======================
 
-Endpoints para gestionar pagos de estudiantes.
-
-Permisos:
----------
-- POST /payments/: STUDENT (solo sus pagos)
-- GET /payments/: STAFF (todos) / STUDENT (solo los suyos)
-- GET /payments/{id}: STAFF / STUDENT (si es suyo)
-- PUT /payments/{id}/aprobar: COBRANZAS, CPD, ADMIN, SUPERADMIN (según concepto)
-- PUT /payments/{id}/rechazar: COBRANZAS, CPD, ADMIN, SUPERADMIN (según concepto)
-- GET /payments/enrollment/{enrollment_id}: STAFF / STUDENT (si es suya)
-- GET /payments/pendientes: COBRANZAS, CPD, ADMIN, SUPERADMIN (según concepto)
+Endpoints para gestionar pagos de estudiantes, incluyendo 
+rollback financiero y control de Caja/Bancos.
 """
 
 from typing import List, Any, Optional
 import asyncio
 import re
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, status
 from models.course import Course
 from models.payment import Payment
 from models.student import Student
@@ -30,19 +21,18 @@ from schemas.payment import (
     PaymentResponse,
     PaymentApproval,
     PaymentRejection,
+    PaymentReversion,
     PaymentWithDetails
 )
 from services import payment_service
 from beanie import PydanticObjectId
 from beanie.operators import In
 
-# Dependencias de seguridad
 from api.dependencies import require_cobranza, require_staff, get_current_user
-
-router = APIRouter()
-
 from schemas.common import PaginatedResponse, PaginationMeta
 import math
+
+router = APIRouter()
 
 
 @router.post(
@@ -53,18 +43,24 @@ import math
 )
 async def create_payment(
     *,
-    file: UploadFile = File(..., description="Comprobante de pago (imagen JPG/PNG/WEBP o PDF)"),
     inscripcion_id: str = Form(..., description="ID de la inscripción"),
-    numero_transaccion: str = Form(..., description="Número de transacción bancaria"),
-    remitente: str = Form(...),
-    banco: str = Form(...),
+    metodo_pago: str = Form(default="Transferencia", description="Transferencia, Depósito o Caja"),
     monto_comprobante: float = Form(...),
-    fecha_comprobante: str = Form(...),
-    cuenta_destino: str = Form(...),
+    concepto: Optional[str] = Form(None),
+    
+    # Datos opcionales según el método de pago
+    numero_transaccion: Optional[str] = Form(None),
+    remitente: Optional[str] = Form(None),
+    banco: Optional[str] = Form(None),
+    fecha_comprobante: Optional[str] = Form(None),
+    cuenta_destino: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None, description="Comprobante (Opcional si es en Caja)"),
+    
     current_user: Student = Depends(get_current_user)
 ) -> Any:
     """
-    Registrar un nuevo pago
+    Registrar un nuevo pago.
+    Soporta pagos digitales (exige voucher/número) y pagos físicos (Caja).
     """
     from core.cloudinary_utils import upload_image, upload_pdf
     from schemas.payment import PaymentCreate
@@ -75,30 +71,47 @@ async def create_payment(
             detail="Solo los estudiantes pueden subir comprobantes de pago"
         )
     
+    # 1. Validaciones rígidas según el Método de Pago
+    if metodo_pago != "Caja":
+        if not file:
+            raise HTTPException(status_code=400, detail="El comprobante es obligatorio para transferencias y depósitos.")
+        if not numero_transaccion:
+            raise HTTPException(status_code=400, detail="El número de transacción es obligatorio para este método de pago.")
+        if not banco:
+            raise HTTPException(status_code=400, detail="Debe especificar el banco emisor.")
+    
+    comprobante_url = None
+    
     try:
-        folder = f"payments/{current_user.id}"
-        safe_transaction = numero_transaccion.replace(' ', '_').replace('/', '_')
-        public_id = f"voucher_{safe_transaction}"
+        # 2. Subida de Archivo a la Nube (si existe)
+        if file:
+            folder = f"payments/{current_user.id}"
+            safe_transaction = (numero_transaccion or "caja_pago").replace(' ', '_').replace('/', '_')
+            public_id = f"voucher_{safe_transaction}"
+            
+            image_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
+            pdf_type = "application/pdf"
+            
+            if file.content_type in image_types:
+                comprobante_url = await upload_image(file, folder, public_id)
+            elif file.content_type == pdf_type:
+                comprobante_url = await upload_pdf(file, folder, public_id)
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Formato no permitido: {file.content_type}. Use imagen o PDF"
+                )
         
-        image_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
-        pdf_type = "application/pdf"
-        
-        if file.content_type in image_types:
-            comprobante_url = await upload_image(file, folder, public_id)
-        elif file.content_type == pdf_type:
-            comprobante_url = await upload_pdf(file, folder, public_id)
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Formato no permitido: {file.content_type}. Use imagen o PDF"
-            )
-        
+        # 3. Ensamblaje del Payload Relajado
         payment_in = PaymentCreate(
             inscripcion_id=inscripcion_id,
+            metodo_pago=metodo_pago,
+            monto_comprobante=monto_comprobante,
+            concepto=concepto,
+            cantidad_pago=monto_comprobante, # Aseguramos que la cantidad refleje el monto
             numero_transaccion=numero_transaccion,
             remitente=remitente,
             banco=banco,
-            monto_comprobante=monto_comprobante,
             fecha_comprobante=fecha_comprobante,
             cuenta_destino=cuenta_destino,
             comprobante_url=comprobante_url
@@ -129,69 +142,44 @@ async def list_payments(
     page: int = Query(1, ge=1, description="Número de página"),
     per_page: int = Query(10, ge=1, le=500, description="Elementos por página"),
     q: Optional[str] = Query(None, description="Búsqueda por transacción o comprobante"),
-    estado: Optional[EstadoPago] = Query(None, description="Filtrar por estado"),
+    estado: Optional[str] = Query(None, description="Filtrar por estado"),
     curso_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por Curso ID"),
     estudiante_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por Estudiante ID"),
     current_user: User | Student = Depends(get_current_user)
 ) -> Any:
-    """
-    Listar pagos con paginación y filtros optimizados en lote (Bulk)
-    """
-    if isinstance(current_user, User):
-        filters_dict = {}
-        
-        if q:
-            escaped_q = re.escape(q.strip())
-            regex_filter = {"$regex": escaped_q, "$options": "i"}
-
-            matching_students = await Student.find({
-                "$or": [
-                    {"nombre": regex_filter},
-                    {"email": regex_filter},
-                    {"registro": regex_filter}
-                ]
-            }).to_list()
-
-            matching_courses = await Course.find({
-                "$or": [
-                    {"nombre_programa": regex_filter},
-                    {"codigo": regex_filter}
-                ]
-            }).to_list()
-
-            student_ids = [student.id for student in matching_students if student.id]
-            course_ids = [course.id for course in matching_courses if course.id]
-
-            filters_dict["$or"] = [
-                {"numero_transaccion": regex_filter},
-                {"remitente": regex_filter},
-                {"banco": regex_filter},
-                {"estudiante_id": {"$in": student_ids}},
-                {"curso_id": {"$in": course_ids}}
-            ]
-            
-        if estado:
-            filters_dict["estado_pago"] = estado
-        if curso_id:
-            filters_dict["curso_id"] = curso_id
-        if estudiante_id:
-            filters_dict["estudiante_id"] = estudiante_id
-            
-        if current_user.rol == "cpd":
-            filters_dict["concepto"] = {"$regex": r"^matr[ií]cula$", "$options": "i"}
-        elif current_user.rol == "cobranza":
-            filters_dict["concepto"] = {"$not": {"$regex": r"^matr[ií]cula$", "$options": "i"}}
-            
-        query = Payment.find(filters_dict)
-        total_count = await query.count()
-        payments = await query.sort("-fecha_subida").skip((page - 1) * per_page).limit(per_page).to_list()
     
+    if isinstance(current_user, User):
+        # BUG 8 FIX: Delegamos toda la lógica relacional al servicio optimizado NoSQL
+        payments, total_count = await payment_service.get_all_payments(
+            page=page,
+            per_page=per_page,
+            q=q,
+            estado=estado,
+            curso_id=curso_id,
+            estudiante_id=estudiante_id
+        )
+        
+        # Filtrado de RBAC (CPD vs Cobranza)
+        filtered_payments = []
+        for p in payments:
+            concepto_lower = (p.concepto or "").lower().strip()
+            is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
+            if current_user.rol == "cpd" and not is_matricula:
+                continue
+            if current_user.rol == "cobranza" and is_matricula:
+                continue
+            filtered_payments.append(p)
+            
+        payments = filtered_payments
+        total_count = len(filtered_payments) # Actualizamos el count tras el filtro
+        
     elif isinstance(current_user, Student):
         all_payments = await payment_service.get_payments_by_student(
             student_id=current_user.id
         )
-        if estado:
-            all_payments = [p for p in all_payments if p.estado_pago == estado]
+        if estado and estado != "Todos los estados":
+            all_payments = [p for p in all_payments if p.estado_pago.value == estado]
+            
         total_count = len(all_payments)
         start = (page - 1) * per_page
         end = start + per_page
@@ -203,7 +191,6 @@ async def list_payments(
     has_next = page < total_pages
     has_prev = page > 1
     
-    # Optimizador: Enriquecimiento en LOTE ( Bulk Load )
     enriched_payments = await payment_service.enrich_payments_with_details_bulk(payments)
     
     return {
@@ -229,7 +216,6 @@ async def get_payment(
     id: PydanticObjectId,
     current_user: User | Student = Depends(get_current_user)
 ) -> Any:
-    """Ver detalles de un pago"""
     payment = await payment_service.get_payment(id)
     if not payment:
         raise HTTPException(status_code=404, detail="Pago no encontrado")
@@ -246,15 +232,9 @@ async def get_payment(
         is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
         
         if current_user.rol == "cpd" and not is_matricula:
-            raise HTTPException(
-                status_code=403,
-                detail="El rol CPD solo tiene acceso a pagos de concepto Matrícula"
-            )
+            raise HTTPException(status_code=403, detail="El rol CPD solo tiene acceso a pagos de concepto Matrícula")
         elif current_user.rol == "cobranza" and is_matricula:
-            raise HTTPException(
-                status_code=403,
-                detail="El rol Cobranza no tiene acceso a pagos de concepto Matrícula"
-            )
+            raise HTTPException(status_code=403, detail="El rol Cobranza no tiene acceso a pagos de concepto Matrícula")
     
     return await payment_service.enrich_payment_with_details(payment)
 
@@ -269,7 +249,6 @@ async def aprobar_pago(
     id: PydanticObjectId,
     current_user: User = Depends(require_staff)
 ) -> Any:
-    """Aprobar un pago"""
     if current_user.rol not in ["superadmin", "admin", "cpd", "cobranza"]:
         raise HTTPException(status_code=403, detail="Su rol no tiene permisos para aprobar pagos")
         
@@ -281,16 +260,9 @@ async def aprobar_pago(
     is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
     
     if current_user.rol == "cpd" and not is_matricula:
-        raise HTTPException(
-            status_code=403,
-            detail="El rol CPD solo puede aprobar pagos con concepto de Matrícula."
-        )
-        
+        raise HTTPException(status_code=403, detail="El rol CPD solo puede aprobar pagos con concepto de Matrícula.")
     if current_user.rol == "cobranza" and is_matricula:
-        raise HTTPException(
-            status_code=403,
-            detail="El rol Cobranza no puede aprobar pagos con concepto de Matrícula."
-        )
+        raise HTTPException(status_code=403, detail="El rol Cobranza no puede aprobar pagos con concepto de Matrícula.")
         
     try:
         payment = await payment_service.aprobar_pago(
@@ -313,7 +285,6 @@ async def rechazar_pago(
     rejection: PaymentRejection,
     current_user: User = Depends(require_staff)
 ) -> Any:
-    """Rechazar un pago con motivo"""
     if current_user.rol not in ["superadmin", "admin", "cpd", "cobranza"]:
         raise HTTPException(status_code=403, detail="Su rol no tiene permisos para rechazar pagos")
         
@@ -325,16 +296,9 @@ async def rechazar_pago(
     is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
     
     if current_user.rol == "cpd" and not is_matricula:
-        raise HTTPException(
-            status_code=403,
-            detail="El rol CPD solo puede rechazar pagos con concepto de Matrícula."
-        )
-        
+        raise HTTPException(status_code=403, detail="El rol CPD solo puede rechazar pagos con concepto de Matrícula.")
     if current_user.rol == "cobranza" and is_matricula:
-        raise HTTPException(
-            status_code=403,
-            detail="El rol Cobranza no puede rechazar pagos con concepto de Matrícula."
-        )
+        raise HTTPException(status_code=403, detail="El rol Cobranza no puede rechazar pagos con concepto de Matrícula.")
         
     try:
         payment = await payment_service.rechazar_pago(
@@ -347,13 +311,44 @@ async def rechazar_pago(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.put(
+    "/{id}/anular",
+    response_model=PaymentResponse,
+    summary="Anular Pago (Rollback Financiero)"
+)
+async def anular_pago(
+    *,
+    id: PydanticObjectId,
+    reversion: PaymentReversion,
+    current_user: User = Depends(require_staff)
+) -> Any:
+    """
+    ISSUE-P-CANALES: Anula un pago previamente aprobado y restaura las deudas del estudiante.
+    Solo disponible para Cobranzas, Admin y SuperAdmin. El CPD no maneja flujos de caja.
+    """
+    if current_user.rol not in ["superadmin", "admin", "cobranza"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="Solo el personal financiero (Cobranzas/Administrador) puede realizar reversiones de caja."
+        )
+        
+    try:
+        payment = await payment_service.anular_pago(
+            payment_id=id,
+            admin_username=current_user.username,
+            motivo=reversion.motivo
+        )
+        return await payment_service.enrich_payment_with_details(payment)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("/enrollment/{enrollment_id}", response_model=List[PaymentResponse])
 async def get_payments_by_enrollment(
     *,
     enrollment_id: PydanticObjectId,
     current_user: User | Student = Depends(get_current_user)
 ) -> Any:
-    """Obtener todos los pagos de una inscripción"""
     if isinstance(current_user, Student):
         from services import enrollment_service
         enrollment = await enrollment_service.get_enrollment(enrollment_id)
@@ -379,7 +374,6 @@ async def get_payments_by_enrollment(
                 continue
         filtered_payments.append(p)
         
-    # Enriquecer lote en milisegundos con resolución Bulk
     return await payment_service.enrich_payments_with_details_bulk(filtered_payments)
 
 
@@ -389,7 +383,6 @@ async def get_resumen_pagos(
     enrollment_id: PydanticObjectId,
     current_user: User | Student = Depends(get_current_user)
 ) -> Any:
-    """Obtener resumen de pagos de una inscripción"""
     if isinstance(current_user, Student):
         from services import enrollment_service
         enrollment = await enrollment_service.get_enrollment(enrollment_id)
@@ -413,7 +406,6 @@ async def get_payments_pendientes(
     *,
     current_user: User = Depends(require_staff)
 ) -> Any:
-    """Obtener todos los pagos pendientes de aprobación"""
     if current_user.rol not in ["superadmin", "admin", "cpd", "cobranza"]:
         raise HTTPException(status_code=403, detail="No autorizado para listar pagos pendientes")
         
@@ -446,9 +438,6 @@ async def generar_reporte_excel_pagos(
     fecha_hasta: Optional[str] = Query(None, description="Fecha fin (YYYY-MM-DD)"),
     current_user: User = Depends(require_staff)
 ):
-    """
-    Generar reporte Excel de pagos (Optimizado contra Timeouts y cuellos de botella)
-    """
     from datetime import datetime, date
     from fastapi.responses import StreamingResponse
     from openpyxl import Workbook
@@ -484,7 +473,6 @@ async def generar_reporte_excel_pagos(
     
     payments = await Payment.find(criteria).sort("-fecha_subida").to_list()
     
-    # --- PREFETCH BULK DE ALTO RENDIMIENTO (1 SOLA CONSULTA DE RED) ---
     student_ids = list({p.estudiante_id for p in payments if p.estudiante_id})
     enrollment_ids = list({p.inscripcion_id for p in payments if p.inscripcion_id})
     
@@ -495,13 +483,12 @@ async def generar_reporte_excel_pagos(
     
     students_map = {s.id: s for s in students}
     enrollments_map = {e.id: e for e in enrollments}
-    # ------------------------------------------------------------------
     
     wb = Workbook()
     ws = wb.active
     ws.title = "Reporte de Pagos"
     
-    headers = ["Nombre del Estudiante", "Fecha", "Moneda", "Monto", "Concepto", "Total Cuotas", "Nº de Transacción", "Estado", "Descripción"]
+    headers = ["Nombre del Estudiante", "Método", "Fecha", "Moneda", "Monto", "Concepto", "Total Cuotas", "Nº Transacción", "Estado", "Motivo Reversión"]
     ws.append(headers)
     
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -528,18 +515,19 @@ async def generar_reporte_excel_pagos(
 
         row = [
             nombre_estudiante,
+            payment.metodo_pago,
             fecha_bolivia,
             "Bs",
             payment.cantidad_pago,
             payment.concepto or "",
             total_cuotas,
-            payment.numero_transaccion or "",
+            payment.numero_transaccion or "Caja / S/N",
             payment.estado_pago.value if payment.estado_pago else "",
-            ""
+            payment.motivo_reversion or ""
         ]
         ws.append(row)
     
-    column_widths = [30, 20, 10, 15, 20, 15, 25, 15, 30]
+    column_widths = [30, 15, 20, 10, 15, 20, 15, 25, 15, 30]
     for i, width in enumerate(column_widths, 1):
         ws.column_dimensions[chr(64 + i)].width = width
     
