@@ -247,66 +247,82 @@ async def cambiar_estado_enrollment(
 
 
 # ========================================================================
-# ISSUE-F-PRORRATEO: ALGORITMO FINANCIERO EN CASCADA
+# ISSUE-F-PRORRATEO: ALGORITMO FINANCIERO EN CASCADA (V2 - RECONSTRUCCIÓN ABSOLUTA)
 # ========================================================================
 async def actualizar_saldo_enrollment(
     enrollment_id: PydanticObjectId,
-    monto_pago_aprobado: float
+    monto_pago_aprobado: float = 0.0 # Se mantiene la firma por compatibilidad, pero ya no se usa ciegamente
 ):
     """
-    Actualiza el saldo de la inscripción distribuyendo el dinero en cascada (Waterfall).
+    Reconstruye el saldo de la inscripción sumando todos los pagos históricos aprobados.
+    Distribuye los fondos en cascada (Waterfall) reparando cualquier inconsistencia de base de datos.
     """
+    from models.payment import Payment
+    from models.enums import EstadoPago
+
     enrollment = await Enrollment.get(enrollment_id)
     if not enrollment:
         raise ValueError(f"Inscripción {enrollment_id} no encontrada")
     
-    # 1. Sumamos el pago al total histórico
-    monto_disponible = round(monto_pago_aprobado, 2)
-    
-    # 2. Paso 1: Cubrir la matrícula si aún se debe algo de ella
-    if not enrollment.matricula_pagada:
-        # Asumimos que los primeros pagos siempre van a matrícula hasta cubrir `costo_matricula`
-        pagos_historicos = round(enrollment.total_pagado, 2)
-        deuda_matricula = round(enrollment.costo_matricula - pagos_historicos, 2)
+    # 1. Recolectar la verdad absoluta: ¿Cuánto dinero REALMENTE tiene aprobado este alumno?
+    pagos_aprobados = await Payment.find(
+        Payment.inscripcion_id == enrollment_id,
+        Payment.estado_pago == EstadoPago.APROBADO
+    ).to_list()
+
+    dinero_historico_total = sum(p.cantidad_pago for p in pagos_aprobados)
+    tanque_de_agua = round(dinero_historico_total, 2)
+
+    # 2. Reiniciar los contadores de la inscripción a cero para reconstruirlos
+    enrollment.matricula_pagada = False
+    for mod in enrollment.modulos:
+        mod.monto_pagado = 0.0
+        mod.estado = "Pendiente"
+
+    # 3. PASO 1: Cubrir la matrícula administrativa obligatoria
+    if tanque_de_agua >= enrollment.costo_matricula:
+        tanque_de_agua = round(tanque_de_agua - enrollment.costo_matricula, 2)
+        enrollment.matricula_pagada = True
         
-        if deuda_matricula > 0:
-            if monto_disponible >= deuda_matricula:
-                monto_disponible = round(monto_disponible - deuda_matricula, 2)
-                enrollment.matricula_pagada = True
-            else:
-                # El pago no alcanzó para cubrir la matrícula entera
-                monto_disponible = 0.0
+        # REGLA DE NEGOCIO UAGRM: Al pagar matrícula, el alumno pasa a ser "Activo"
+        if enrollment.estado == EstadoInscripcion.PENDIENTE_PAGO:
+            enrollment.estado = EstadoInscripcion.ACTIVO
+    else:
+        # El dinero no alcanzó ni para la matrícula
+        enrollment.matricula_pagada = False
+        tanque_de_agua = 0.0
 
-    # 3. Paso 2: Cascada sobre los módulos de colegiatura
-    if monto_disponible > 0:
-        for idx, modulo in enumerate(enrollment.modulos):
-            if monto_disponible <= 0.01:
-                break # El dinero se agotó
+    # 4. PASO 2: Cascada sobre los módulos académicos
+    if tanque_de_agua > 0:
+        for mod in enrollment.modulos:
+            if tanque_de_agua <= 0.01:
+                break # Se acabó el dinero
 
-            deuda_modulo = round(modulo.costo - modulo.monto_pagado, 2)
+            costo_modulo = round(mod.costo, 2)
             
-            if deuda_modulo > 0.01: # Si el módulo aún no está totalmente pagado
-                if monto_disponible >= deuda_modulo:
-                    # El dinero cubre este módulo completamente
-                    modulo.monto_pagado = modulo.costo
-                    modulo.estado = "Pagado"
-                    monto_disponible = round(monto_disponible - deuda_modulo, 2)
-                else:
-                    # El dinero se agota en este módulo (Pago parcial)
-                    modulo.monto_pagado = round(modulo.monto_pagado + monto_disponible, 2)
-                    modulo.estado = "Parcial"
-                    monto_disponible = 0.0
+            if tanque_de_agua >= costo_modulo:
+                # El dinero cubre este módulo completamente
+                mod.monto_pagado = costo_modulo
+                mod.estado = "Pagado"
+                tanque_de_agua = round(tanque_de_agua - costo_modulo, 2)
+            else:
+                # El dinero restante se vierte en este módulo (Pago parcial)
+                mod.monto_pagado = round(tanque_de_agua, 2)
+                mod.estado = "Parcial"
+                tanque_de_agua = 0.0
 
-    # 4. Actualizar Totales Globales
-    enrollment.actualizar_saldo(monto_pago_aprobado)
+    # 5. Actualizar los totales globales (Total Pagado y Saldo Pendiente)
+    enrollment.total_pagado = round(dinero_historico_total, 2)
+    enrollment.saldo_pendiente = max(0.0, round(enrollment.total_a_pagar - dinero_historico_total, 2))
     
-    # 5. Evolución del Estado Operacional
-    if enrollment.estado == EstadoInscripcion.PENDIENTE_PAGO and enrollment.matricula_pagada:
+    # 6. Evolución a "Completado" si la deuda llegó a cero
+    if enrollment.esta_completamente_pagado() and enrollment.matricula_pagada:
+        enrollment.estado = EstadoInscripcion.COMPLETADO
+    elif not enrollment.esta_completamente_pagado() and enrollment.matricula_pagada:
+        # Prevención de retroceso en caso de reversión de pagos
         enrollment.estado = EstadoInscripcion.ACTIVO
     
-    if enrollment.esta_completamente_pagado():
-        enrollment.estado = EstadoInscripcion.COMPLETADO
-    
+    enrollment.updated_at = datetime.utcnow()
     await enrollment.save()
 
 
