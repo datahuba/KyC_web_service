@@ -32,20 +32,24 @@ async def get_user_notifications(
     limit: int = 50,
     only_unread: bool = False
 ) -> List[Notification]:
-    """Obtener la lista de notificaciones de un usuario o alumno"""
-    query = Notification.find(Notification.destinatario_id == destinatario_id)
+    """
+    Obtener la lista de notificaciones de un usuario o alumno.
+    Utiliza sintaxis de diccionario nativa de MongoDB para evitar el bug de atributos de Pydantic v2.
+    """
+    query_dict = {"destinatario_id": destinatario_id}
     if only_unread:
-        query = query.find(Notification.leido == False)
-    
-    return await query.sort("-created_at").limit(limit).to_list()
+        query_dict["leido"] = False
+        
+    return await Notification.find(query_dict).sort("-created_at").limit(limit).to_list()
 
 
 async def get_unread_count(destinatario_id: PydanticObjectId) -> int:
-    """Obtener conteo neto de notificaciones no leídas"""
-    return await Notification.find(
-        Notification.destinatario_id == destinatario_id,
-        Notification.leido == False
-    ).count()
+    """Obtener conteo neto de notificaciones no leídas de manera robusta y sin colisión de atributos"""
+    query_dict = {
+        "destinatario_id": destinatario_id,
+        "leido": False
+    }
+    return await Notification.find(query_dict).count()
 
 
 async def mark_as_read(
@@ -62,9 +66,10 @@ async def mark_as_read(
 
 
 async def mark_all_as_read(destinatario_id: PydanticObjectId) -> int:
-    """Marcar todas las alertas pendientes del destinatario en lote"""
-    result = await Notification.find(
-        Notification.destinatario_id == destinatario_id,
-        Notification.leido == False
-    ).update({"$set": {"leido": True}})
+    """Marcar todas las alertas pendientes del destinatario en lote de manera segura"""
+    query_dict = {
+        "destinatario_id": destinatario_id,
+        "leido": False
+    }
+    result = await Notification.find(query_dict).update({"$set": {"leido": True}})
     return result.modified_count if result else 0
