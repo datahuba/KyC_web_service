@@ -31,3 +31,6 @@ jobs:
             docker compose build --no-cache backend
             docker compose up -d --no-deps --force-recreate backend
             
+            echo "🧹 === LIMPIEZA DE IMÁGENES HUÉRFANAS === 🧹"
+            # Elimina de forma segura imágenes colgantes (<none>:<none>) creadas en la compilación para liberar espacio en tu VPS
+            docker image prune -f
