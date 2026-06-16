@@ -34,15 +34,12 @@ async def _registrar_auditoria_financiera(
     Función auxiliar para registrar los movimientos financieros en un log inmutable.
     """
     try:
-        # En una arquitectura madura esto puede ir a su propia colección "audit_logs".
-        # Por ahora lo inyectamos directamente al log del servidor para cumplimiento.
         print(
             f"[AUDIT TRAIL] [{datetime.utcnow()}] ACCIÓN: {accion} | "
             f"ADMIN: {admin_username} | PAGO_ID: {payment_id} | "
             f"ESTUDIANTE_ID: {estudiante_id} | MONTO: Bs. {monto} | "
             f"DETALLE: {detalles}"
         )
-        # TODO: Guardar en colección AuditLog
     except Exception as e:
         print(f"Error guardando auditoría: {str(e)}")
 
@@ -176,7 +173,6 @@ async def create_payment(
             "No puedes crear un pago para una inscripción que no te pertenece"
         )
 
-    # 1. Validación anti-fraude: Solo si es transferencia o depósito
     if payment_in.metodo_pago != "Caja" and payment_in.numero_transaccion:
         existing_transaction = await Payment.find_one(
             Payment.numero_transaccion == payment_in.numero_transaccion,
@@ -194,14 +190,10 @@ async def create_payment(
     if not next_payment:
          raise ValueError("Esta inscripción ya tiene todos los pagos en proceso o aprobados.")
 
-    # 2. Respetar el concepto enviado por el frontend, o usar el calculado si no hay.
     concepto_final = payment_in.concepto if payment_in.concepto else next_payment["concepto"]
     cuota_final = payment_in.numero_cuota if payment_in.numero_cuota else next_payment["numero_cuota"]
-
-    # ISSUE-F-PRORRATEO: Aceptamos el monto exacto ingresado por el estudiante.
     monto_real = payment_in.monto_comprobante if payment_in.monto_comprobante else payment_in.cantidad_pago
 
-    # 3. Construcción del Pago
     payment = Payment(
         inscripcion_id=payment_in.inscripcion_id,
         estudiante_id=enrollment.estudiante_id,
@@ -224,6 +216,33 @@ async def create_payment(
     )
     
     await payment.insert()
+    
+    # [NOTIFICACIONES - ISSUE-U-BUZON]
+    # Notificar a todo el personal de Cobranzas y Administración sobre el pago pendiente
+    try:
+        from models.user import User
+        from models.enums import UserRole
+        from services.notification_service import create_notification
+        
+        student_obj = await Student.get(student_id)
+        student_name = student_obj.nombre if student_obj and student_obj.nombre else "Estudiante registrado"
+        
+        cobradores = await User.find(
+            User.rol == UserRole.COBRANZA,
+            User.activo == True
+        ).to_list()
+        
+        for cob in cobradores:
+            await create_notification(
+                destinatario_id=cob.id,
+                tipo_destinatario="user",
+                titulo="Nuevo Pago Pendiente",
+                mensaje=f"El estudiante {student_name} ({student_obj.registro if student_obj else ''}) ha subido un comprobante de Bs. {monto_real} por el concepto '{concepto_final}'.",
+                tipo_alerta="info"
+            )
+    except Exception as e:
+        print(f"Error al enviar notificación de pago pendiente: {str(e)}")
+
     return payment
 
 
@@ -311,17 +330,14 @@ async def aprobar_pago(
             f"No se puede aprobar un pago que está en estado {payment.estado_pago}"
         )
     
-    # 1. Ejecutar aprobación
     payment.aprobar_pago(admin_username)
     await payment.save()
     
-    # 2. Reestructuración Financiera (Algoritmo Waterfall)
     await enrollment_service.actualizar_saldo_enrollment(
         enrollment_id=payment.inscripcion_id,
         monto_pago_aprobado=payment.cantidad_pago
     )
 
-    # 3. Guardar rastro inmutable
     await _registrar_auditoria_financiera(
         accion="APROBAR PAGO",
         payment_id=payment.id,
@@ -330,6 +346,20 @@ async def aprobar_pago(
         admin_username=admin_username,
         detalles=f"Aprobado el {payment.concepto}"
     )
+
+    # [NOTIFICACIONES - ISSUE-U-BUZON]
+    # Notificar al estudiante que su pago ha sido aprobado de manera exitosa
+    try:
+        from services.notification_service import create_notification
+        await create_notification(
+            destinatario_id=payment.estudiante_id,
+            tipo_destinatario="student",
+            titulo="Pago Aprobado",
+            mensaje=f"Tu pago de Bs. {payment.cantidad_pago} por el concepto '{payment.concepto}' ha sido conciliado y aprobado de forma exitosa.",
+            tipo_alerta="success"
+        )
+    except Exception as e:
+        print(f"Error al enviar notificación de pago aprobado: {str(e)}")
     
     return payment
 
@@ -359,6 +389,20 @@ async def rechazar_pago(
         admin_username=admin_username,
         detalles=f"Rechazado. Motivo: {motivo}"
     )
+    
+    # [NOTIFICACIONES - ISSUE-U-BUZON]
+    # Notificar al estudiante que su pago fue rechazado indicándole el motivo del cajero
+    try:
+        from services.notification_service import create_notification
+        await create_notification(
+            destinatario_id=payment.estudiante_id,
+            tipo_destinatario="student",
+            titulo="Pago Rechazado",
+            mensaje=f"Tu comprobante de pago por Bs. {payment.cantidad_pago} para '{payment.concepto}' ha sido rechazado. Motivo: {motivo}",
+            tipo_alerta="error"
+        )
+    except Exception as e:
+        print(f"Error al enviar notificación de pago rechazado: {str(e)}")
 
     return payment
 
@@ -370,32 +414,25 @@ async def anular_pago(
 ) -> Payment:
     """
     ISSUE-P-CANALES: Realiza un Rollback Financiero (Anulación de pago ya aprobado).
-    Ejemplo: Cheque rebotado, transferencia internacional cancelada.
     """
     payment = await Payment.get(payment_id)
     if not payment:
         raise ValueError(f"Pago {payment_id} no encontrado")
     
-    # Solo podemos anular un pago que está aprobado y forma parte del saldo del estudiante.
     if payment.estado_pago != EstadoPago.APROBADO:
         raise ValueError(
             f"La anulación solo aplica para pagos APROBADOS. "
             f"Este pago se encuentra en estado '{payment.estado_pago}'."
         )
     
-    # 1. Anular el comprobante
     payment.anular_pago(admin_username, motivo)
     await payment.save()
 
-    # 2. El verdadero milagro: Llamar a nuestro nuevo Algoritmo de Reconstrucción Absoluta.
-    # Al pasarle monto 0.0, el motor leerá la DB, verá que el pago ya no es "Aprobado", y le
-    # restará mágicamente el dinero de la libreta y de los módulos del estudiante de forma exacta.
     await enrollment_service.actualizar_saldo_enrollment(
         enrollment_id=payment.inscripcion_id,
         monto_pago_aprobado=0.0 
     )
 
-    # 3. Dejar registro fiscal de la anulación para la Universidad
     await _registrar_auditoria_financiera(
         accion="ANULAR PAGO (ROLLBACK)",
         payment_id=payment.id,
@@ -404,6 +441,20 @@ async def anular_pago(
         admin_username=admin_username,
         detalles=f"Anulación de fondos. Motivo legal: {motivo}"
     )
+    
+    # [NOTIFICACIONES - ISSUE-U-BUZON]
+    # Notificar al estudiante que un pago previamente aprobado ha sido anulado (rollback)
+    try:
+        from services.notification_service import create_notification
+        await create_notification(
+            destinatario_id=payment.estudiante_id,
+            tipo_destinatario="student",
+            titulo="Pago Anulado (Reversión)",
+            mensaje=f"Atención: Tu pago aprobado de Bs. {payment.cantidad_pago} por el concepto '{payment.concepto}' ha sido anulado. Razón: {motivo}",
+            tipo_alerta="warning"
+        )
+    except Exception as e:
+        print(f"Error al enviar notificación de pago anulado: {str(e)}")
 
     return payment
 
@@ -423,3 +474,88 @@ async def get_resumen_pagos_enrollment(enrollment_id: PydanticObjectId) -> dict:
     }
     return resumen
 
+
+async def create_caja_directo_payment(
+    estudiante_id: PydanticObjectId,
+    inscripcion_id: PydanticObjectId,
+    cantidad_pago: float,
+    admin_username: str,
+    concepto: Optional[str] = None,
+    numero_cuota: Optional[int] = None,
+    remitente: Optional[str] = None,
+    cuenta_destino: Optional[str] = None
+) -> Payment:
+    """
+    Registrar un pago físico directo en Caja realizado por cobranzas para un alumno.
+    El pago se crea directamente como APROBADO e impacta el saldo del estudiante automáticamente.
+    No requiere las credenciales del estudiante para procesar.
+    """
+    enrollment = await Enrollment.get(inscripcion_id)
+    if not enrollment:
+        raise ValueError(f"Inscripción {inscripcion_id} no encontrada")
+        
+    if enrollment.estudiante_id != estudiante_id:
+        raise ValueError("La inscripción seleccionada no coincide con el estudiante")
+
+    next_payment = await get_next_pending_payment(inscripcion_id)
+    if not next_payment:
+         raise ValueError("Esta inscripción ya tiene todos los pagos en proceso o aprobados.")
+
+    concepto_final = concepto if concepto else next_payment["concepto"]
+    cuota_final = numero_cuota if numero_cuota else next_payment["numero_cuota"]
+
+    # Crear pago ya APROBADO naciendo en Caja
+    payment = Payment(
+        inscripcion_id=inscripcion_id,
+        estudiante_id=estudiante_id,
+        curso_id=enrollment.curso_id,
+        metodo_pago="Caja",
+        concepto=concepto_final,
+        cantidad_pago=cantidad_pago,
+        numero_cuota=cuota_final,
+        numero_transaccion="Caja / Directo",
+        comprobante_url=None,
+        remitente=remitente,
+        banco="Caja Física",
+        monto_comprobante=cantidad_pago,
+        fecha_comprobante=datetime.utcnow(),
+        cuenta_destino=cuenta_destino or f"Caja Física - {admin_username}",
+        estado_pago=EstadoPago.APROBADO
+    )
+    
+    # Sellar la verificación automática de caja
+    payment.fecha_verificacion = datetime.utcnow()
+    payment.verificado_por = admin_username
+    
+    await payment.insert()
+
+    # Reestructuración Financiera (Algoritmo de cascada Waterfall)
+    await enrollment_service.actualizar_saldo_enrollment(
+        enrollment_id=inscripcion_id,
+        monto_pago_aprobado=cantidad_pago
+    )
+
+    # Registrar Auditoría inmutable de caja
+    await _registrar_auditoria_financiera(
+        accion="COBRO DIRECTO EN CAJA",
+        payment_id=payment.id,
+        estudiante_id=estudiante_id,
+        monto=cantidad_pago,
+        admin_username=admin_username,
+        detalles=f"Cobro directo en caja procesado por {admin_username}. Concepto: {concepto_final}"
+    )
+
+    # Notificar al alumno de inmediato en su buzón transaccional
+    try:
+        from services.notification_service import create_notification
+        await create_notification(
+            destinatario_id=estudiante_id,
+            tipo_destinatario="student",
+            titulo="Pago Registrado en Caja",
+            mensaje=f"Se ha registrado un pago directo en Caja por Bs. {cantidad_pago} para el concepto '{concepto_final}'. El pago ha sido aprobado automáticamente.",
+            tipo_alerta="success"
+        )
+    except Exception as e:
+        print(f"Error al notificar pago directo en caja: {str(e)}")
+
+    return payment

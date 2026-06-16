@@ -11,6 +11,7 @@ from typing import List, Any, Optional
 import asyncio
 import re
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, status
+from pydantic import BaseModel, Field # IMPORTACIÓN REQUERIDA
 from models.course import Course
 from models.payment import Payment
 from models.student import Student
@@ -149,7 +150,6 @@ async def list_payments(
 ) -> Any:
     
     if isinstance(current_user, User):
-        # BUG 8 FIX: Delegamos toda la lógica relacional al servicio optimizado NoSQL
         payments, total_count = await payment_service.get_all_payments(
             page=page,
             per_page=per_page,
@@ -171,7 +171,7 @@ async def list_payments(
             filtered_payments.append(p)
             
         payments = filtered_payments
-        total_count = len(filtered_payments) # Actualizamos el count tras el filtro
+        total_count = len(filtered_payments)
         
     elif isinstance(current_user, Student):
         all_payments = await payment_service.get_payments_by_student(
@@ -542,3 +542,45 @@ async def generar_reporte_excel_pagos(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
+
+
+class CajaDirectoRequest(BaseModel):
+    estudiante_id: PydanticObjectId
+    inscripcion_id: PydanticObjectId
+    cantidad_pago: float = Field(..., gt=0, description="Monto cobrado en Caja (Bs)")
+    concepto: Optional[str] = None
+    numero_cuota: Optional[int] = None
+    remitente: Optional[str] = None
+    cuenta_destino: Optional[str] = None
+
+
+@router.post(
+    "/caja-directo",
+    response_model=PaymentResponse,
+    summary="Registrar Cobro Directo en Caja"
+)
+async def registrar_cobro_caja_directo(
+    *,
+    payload: CajaDirectoRequest,
+    current_user: User = Depends(require_cobranza)
+) -> Any:
+    """
+    Registrar un cobro físico directo en Caja para cualquier estudiante.
+    Se crea directamente como APROBADO sin requerir la intervención o credenciales del estudiante.
+    """
+    try:
+        payment = await payment_service.create_caja_directo_payment(
+            estudiante_id=payload.estudiante_id,
+            inscripcion_id=payload.inscripcion_id,
+            cantidad_pago=payload.cantidad_pago,
+            admin_username=current_user.username,
+            concepto=payload.concepto,
+            numero_cuota=payload.numero_cuota,
+            remitente=payload.remitente,
+            cuenta_destino=payload.cuenta_destino
+        )
+        return await payment_service.enrich_payment_with_details(payment)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al registrar cobro directo: {str(e)}")
