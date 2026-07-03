@@ -334,12 +334,14 @@ async def rechazar_titulo_estudiante(*, id: PydanticObjectId, motivo: str = Form
 async def import_students(
     file: UploadFile = File(...), 
     tipo_estudiante: TipoEstudiante = Form(...), # Recibe Interno/Externo desde el frontend
+    curso_id: Optional[PydanticObjectId] = Form(None), # Curso opcional para auto-inscribir a los estudiantes importados
     current_user: User = Depends(require_cpd)
 ) -> Any:
-    if not file.filename.endswith(('.xlsx', '.xls')): raise HTTPException(400, "Formato no permitido")
+    if not file.filename.lower().endswith(('.xlsx', '.xls', '.csv')):
+        raise HTTPException(400, "Formato no permitido. Sube un archivo .xlsx, .xls o .csv")
     contents = await file.read()
     try:
-        return await student_service.import_students_from_excel(contents, tipo_estudiante)
+        return await student_service.import_students_from_excel(contents, tipo_estudiante, curso_id, file.filename)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
