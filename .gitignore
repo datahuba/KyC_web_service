@@ -19,3 +19,6 @@ venv/
 # IDEs
 .vscode/
 .idea/
+
+# Datos reales de prueba (PII de estudiantes) - nunca deben subirse al repo
+docs/muestras/
