@@ -20,7 +20,7 @@ from typing import Optional, List
 import pymongo
 from pydantic import Field, EmailStr
 from .base import MongoBaseModel, PyObjectId
-from .enums import TipoEstudiante
+from .enums import TipoEstudiante, Sexo, EstadoCivil, TipoSangre
 
 
 class Student(MongoBaseModel):
@@ -96,6 +96,26 @@ class Student(MongoBaseModel):
     fecha_nacimiento: Optional[datetime] = Field(None,description="Fecha de nacimiento (requerido para certificados y títulos)")
     foto_url: Optional[str] = Field(None,description="URL de la foto de perfil del estudiante")
     es_estudiante_interno: Optional[TipoEstudiante] = Field(None,description=("Tipo de estudiante: INTERNO (de la universidad) o EXTERNO (público general). "))
+
+    # ========================================================================
+    # DATOS PERSONALES OFICIALES (Ficha UAGRM) — todos opcionales
+    # ========================================================================
+    sexo: Optional[Sexo] = Field(None, description="Sexo del estudiante")
+    estado_civil: Optional[EstadoCivil] = Field(None, description="Estado civil")
+    pais: Optional[str] = Field(None, description="País de residencia/origen")
+    departamento: Optional[str] = Field(None, description="Departamento")
+    provincia: Optional[str] = Field(None, description="Provincia")
+    nacionalidad: Optional[str] = Field(None, description="Nacionalidad")
+    telefono: Optional[str] = Field(None, description="Teléfono fijo (distinto del celular)")
+
+    # ========================================================================
+    # DATOS ACADÉMICOS OFICIALES (Ficha UAGRM)
+    # ========================================================================
+    modalidad_ingreso: Optional[str] = Field(None, description="Modalidad de ingreso (ej. P.S.A.)")
+    periodo: Optional[str] = Field(None, description="Periodo de ingreso (ej. 1/2019)")
+    tipo_sangre: Optional[TipoSangre] = Field(None, description="Grupo sanguíneo")
+    titulo_bachiller: Optional[str] = Field(None, description="Número/registro del título de bachiller")
+
     activo: bool = Field(default=True,description="Si el estudiante puede acceder al sistema y realizar acciones")
     lista_cursos_ids: List[PyObjectId] = Field(default_factory=list,description="Lista de IDs de cursos en los que el estudiante está inscrito")
 

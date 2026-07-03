@@ -15,7 +15,7 @@ Schemas incluidos:
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, Field, EmailStr, field_validator
-from models.enums import TipoEstudiante
+from models.enums import TipoEstudiante, Sexo, EstadoCivil, TipoSangre
 from models.base import PyObjectId
 
 
@@ -78,6 +78,48 @@ class StudentCreate(BaseModel):
     fecha_nacimiento: Optional[datetime] = Field(None, description="Fecha de nacimiento")
     es_estudiante_interno: Optional[TipoEstudiante] = Field(None, description="Tipo de estudiante: INTERNO o EXTERNO")
 
+    # Datos oficiales UAGRM (opcionales)
+    sexo: Optional[Sexo] = None
+    estado_civil: Optional[EstadoCivil] = None
+    pais: Optional[str] = None
+    departamento: Optional[str] = None
+    provincia: Optional[str] = None
+    nacionalidad: Optional[str] = None
+    telefono: Optional[str] = None
+    modalidad_ingreso: Optional[str] = None
+    periodo: Optional[str] = None
+    tipo_sangre: Optional[TipoSangre] = None
+    titulo_bachiller: Optional[str] = None
+
+    @field_validator('sexo', 'estado_civil', 'tipo_sangre', 'es_estudiante_interno', mode='before')
+    @classmethod
+    def _empty_enum_a_none(cls, v):
+        # Los <select> del frontend envían "" cuando no se elige nada; para enums
+        # opcionales eso debe interpretarse como None (no como valor inválido).
+        if v == '' or v is None:
+            return None
+        return v
+
+    @field_validator('carnet')
+    @classmethod
+    def _carnet_numerico(cls, v):
+        if v is None:
+            return v
+        v = str(v).strip()
+        if v and not v.isdigit():
+            raise ValueError('El carnet debe contener solo números.')
+        return v
+
+    @field_validator('celular', 'telefono')
+    @classmethod
+    def _telefono_numerico(cls, v):
+        if v is None:
+            return v
+        v = str(v).strip()
+        if v and not v.isdigit():
+            raise ValueError('El teléfono/celular debe contener solo números.')
+        return v or None
+
     model_config = {
         "json_schema_extra": {
             "example": {
@@ -114,6 +156,19 @@ class StudentResponse(BaseModel):
     fecha_nacimiento: Optional[datetime] = None
     foto_url: Optional[str] = None
     es_estudiante_interno: Optional[TipoEstudiante] = None
+
+    # Datos oficiales UAGRM
+    sexo: Optional[Sexo] = None
+    estado_civil: Optional[EstadoCivil] = None
+    pais: Optional[str] = None
+    departamento: Optional[str] = None
+    provincia: Optional[str] = None
+    nacionalidad: Optional[str] = None
+    telefono: Optional[str] = None
+    modalidad_ingreso: Optional[str] = None
+    periodo: Optional[str] = None
+    tipo_sangre: Optional[TipoSangre] = None
+    titulo_bachiller: Optional[str] = None
     
     # DOCUMENTACIÓN (URLs de Cloudinary de los PDFs)
     cv_url: Optional[str] = None
@@ -163,6 +218,17 @@ class StudentUpdateSelf(BaseModel):
     
     celular: Optional[str] = None
     domicilio: Optional[str] = None
+    telefono: Optional[str] = None
+
+    @field_validator('celular', 'telefono')
+    @classmethod
+    def _self_telefono_numerico(cls, v):
+        if v is None:
+            return v
+        v = str(v).strip()
+        if v and not v.isdigit():
+            raise ValueError('El teléfono/celular debe contener solo números.')
+        return v or None
     
     model_config = {
         "json_schema_extra": {
@@ -191,6 +257,46 @@ class StudentUpdateAdmin(BaseModel):
     es_estudiante_interno: Optional[TipoEstudiante] = None
     activo: Optional[bool] = None
     lista_cursos_ids: Optional[List[PyObjectId]] = None
+
+    # Datos oficiales UAGRM (opcionales)
+    sexo: Optional[Sexo] = None
+    estado_civil: Optional[EstadoCivil] = None
+    pais: Optional[str] = None
+    departamento: Optional[str] = None
+    provincia: Optional[str] = None
+    nacionalidad: Optional[str] = None
+    telefono: Optional[str] = None
+    modalidad_ingreso: Optional[str] = None
+    periodo: Optional[str] = None
+    tipo_sangre: Optional[TipoSangre] = None
+    titulo_bachiller: Optional[str] = None
+
+    @field_validator('sexo', 'estado_civil', 'tipo_sangre', 'es_estudiante_interno', mode='before')
+    @classmethod
+    def _admin_empty_enum_a_none(cls, v):
+        if v == '' or v is None:
+            return None
+        return v
+
+    @field_validator('carnet')
+    @classmethod
+    def _admin_carnet_numerico(cls, v):
+        if v is None:
+            return v
+        v = str(v).strip()
+        if v and not v.isdigit():
+            raise ValueError('El carnet debe contener solo números.')
+        return v
+
+    @field_validator('celular', 'telefono')
+    @classmethod
+    def _admin_telefono_numerico(cls, v):
+        if v is None:
+            return v
+        v = str(v).strip()
+        if v and not v.isdigit():
+            raise ValueError('El teléfono/celular debe contener solo números.')
+        return v or None
     
     model_config = {
         "json_schema_extra": {

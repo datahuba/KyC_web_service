@@ -107,6 +107,33 @@ class TipoEstudiante(str, Enum):
     EXTERNO = "externo"
 
 
+class Sexo(str, Enum):
+    """Sexo del estudiante (dato oficial UAGRM)"""
+    MASCULINO = "masculino"
+    FEMENINO = "femenino"
+
+
+class EstadoCivil(str, Enum):
+    """Estado civil del estudiante (dato oficial UAGRM)"""
+    SOLTERO = "soltero"
+    CASADO = "casado"
+    DIVORCIADO = "divorciado"
+    VIUDO = "viudo"
+    OTRO = "otro"
+
+
+class TipoSangre(str, Enum):
+    """Grupo sanguíneo del estudiante (dato oficial UAGRM)"""
+    A_POS = "A+"
+    A_NEG = "A-"
+    B_POS = "B+"
+    B_NEG = "B-"
+    AB_POS = "AB+"
+    AB_NEG = "AB-"
+    O_POS = "O+"
+    O_NEG = "O-"
+
+
 class EstadoRequisito(str, Enum):
     """
     Estados de validación de un requisito/documento
