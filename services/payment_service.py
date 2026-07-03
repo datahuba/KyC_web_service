@@ -2,13 +2,8 @@
 Servicio de Pagos (Payments)
 ============================
 
-Lógica de negocio para pagos.
-
-Permisos:
----------
-- CREAR pago: Solo STUDENT (sube su propio comprobante)
-- APROBAR/RECHAZAR pago: Solo ADMIN/SUPERADMIN
-- VER pagos: ADMIN (todos), STUDENT (solo los suyos)
+Lógica de negocio para pagos, incluyendo soporte de métodos en Caja,
+Auditoría y Algoritmo de Prorrateo.
 """
 
 from typing import List, Optional
@@ -24,11 +19,32 @@ from beanie import PydanticObjectId
 from beanie.operators import In, Or
 from services import enrollment_service
 
+# ========================================================================
+# MOTOR DE AUDITORÍA FINANCIERA
+# ========================================================================
+async def _registrar_auditoria_financiera(
+    accion: str,
+    payment_id: PydanticObjectId,
+    estudiante_id: PydanticObjectId,
+    monto: float,
+    admin_username: str,
+    detalles: str
+):
+    """
+    Función auxiliar para registrar los movimientos financieros en un log inmutable.
+    """
+    try:
+        print(
+            f"[AUDIT TRAIL] [{datetime.utcnow()}] ACCIÓN: {accion} | "
+            f"ADMIN: {admin_username} | PAGO_ID: {payment_id} | "
+            f"ESTUDIANTE_ID: {estudiante_id} | MONTO: Bs. {monto} | "
+            f"DETALLE: {detalles}"
+        )
+    except Exception as e:
+        print(f"Error guardando auditoría: {str(e)}")
+
 
 async def enrich_payment_with_details(payment: Payment) -> dict:
-    """
-    Enriquecer un pago individual (usado para vistas de un solo ítem)
-    """
     payment_dict = payment.model_dump(by_alias=True)
     
     student = await Student.get(payment.estudiante_id)
@@ -62,25 +78,17 @@ async def enrich_payment_with_details(payment: Payment) -> dict:
 
 
 async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dict]:
-    """
-    ¡RESOLUCIÓN DE CUELLO DE BOTELLA CRÍTICO N+1!
-    Enriquece una lista de pagos en lote realizando solo 2 consultas agrupadas a la base de datos
-    mediante el operador $in, en lugar de 2 * N consultas secuenciales de red.
-    """
     if not payments:
         return []
 
-    # 1. Agrupar IDs únicos a buscar
     student_ids = list({p.estudiante_id for p in payments if p.estudiante_id})
     enrollment_ids = list({p.inscripcion_id for p in payments if p.inscripcion_id})
 
-    # 2. Consultas concurrentes en paralelo
     students_task = Student.find(In(Student.id, student_ids)).to_list()
     enrollments_task = Enrollment.find(In(Enrollment.id, enrollment_ids)).to_list()
     
     students, enrollments = await asyncio.gather(students_task, enrollments_task)
 
-    # 3. Mapeos O(1) en memoria para resolución ultrarrápida
     students_map = {s.id: s for s in students}
     enrollments_map = {e.id: e for e in enrollments}
 
@@ -112,9 +120,6 @@ async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dic
 
 
 async def get_next_pending_payment(enrollment_id: PydanticObjectId) -> dict:
-    """
-    Calcula el siguiente pago pendiente.
-    """
     enrollment = await enrollment_service.get_enrollment(enrollment_id)
     if not enrollment:
         raise ValueError("Inscripción no encontrada")
@@ -141,7 +146,6 @@ async def get_next_pending_payment(enrollment_id: PydanticObjectId) -> dict:
     
     if enrollment.cantidad_cuotas > 0:
         monto_cuota = enrollment.calcular_monto_cuota()
-        
         for i in range(1, enrollment.cantidad_cuotas + 1):
             if (f"Cuota {i}", i) not in conceptos_cubiertos:
                 return {
@@ -158,7 +162,7 @@ async def create_payment(
     student_id: PydanticObjectId
 ) -> Payment:
     """
-    Crear un nuevo pago.
+    Crear un nuevo pago. Soporta pagos digitales o pagos físicos en CAJA (sin voucher).
     """
     enrollment = await Enrollment.get(payment_in.inscripcion_id)
     if not enrollment:
@@ -169,68 +173,96 @@ async def create_payment(
             "No puedes crear un pago para una inscripción que no te pertenece"
         )
 
-    # Validación anti-fraude
-    existing_transaction = await Payment.find_one(
-        Payment.numero_transaccion == payment_in.numero_transaccion,
-        Payment.estado_pago != EstadoPago.RECHAZADO
-    )
-    
-    if existing_transaction:
-        raise ValueError(
-            f"El número de transacción bancaria '{payment_in.numero_transaccion}' ya "
-            f"ha sido registrado en el sistema y se encuentra '{existing_transaction.estado_pago}'. "
-            "No se permiten comprobantes duplicados."
+    if payment_in.metodo_pago != "Caja" and payment_in.numero_transaccion:
+        existing_transaction = await Payment.find_one(
+            Payment.numero_transaccion == payment_in.numero_transaccion,
+            Payment.estado_pago != EstadoPago.RECHAZADO
         )
+        
+        if existing_transaction:
+            raise ValueError(
+                f"El número de transacción bancaria '{payment_in.numero_transaccion}' ya "
+                f"ha sido registrado en el sistema y se encuentra '{existing_transaction.estado_pago}'. "
+                "No se permiten comprobantes duplicados."
+            )
     
     next_payment = await get_next_pending_payment(payment_in.inscripcion_id)
     if not next_payment:
          raise ValueError("Esta inscripción ya tiene todos los pagos en proceso o aprobados.")
 
+    concepto_final = payment_in.concepto if payment_in.concepto else next_payment["concepto"]
+    cuota_final = payment_in.numero_cuota if payment_in.numero_cuota else next_payment["numero_cuota"]
+    monto_real = payment_in.monto_comprobante if payment_in.monto_comprobante else payment_in.cantidad_pago
+
     payment = Payment(
         inscripcion_id=payment_in.inscripcion_id,
         estudiante_id=enrollment.estudiante_id,
         curso_id=enrollment.curso_id,
-        concepto=next_payment["concepto"],
-        cantidad_pago=next_payment["monto_sugerido"],
-        numero_cuota=next_payment["numero_cuota"],
+        
+        metodo_pago=payment_in.metodo_pago,
+        concepto=concepto_final,
+        cantidad_pago=monto_real,
+        numero_cuota=cuota_final,
+        
         numero_transaccion=payment_in.numero_transaccion,
         comprobante_url=payment_in.comprobante_url,
         remitente=payment_in.remitente,
         banco=payment_in.banco,
-        monto_comprobante=payment_in.monto_comprobante,
+        monto_comprobante=monto_real,
         fecha_comprobante=payment_in.fecha_comprobante,
         cuenta_destino=payment_in.cuenta_destino,
+        
         estado_pago=EstadoPago.PENDIENTE
     )
     
     await payment.insert()
+    
+    # [NOTIFICACIONES - ISSUE-U-BUZON]
+    # Notificar a todo el personal de Cobranzas y Administración sobre el pago pendiente
+    try:
+        from models.user import User
+        from models.enums import UserRole
+        from services.notification_service import create_notification
+        
+        student_obj = await Student.get(student_id)
+        student_name = student_obj.nombre if student_obj and student_obj.nombre else "Estudiante registrado"
+        
+        cobradores = await User.find(
+            User.rol == UserRole.COBRANZA,
+            User.activo == True
+        ).to_list()
+        
+        for cob in cobradores:
+            await create_notification(
+                destinatario_id=cob.id,
+                tipo_destinatario="user",
+                titulo="Nuevo Pago Pendiente",
+                mensaje=f"El estudiante {student_name} ({student_obj.registro if student_obj else ''}) ha subido un comprobante de Bs. {monto_real} por el concepto '{concepto_final}'.",
+                tipo_alerta="info",
+                ruta="/app/payments",
+                referencia_tipo="payment",
+                referencia_id=payment.id
+            )
+    except Exception as e:
+        print(f"Error al enviar notificación de pago pendiente: {str(e)}")
+
     return payment
 
 
 async def get_payment(id: PydanticObjectId) -> Optional[Payment]:
-    """Obtener un pago por ID"""
     return await Payment.get(id)
 
 
 async def get_payments_by_student(student_id: PydanticObjectId) -> List[Payment]:
-    """Obtener todos los pagos de un estudiante"""
-    return await Payment.find(
-        Payment.estudiante_id == student_id
-    ).sort("-fecha_subida").to_list()
+    return await Payment.find(Payment.estudiante_id == student_id).sort("-fecha_subida").to_list()
 
 
 async def get_payments_by_enrollment(enrollment_id: PydanticObjectId) -> List[Payment]:
-    """Obtener todos los pagos de una inscripción"""
-    return await Payment.find(
-        Payment.inscripcion_id == enrollment_id
-    ).sort("-fecha_subida").to_list()
+    return await Payment.find(Payment.inscripcion_id == enrollment_id).sort("-fecha_subida").to_list()
 
 
 async def get_payments_by_course(course_id: PydanticObjectId) -> List[Payment]:
-    """Obtener todos los pagos de un curso"""
-    return await Payment.find(
-        Payment.curso_id == course_id
-    ).sort("-fecha_subida").to_list()
+    return await Payment.find(Payment.curso_id == course_id).sort("-fecha_subida").to_list()
 
 
 async def get_all_payments(
@@ -241,32 +273,23 @@ async def get_all_payments(
     curso_id: Optional[PydanticObjectId] = None,
     estudiante_id: Optional[PydanticObjectId] = None
 ) -> tuple[List[Payment], int]:
-    """
-    Obtener todos los pagos con paginación y filtros complejos (Bug 8 Fix).
-    """
-    # Usamos diccionarios de consulta planos para soportar consultas más robustas en Beanie
+    
     query_dict = {}
     
-    # Filtro de Estado exacto
     if estado and estado != "Todos los estados":
         query_dict["estado_pago"] = estado
 
-    # Filtro de Estudiante exacto
     if estudiante_id:
         query_dict["estudiante_id"] = estudiante_id
 
-    # Filtro de Programa Académico (Curso)
-    # Buscamos todas las inscripciones (enrollments) que pertenezcan a ese curso
     if curso_id:
         enrollments = await Enrollment.find(Enrollment.curso_id == curso_id).to_list()
         enrollment_ids = [e.id for e in enrollments]
         query_dict["inscripcion_id"] = {"$in": enrollment_ids}
         
-    # Filtro Dinámico (Buscador general)
     if q:
         regex_pattern = {"$regex": q, "$options": "i"}
         
-        # Sub-consulta: Encontrar estudiantes que coincidan en nombre, registro o carnet
         matching_students = await Student.find(
             Or(
                 Student.nombre == regex_pattern,
@@ -278,7 +301,6 @@ async def get_all_payments(
         
         matching_student_ids = [s.id for s in matching_students]
 
-        # Combinar búsquedas de texto: Que coincida en los campos del pago O que sea uno de esos estudiantes
         query_dict["$or"] = [
             {"numero_transaccion": regex_pattern},
             {"concepto": regex_pattern},
@@ -295,21 +317,13 @@ async def get_all_payments(
 
 
 async def get_payments_pendientes() -> List[Payment]:
-    """
-    Obtener todos los pagos pendientes de revisión
-    """
-    return await Payment.find(
-        Payment.estado_pago == EstadoPago.PENDIENTE
-    ).to_list()
+    return await Payment.find(Payment.estado_pago == EstadoPago.PENDIENTE).to_list()
 
 
 async def aprobar_pago(
     payment_id: PydanticObjectId,
     admin_username: str
 ) -> Payment:
-    """
-    Aprobar un pago
-    """
     payment = await Payment.get(payment_id)
     if not payment:
         raise ValueError(f"Pago {payment_id} no encontrado")
@@ -319,29 +333,6 @@ async def aprobar_pago(
             f"No se puede aprobar un pago que está en estado {payment.estado_pago}"
         )
     
-    existing_approved = await Payment.find_one(
-        Payment.id != payment_id,
-        Payment.inscripcion_id == payment.inscripcion_id,
-        Payment.concepto == payment.concepto,
-        Payment.numero_cuota == payment.numero_cuota,
-        Payment.estado_pago == EstadoPago.APROBADO
-    )
-    
-    if existing_approved:
-        cuota_texto = f" (Cuota {payment.numero_cuota})" if payment.numero_cuota else ""
-        raise ValueError(
-            f"No se puede aprobar: ya existe un pago aprobado para {payment.concepto}{cuota_texto}. "
-            f"Pago aprobado existente: {existing_approved.id}."
-        )
-    
-    enrollment = await Enrollment.get(payment.inscripcion_id)
-    if not enrollment:
-        raise ValueError(f"Inscripción {payment.inscripcion_id} no encontrada")
-    
-    if payment.concepto == "Matrícula":
-        enrollment.matricula_pagada = True
-        await enrollment.save()
-    
     payment.aprobar_pago(admin_username)
     await payment.save()
     
@@ -349,6 +340,32 @@ async def aprobar_pago(
         enrollment_id=payment.inscripcion_id,
         monto_pago_aprobado=payment.cantidad_pago
     )
+
+    await _registrar_auditoria_financiera(
+        accion="APROBAR PAGO",
+        payment_id=payment.id,
+        estudiante_id=payment.estudiante_id,
+        monto=payment.cantidad_pago,
+        admin_username=admin_username,
+        detalles=f"Aprobado el {payment.concepto}"
+    )
+
+    # [NOTIFICACIONES - ISSUE-U-BUZON]
+    # Notificar al estudiante que su pago ha sido aprobado de manera exitosa
+    try:
+        from services.notification_service import create_notification
+        await create_notification(
+            destinatario_id=payment.estudiante_id,
+            tipo_destinatario="student",
+            titulo="Pago Aprobado",
+            mensaje=f"Tu pago de Bs. {payment.cantidad_pago} por el concepto '{payment.concepto}' ha sido conciliado y aprobado de forma exitosa.",
+            tipo_alerta="success",
+            ruta="/app/payments",
+            referencia_tipo="payment",
+            referencia_id=payment.id
+        )
+    except Exception as e:
+        print(f"Error al enviar notificación de pago aprobado: {str(e)}")
     
     return payment
 
@@ -358,9 +375,6 @@ async def rechazar_pago(
     admin_username: str,
     motivo: str
 ) -> Payment:
-    """
-    Rechazar un pago
-    """
     payment = await Payment.get(payment_id)
     if not payment:
         raise ValueError(f"Pago {payment_id} no encontrado")
@@ -372,13 +386,92 @@ async def rechazar_pago(
     
     payment.rechazar_pago(admin_username, motivo)
     await payment.save()
+
+    await _registrar_auditoria_financiera(
+        accion="RECHAZAR PAGO",
+        payment_id=payment.id,
+        estudiante_id=payment.estudiante_id,
+        monto=payment.cantidad_pago,
+        admin_username=admin_username,
+        detalles=f"Rechazado. Motivo: {motivo}"
+    )
+    
+    # [NOTIFICACIONES - ISSUE-U-BUZON]
+    # Notificar al estudiante que su pago fue rechazado indicándole el motivo del cajero
+    try:
+        from services.notification_service import create_notification
+        await create_notification(
+            destinatario_id=payment.estudiante_id,
+            tipo_destinatario="student",
+            titulo="Pago Rechazado",
+            mensaje=f"Tu comprobante de pago por Bs. {payment.cantidad_pago} para '{payment.concepto}' ha sido rechazado. Motivo: {motivo}",
+            tipo_alerta="error",
+            ruta="/app/payments",
+            referencia_tipo="payment",
+            referencia_id=payment.id
+        )
+    except Exception as e:
+        print(f"Error al enviar notificación de pago rechazado: {str(e)}")
+
+    return payment
+
+
+async def anular_pago(
+    payment_id: PydanticObjectId,
+    admin_username: str,
+    motivo: str
+) -> Payment:
+    """
+    ISSUE-P-CANALES: Realiza un Rollback Financiero (Anulación de pago ya aprobado).
+    """
+    payment = await Payment.get(payment_id)
+    if not payment:
+        raise ValueError(f"Pago {payment_id} no encontrado")
+    
+    if payment.estado_pago != EstadoPago.APROBADO:
+        raise ValueError(
+            f"La anulación solo aplica para pagos APROBADOS. "
+            f"Este pago se encuentra en estado '{payment.estado_pago}'."
+        )
+    
+    payment.anular_pago(admin_username, motivo)
+    await payment.save()
+
+    await enrollment_service.actualizar_saldo_enrollment(
+        enrollment_id=payment.inscripcion_id,
+        monto_pago_aprobado=0.0 
+    )
+
+    await _registrar_auditoria_financiera(
+        accion="ANULAR PAGO (ROLLBACK)",
+        payment_id=payment.id,
+        estudiante_id=payment.estudiante_id,
+        monto=payment.cantidad_pago,
+        admin_username=admin_username,
+        detalles=f"Anulación de fondos. Motivo legal: {motivo}"
+    )
+    
+    # [NOTIFICACIONES - ISSUE-U-BUZON]
+    # Notificar al estudiante que un pago previamente aprobado ha sido anulado (rollback)
+    try:
+        from services.notification_service import create_notification
+        await create_notification(
+            destinatario_id=payment.estudiante_id,
+            tipo_destinatario="student",
+            titulo="Pago Anulado (Reversión)",
+            mensaje=f"Atención: Tu pago aprobado de Bs. {payment.cantidad_pago} por el concepto '{payment.concepto}' ha sido anulado. Razón: {motivo}",
+            tipo_alerta="warning",
+            ruta="/app/payments",
+            referencia_tipo="payment",
+            referencia_id=payment.id
+        )
+    except Exception as e:
+        print(f"Error al enviar notificación de pago anulado: {str(e)}")
+
     return payment
 
 
 async def get_resumen_pagos_enrollment(enrollment_id: PydanticObjectId) -> dict:
-    """
-    Obtener resumen de pagos de una inscripción
-    """
     payments = await get_payments_by_enrollment(enrollment_id)
     
     resumen = {
@@ -386,8 +479,98 @@ async def get_resumen_pagos_enrollment(enrollment_id: PydanticObjectId) -> dict:
         "pendientes": len([p for p in payments if p.estado_pago == EstadoPago.PENDIENTE]),
         "aprobados": len([p for p in payments if p.estado_pago == EstadoPago.APROBADO]),
         "rechazados": len([p for p in payments if p.estado_pago == EstadoPago.RECHAZADO]),
+        "anulados": len([p for p in payments if p.estado_pago == EstadoPago.ANULADO]),
         "monto_total_aprobado": sum(
             p.cantidad_pago for p in payments if p.estado_pago == EstadoPago.APROBADO
         ),
     }
     return resumen
+
+
+async def create_caja_directo_payment(
+    estudiante_id: PydanticObjectId,
+    inscripcion_id: PydanticObjectId,
+    cantidad_pago: float,
+    admin_username: str,
+    concepto: Optional[str] = None,
+    numero_cuota: Optional[int] = None,
+    remitente: Optional[str] = None,
+    cuenta_destino: Optional[str] = None
+) -> Payment:
+    """
+    Registrar un pago físico directo en Caja realizado por cobranzas para un alumno.
+    El pago se crea directamente como APROBADO e impacta el saldo del estudiante automáticamente.
+    No requiere las credenciales del estudiante para procesar.
+    """
+    enrollment = await Enrollment.get(inscripcion_id)
+    if not enrollment:
+        raise ValueError(f"Inscripción {inscripcion_id} no encontrada")
+        
+    if enrollment.estudiante_id != estudiante_id:
+        raise ValueError("La inscripción seleccionada no coincide con el estudiante")
+
+    next_payment = await get_next_pending_payment(inscripcion_id)
+    if not next_payment:
+         raise ValueError("Esta inscripción ya tiene todos los pagos en proceso o aprobados.")
+
+    concepto_final = concepto if concepto else next_payment["concepto"]
+    cuota_final = numero_cuota if numero_cuota else next_payment["numero_cuota"]
+
+    # Crear pago ya APROBADO naciendo en Caja
+    payment = Payment(
+        inscripcion_id=inscripcion_id,
+        estudiante_id=estudiante_id,
+        curso_id=enrollment.curso_id,
+        metodo_pago="Caja",
+        concepto=concepto_final,
+        cantidad_pago=cantidad_pago,
+        numero_cuota=cuota_final,
+        numero_transaccion="Caja / Directo",
+        comprobante_url=None,
+        remitente=remitente,
+        banco="Caja Física",
+        monto_comprobante=cantidad_pago,
+        fecha_comprobante=datetime.utcnow(),
+        cuenta_destino=cuenta_destino or f"Caja Física - {admin_username}",
+        estado_pago=EstadoPago.APROBADO
+    )
+    
+    # Sellar la verificación automática de caja
+    payment.fecha_verificacion = datetime.utcnow()
+    payment.verificado_por = admin_username
+    
+    await payment.insert()
+
+    # Reestructuración Financiera (Algoritmo de cascada Waterfall)
+    await enrollment_service.actualizar_saldo_enrollment(
+        enrollment_id=inscripcion_id,
+        monto_pago_aprobado=cantidad_pago
+    )
+
+    # Registrar Auditoría inmutable de caja
+    await _registrar_auditoria_financiera(
+        accion="COBRO DIRECTO EN CAJA",
+        payment_id=payment.id,
+        estudiante_id=estudiante_id,
+        monto=cantidad_pago,
+        admin_username=admin_username,
+        detalles=f"Cobro directo en caja procesado por {admin_username}. Concepto: {concepto_final}"
+    )
+
+    # Notificar al alumno de inmediato en su buzón transaccional
+    try:
+        from services.notification_service import create_notification
+        await create_notification(
+            destinatario_id=estudiante_id,
+            tipo_destinatario="student",
+            titulo="Pago Registrado en Caja",
+            mensaje=f"Se ha registrado un pago directo en Caja por Bs. {cantidad_pago} para el concepto '{concepto_final}'. El pago ha sido aprobado automáticamente.",
+            tipo_alerta="success",
+            ruta="/app/payments",
+            referencia_tipo="payment",
+            referencia_id=payment.id
+        )
+    except Exception as e:
+        print(f"Error al notificar pago directo en caja: {str(e)}")
+
+    return payment

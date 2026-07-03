@@ -5,8 +5,11 @@ Servicio de Estudiantes
 Lógica de negocio para estudiantes (Funciones).
 """
 
+import csv
+import re
+import unicodedata
 import openpyxl
-from io import BytesIO
+from io import BytesIO, StringIO
 from typing import List, Optional, Union
 from models.student import Student
 from models.enums import EstadoTitulo, TipoEstudiante
@@ -209,46 +212,149 @@ async def delete_student(id: PydanticObjectId) -> Student:
 # LOGICA DE IMPORTACIÓN MASIVA DESDE EXCEL OPTIMIZADA DE ALTA VELOCIDAD (Bulk Write)
 # ============================================================================
 
-async def import_students_from_excel(file_content: bytes, force_tipo: TipoEstudiante) -> dict:
+def _normalize_header(value) -> str:
+    """Normaliza un encabezado: minúsculas, sin acentos y sin espacios sobrantes."""
+    if value is None:
+        return ""
+    s = str(value).strip().lower()
+    s = ''.join(c for c in unicodedata.normalize('NFKD', s) if not unicodedata.combining(c))
+    return s.strip()
+
+
+def _clean_text(value) -> Optional[str]:
+    """
+    Convierte una celda a texto limpio. Quita el sufijo '.0' de números que Excel/Forms
+    leyó como float (ej. carnet 2969698.0 -> '2969698'). Devuelve None si queda vacío.
+    """
+    if value is None:
+        return None
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    s = str(value).strip()
+    if not s:
+        return None
+    if s.endswith(".0") and s[:-2].isdigit():
+        s = s[:-2]
+    return s if s else None
+
+
+def _parse_amount(value) -> float:
+    """Convierte una celda monetaria a float. Devuelve 0.0 si no es un número válido."""
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip().replace(" ", "")
+    if not s:
+        return 0.0
+    s = s.replace(",", "")  # separador de miles
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+async def import_students_from_excel(
+    file_content: bytes,
+    force_tipo: TipoEstudiante,
+    curso_id: Optional[PydanticObjectId] = None,
+    filename: Optional[str] = None
+) -> dict:
     """
     Importar estudiantes de forma masiva desde un archivo de Excel (.xlsx).
     
     ¡OPTIMIZACIÓN DE ALTO RENDIMIENTO (ISSUE G)!
     Forzará el tipo de estudiante basado en `force_tipo` (INTERNO/EXTERNO) enviado desde el frontend,
     ignorando cualquier columna que diga "tipo" en el Excel, previniendo errores de digitación de los administrativos.
+
+    AUTO-INSCRIPCIÓN OPCIONAL:
+    Si se proporciona `curso_id`, todos los estudiantes recién creados en esta importación
+    serán inscritos automáticamente a ese curso/diplomado reutilizando la lógica financiera
+    oficial de `enrollment_service.create_enrollment` (cálculo de precios, módulos y descuentos).
+    Los errores de inscripción se reportan por estudiante y no interrumpen el resto del lote.
     """
     from core.security import get_password_hash
     
+    is_csv = bool(filename and filename.lower().strip().endswith('.csv'))
     try:
-        # Cargar libro en memoria de forma optimizada
-        wb = openpyxl.load_workbook(BytesIO(file_content), data_only=True)
-        sheet = wb.active
-        if not sheet:
-            raise ValueError("El archivo Excel no tiene hojas activas.")
+        if is_csv:
+            # CSV: decodificar respetando el BOM (utf-8-sig) con fallback a latin-1,
+            # autodetectar el delimitador (coma o punto y coma) y volcar las filas
+            # en una hoja de openpyxl para reutilizar la misma lógica de Excel.
+            try:
+                text = file_content.decode('utf-8-sig')
+            except UnicodeDecodeError:
+                text = file_content.decode('latin-1')
+            sample = text[:2048]
+            delimiter = ';' if sample.count(';') > sample.count(',') else ','
+            reader = csv.reader(StringIO(text), delimiter=delimiter)
+            wb = openpyxl.Workbook()
+            sheet = wb.active
+            for row in reader:
+                sheet.append(row)
+        else:
+            # Cargar libro en memoria de forma optimizada
+            wb = openpyxl.load_workbook(BytesIO(file_content), data_only=True)
+            sheet = wb.active
+        if not sheet or sheet.max_row < 1:
+            raise ValueError("El archivo no contiene datos.")
+    except ValueError:
+        raise
     except Exception as e:
-        raise ValueError(f"No se pudo parsear el archivo Excel: {str(e)}")
+        raise ValueError(f"No se pudo parsear el archivo: {str(e)}")
         
-    # 1. ESCANEO DINÁMICO DE CABECERAS (FILA 1)
-    header_row = []
-    for col_idx in range(1, sheet.max_column + 1):
-        cell_val = sheet.cell(row=1, column=col_idx).value
-        header_row.append(str(cell_val).strip().lower() if cell_val is not None else "")
-        
-    col_nombre = col_registro = col_carnet = col_extension = col_email = col_celular = col_domicilio = 0
-    
+    # 1. ESCANEO DINÁMICO DE CABECERAS (FILA 1) — normalizado sin acentos + detección financiera
+    header_row = [_normalize_header(sheet.cell(row=1, column=col_idx).value)
+                  for col_idx in range(1, sheet.max_column + 1)]
+
+    col_nombre = col_apellido = col_registro = col_carnet = 0
+    col_extension = col_email = col_celular = col_domicilio = 0
+    col_matricula = 0
+    col_matricula_comprobante = 0  # columna con el LINK del comprobante de pago de matrícula (Google Forms)
+    columnas_modulos = []  # lista de (col_idx, concepto) para pagos de módulos/cuotas
+
     for idx, header in enumerate(header_row, start=1):
-        if "nombre" in header: col_nombre = idx
-        elif "registro" in header: col_registro = idx
-        elif header == "ci" or "carnet" in header or "documento" in header: col_carnet = idx
-        elif "extension" in header or "ext" in header: col_extension = idx
-        elif "correo" in header or "email" in header or "mail" in header: col_email = idx
-        elif "celular" in header or "telefono" in header or "telf" in header: col_celular = idx
-        elif "domicilio" in header or "direccion" in header or "dir" in header: col_domicilio = idx
-            
+        if not header:
+            continue
+        # Detectar la columna con el comprobante (link) de pago de matrícula ANTES de excluir adjuntos.
+        # Ej. Google Forms: "Adjuntar Comprobante de Pago de la Matrícula (IMAGEN O PDF) Bs. 300".
+        if "comprobante" in header and "matricula" in header and col_matricula_comprobante == 0:
+            col_matricula_comprobante = idx
+            continue
+        # Ignorar columnas calculadas y de adjuntos/enlaces (no son datos ni montos individuales).
+        # Esto evita que columnas de Google Forms como "Adjuntar ... Carnet de Identidad" (una URL)
+        # se confundan con el carnet.
+        if any(tok in header for tok in ("total", "saldo", "cobrar", "adjuntar", "comprobante")) or header.startswith("http"):
+            continue
+        # --- Campos del estudiante (gana la PRIMERA coincidencia; nombre antes que apellido) ---
+        if "nombre" in header and col_nombre == 0:
+            col_nombre = idx
+        elif "apellido" in header and col_apellido == 0:
+            col_apellido = idx
+        elif ("registro" in header or "matricula academica" in header) and col_registro == 0:
+            col_registro = idx
+        elif (header == "ci" or "carnet" in header or "documento de identidad" in header) and col_carnet == 0:
+            col_carnet = idx
+        elif "extension" in header and col_extension == 0:
+            col_extension = idx
+        elif ("correo" in header or "email" in header or "mail" in header) and col_email == 0:
+            col_email = idx
+        elif ("celular" in header or "telefono" in header or "telf" in header) and col_celular == 0:
+            col_celular = idx
+        elif ("domicilio" in header or "direccion" in header) and col_domicilio == 0:
+            col_domicilio = idx
+        # --- Columnas financieras (para migrar pagos si se selecciona un curso) ---
+        elif "matricula" in header and col_matricula == 0:
+            col_matricula = idx
+        else:
+            m = re.match(r"^m\s*(\d+)$", header) or re.match(r"^(?:modulo|cuota)\s*(\d+)$", header)
+            if m:
+                columnas_modulos.append((idx, f"Módulo {m.group(1)}"))
+
     if col_nombre == 0:
-        raise ValueError("No se encontró la columna de 'Nombre' en la fila de cabecera del Excel.")
+        raise ValueError("No se encontró la columna de 'Nombre' en la fila de cabecera del archivo.")
     if col_carnet == 0:
-        raise ValueError("No se encontró la columna de 'CI' o 'Carnet' en la fila de cabecera del Excel.")
+        raise ValueError("No se encontró la columna de 'CI' o 'Carnet' en la fila de cabecera del archivo.")
         
     errors = []
     candidates = []
@@ -261,12 +367,18 @@ async def import_students_from_excel(file_content: bytes, force_tipo: TipoEstudi
     # 2. ESCANEAR FILAS Y VALIDAR EN MEMORIA (FILTRANDO VACÍOS Y DUPLICADOS INTERNOS)
     for row_idx in range(2, sheet.max_row + 1):
         try:
-            nombre_val = sheet.cell(row=row_idx, column=col_nombre).value if col_nombre > 0 else None
-            carnet_val = sheet.cell(row=row_idx, column=col_carnet).value if col_carnet > 0 else None
-            
-            nombre_str = str(nombre_val).strip() if nombre_val is not None else ""
-            carnet_str = str(carnet_val).strip() if carnet_val is not None else ""
-            
+            nombres_val = sheet.cell(row=row_idx, column=col_nombre).value if col_nombre > 0 else None
+            apellidos_val = sheet.cell(row=row_idx, column=col_apellido).value if col_apellido > 0 else None
+
+            nombres_str = str(nombres_val).strip() if nombres_val is not None else ""
+            apellidos_str = str(apellidos_val).strip() if apellidos_val is not None else ""
+            # Combinar Nombre(s) + Apellido(s) cuando el archivo los trae separados (ej. Google Forms)
+            nombre_str = f"{nombres_str} {apellidos_str}".strip() if (col_apellido > 0 and apellidos_str) else nombres_str
+
+            # Carnet limpio (sin sufijo .0 de floats)
+            carnet = _clean_text(sheet.cell(row=row_idx, column=col_carnet).value if col_carnet > 0 else None)
+            carnet_str = carnet if carnet else ""
+
             if not nombre_str and not carnet_str:
                 empty_row_streak += 1
                 if empty_row_streak >= 5:
@@ -275,19 +387,36 @@ async def import_students_from_excel(file_content: bytes, force_tipo: TipoEstudi
             else:
                 empty_row_streak = 0
                 
-            registro = sheet.cell(row=row_idx, column=col_registro).value if col_registro > 0 else None
-            extension = sheet.cell(row=row_idx, column=col_extension).value if col_extension > 0 else None
             email = sheet.cell(row=row_idx, column=col_email).value if col_email > 0 else None
-            celular = sheet.cell(row=row_idx, column=col_celular).value if col_celular > 0 else None
-            domicilio = sheet.cell(row=row_idx, column=col_domicilio).value if col_domicilio > 0 else None
-            
+            domicilio_val = sheet.cell(row=row_idx, column=col_domicilio).value if col_domicilio > 0 else None
+
             nombre = nombre_str if nombre_str else None
-            carnet = carnet_str if carnet_str else None
-            registro = str(registro).strip() if registro is not None else None
-            extension = str(extension).strip() if extension is not None else None
+            registro = _clean_text(sheet.cell(row=row_idx, column=col_registro).value if col_registro > 0 else None)
+            extension = _clean_text(sheet.cell(row=row_idx, column=col_extension).value if col_extension > 0 else None)
             email = str(email).strip().lower() if email is not None else None
-            celular = str(celular).strip() if celular is not None else None
-            domicilio = str(domicilio).strip() if domicilio is not None else None
+            celular = _clean_text(sheet.cell(row=row_idx, column=col_celular).value if col_celular > 0 else None)
+            domicilio = str(domicilio_val).strip() if domicilio_val is not None else None
+            if domicilio == "":
+                domicilio = None
+
+            # Recolectar pagos de la fila desde las columnas financieras detectadas
+            pagos_fila = []
+            if col_matricula > 0:
+                monto_mat = _parse_amount(sheet.cell(row=row_idx, column=col_matricula).value)
+                if monto_mat > 0:
+                    pagos_fila.append(("Matrícula", round(monto_mat, 2)))
+            for (cidx, concepto_mod) in columnas_modulos:
+                monto_mod = _parse_amount(sheet.cell(row=row_idx, column=cidx).value)
+                if monto_mod > 0:
+                    pagos_fila.append((concepto_mod, round(monto_mod, 2)))
+
+            # Capturar el LINK del comprobante de matrícula (si existe y es una URL)
+            matricula_comprobante_url = None
+            if col_matricula_comprobante > 0:
+                comp_val = sheet.cell(row=row_idx, column=col_matricula_comprobante).value
+                comp_str = str(comp_val).strip() if comp_val is not None else ""
+                if comp_str and comp_str.lower().startswith("http"):
+                    matricula_comprobante_url = comp_str
                     
             if not nombre:
                 errors.append(f"Fila {row_idx}: El nombre completo es obligatorio.")
@@ -332,7 +461,9 @@ async def import_students_from_excel(file_content: bytes, force_tipo: TipoEstudi
                 "extension": extension,
                 "celular": celular,
                 "domicilio": domicilio,
-                "es_estudiante_interno": force_tipo # ISSUE G
+                "es_estudiante_interno": force_tipo, # ISSUE G
+                "pagos": pagos_fila, # Montos a migrar (si el archivo trae columnas financieras)
+                "matricula_comprobante_url": matricula_comprobante_url # Link del voucher de matrícula
             })
         except Exception as e:
             errors.append(f"Fila {row_idx}: Error al procesar datos de la fila: {str(e)}")
@@ -368,6 +499,7 @@ async def import_students_from_excel(file_content: bytes, force_tipo: TipoEstudi
         
     # 4. PREPARAR OBJETOS DE INSERTIÓN Y HASHEAR CONTRASEÑAS (PROCESADOR CPU CONTINUO)
     students_to_insert = []
+    financials_to_insert = []  # pagos por estudiante, alineado 1:1 con students_to_insert
     for c in candidates:
         has_error = False
         if c["registro"] in existing_registros:
@@ -400,14 +532,174 @@ async def import_students_from_excel(file_content: bytes, force_tipo: TipoEstudi
                 lista_cursos_ids=[]
             )
         )
+        financials_to_insert.append({
+            "pagos": c["pagos"],
+            "matricula_comprobante_url": c["matricula_comprobante_url"]
+        })
         
     # 5. INSERCIÓN MASIVA DE ALTO RENDIMIENTO (1 SOLA ESCRITURA DE RED)
     success_count = 0
+    inserted_ids: List[PydanticObjectId] = []
     if students_to_insert:
-        await Student.insert_many(students_to_insert)
-        success_count = len(students_to_insert)
-        
+        insert_result = await Student.insert_many(students_to_insert)
+        # inserted_ids conserva el mismo orden que students_to_insert
+        inserted_ids = list(insert_result.inserted_ids)
+        success_count = len(inserted_ids)
+
+    # 6. AUTO-INSCRIPCIÓN OPCIONAL A UN CURSO + MIGRACIÓN DE PAGOS
+    enrolled_count = 0
+    migrated_payments_count = 0  # estudiantes a los que se les migró al menos un pago aprobado
+    matricula_vouchers_count = 0  # comprobantes de matrícula (link) registrados como pago pendiente
+    hay_columnas_financieras = bool(col_matricula or columnas_modulos or col_matricula_comprobante)
+
+    if curso_id and inserted_ids:
+        from datetime import datetime
+        from models.course import Course
+        from models.payment import Payment
+        from models.enums import EstadoPago
+        from schemas.enrollment import EnrollmentCreate
+        from services import enrollment_service
+
+        course = await Course.get(curso_id)
+        if not course:
+            errors.append(
+                f"Auto-inscripción cancelada: el curso seleccionado ({curso_id}) no existe. "
+                f"Los {success_count} estudiantes se crearon correctamente pero no fueron inscritos."
+            )
+        elif not course.activo:
+            errors.append(
+                f"Auto-inscripción cancelada: el curso '{course.nombre_programa}' está inactivo y no acepta inscripciones. "
+                f"Los {success_count} estudiantes se crearon correctamente pero no fueron inscritos."
+            )
+        else:
+            # Emparejar cada id insertado con su objeto y sus datos financieros (mismo orden que insert_many)
+            for student_id, student_obj, fin in zip(inserted_ids, students_to_insert, financials_to_insert):
+                pagos = fin["pagos"]
+                matricula_url = fin["matricula_comprobante_url"]
+                try:
+                    enrollment = await enrollment_service.create_enrollment(
+                        enrollment_in=EnrollmentCreate(
+                            estudiante_id=student_id,
+                            curso_id=curso_id
+                        ),
+                        admin_username="import_masivo"
+                    )
+                    enrolled_count += 1
+
+                    payment_objs = []
+
+                    # a) Montos numéricos = dinero histórico confirmado -> pagos APROBADOS
+                    for (concepto, monto) in pagos:
+                        payment_objs.append(Payment(
+                            inscripcion_id=enrollment.id,
+                            estudiante_id=student_id,
+                            curso_id=curso_id,
+                            metodo_pago="Migración",
+                            concepto=concepto,
+                            cantidad_pago=monto,
+                            numero_cuota=None,
+                            numero_transaccion=None,
+                            comprobante_url=None,
+                            remitente=None,
+                            banco="Migración Excel",
+                            monto_comprobante=monto,
+                            fecha_comprobante=None,
+                            cuenta_destino="Importación Masiva",
+                            estado_pago=EstadoPago.APROBADO,
+                            fecha_verificacion=datetime.utcnow(),
+                            verificado_por="import_masivo",
+                        ))
+
+                    # b) Link de comprobante de matrícula = voucher subido sin conciliar -> pago PENDIENTE
+                    #    (solo si no vino ya un monto numérico de matrícula y el curso tiene matrícula > 0)
+                    tiene_matricula_numerica = any(concepto == "Matrícula" for (concepto, _) in pagos)
+                    registro_voucher = (
+                        matricula_url
+                        and not tiene_matricula_numerica
+                        and enrollment.costo_matricula > 0
+                    )
+                    if registro_voucher:
+                        payment_objs.append(Payment(
+                            inscripcion_id=enrollment.id,
+                            estudiante_id=student_id,
+                            curso_id=curso_id,
+                            metodo_pago="Transferencia",
+                            concepto="Matrícula",
+                            cantidad_pago=enrollment.costo_matricula,
+                            numero_cuota=None,
+                            numero_transaccion=None,
+                            comprobante_url=matricula_url,
+                            remitente=None,
+                            banco=None,
+                            monto_comprobante=enrollment.costo_matricula,
+                            fecha_comprobante=None,
+                            cuenta_destino=None,
+                            estado_pago=EstadoPago.PENDIENTE,
+                        ))
+
+                    if payment_objs:
+                        await Payment.insert_many(payment_objs)
+                        # El motor oficial reconstruye matrícula, módulos, totales y estado con los APROBADOS
+                        await enrollment_service.actualizar_saldo_enrollment(
+                            enrollment_id=enrollment.id,
+                            monto_pago_aprobado=0.0
+                        )
+                        if pagos:
+                            migrated_payments_count += 1
+                        if registro_voucher:
+                            matricula_vouchers_count += 1
+                except ValueError as e:
+                    errors.append(
+                        f"Inscripción de '{student_obj.nombre}' (Registro {student_obj.registro}) fallida: {str(e)}"
+                    )
+                except Exception as e:
+                    errors.append(
+                        f"Inscripción de '{student_obj.nombre}' (Registro {student_obj.registro}) fallida por error inesperado: {str(e)}"
+                    )
+    elif hay_columnas_financieras and not curso_id and success_count > 0:
+        errors.append(
+            "Se detectaron columnas de pago (Matrícula/Módulos) en el archivo, pero no se seleccionó un curso; "
+            "los pagos NO fueron registrados. Para migrar los pagos, la importación debe hacerse seleccionando el curso."
+        )
+
     return {
         "success_count": success_count,
+        "enrolled_count": enrolled_count,
+        "migrated_payments_count": migrated_payments_count,
+        "matricula_vouchers_count": matricula_vouchers_count,
         "errors": errors
     }
+
+
+async def get_student_financial_summary(student_id: PydanticObjectId) -> dict:
+    """
+    Obtener resumen financiero unificado de todas las inscripciones del estudiante (Ficha de Estado de Cuenta).
+    Retorna: total_invertido, pagado, en_proceso, saldo_pendiente
+    """
+    from models.enrollment import Enrollment
+    from models.payment import Payment
+    from models.enums import EstadoPago
+
+    # 1. Obtener todas las inscripciones del estudiante
+    enrollments = await Enrollment.find(Enrollment.estudiante_id == student_id).to_list()
+
+    total_invertido = sum(e.total_a_pagar for e in enrollments)
+    pagado = sum(e.total_pagado for e in enrollments)
+    saldo_pendiente = sum(e.saldo_pendiente for e in enrollments)
+
+    # 2. Obtener la suma de pagos en estado PENDIENTE
+    pending_payments = await Payment.find(
+        Payment.estudiante_id == student_id,
+        Payment.estado_pago == EstadoPago.PENDIENTE
+    ).to_list()
+
+    en_proceso = sum(p.cantidad_pago for p in pending_payments)
+
+    return {
+        "total_invertido": round(total_invertido, 2),
+        "pagado": round(pagado, 2),
+        "en_proceso": round(en_proceso, 2),
+        "saldo_pendiente": round(saldo_pendiente, 2)
+    }
+
+

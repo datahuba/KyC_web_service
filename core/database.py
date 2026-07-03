@@ -21,6 +21,8 @@ from models.classroom import Classroom, ClassroomStudent
 from models.classroom_material import ClassroomMaterial
 from models.assignment import Assignment
 from models.submission import Submission
+from models.notification import Notification
+from models.account_request import AccountRequest
 
 
 async def _sanitize_legacy_database(db):
@@ -169,6 +171,8 @@ async def init_db():
         document_models=[
             User,
             Student,
+            Notification,
+            AccountRequest,
             Course,
             Enrollment,
             Payment,

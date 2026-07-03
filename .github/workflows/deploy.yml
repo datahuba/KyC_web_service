@@ -3,7 +3,7 @@ name: Deploy Backend to VPS
 on:
   push:
     branches:
-      - master
+      - develop_kevin
 
 jobs:
   deploy:
@@ -16,10 +16,21 @@ jobs:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           password: ${{ secrets.SERVER_PASSWORD }}
-          
           script: |
+            echo "📥 === SINCRONIZACIÓN NUCLEAR BACKEND === 📥"
             cd /var/www/backend
-            git stash
-            git pull origin master
+            # 1. Descargar todo de la nube sin fusionar
+            git fetch --all
+            # 2. Forzar al servidor a pararse en nuestra rama
+            git checkout develop_kevin || git checkout -b develop_kevin origin/develop_kevin
+            # 3. Botón Nuclear: Destruir diferencias y hacer un clon exacto
+            git reset --hard origin/develop_kevin
+            
+            echo "🚀 === RECONSTRUYENDO DOCKER === 🚀"
             cd /var/www
-            docker compose up -d --build backend
+            docker compose build --no-cache backend
+            docker compose up -d --no-deps --force-recreate backend
+            
+            echo "🧹 === LIMPIEZA DE IMÁGENES HUÉRFANAS === 🧹"
+            # Elimina de forma segura imágenes colgantes (<none>:<none>) creadas en la compilación para liberar espacio en tu VPS
+            docker image prune -f

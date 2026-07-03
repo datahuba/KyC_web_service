@@ -334,12 +334,14 @@ async def rechazar_titulo_estudiante(*, id: PydanticObjectId, motivo: str = Form
 async def import_students(
     file: UploadFile = File(...), 
     tipo_estudiante: TipoEstudiante = Form(...), # Recibe Interno/Externo desde el frontend
+    curso_id: Optional[PydanticObjectId] = Form(None), # Curso opcional para auto-inscribir a los estudiantes importados
     current_user: User = Depends(require_cpd)
 ) -> Any:
-    if not file.filename.endswith(('.xlsx', '.xls')): raise HTTPException(400, "Formato no permitido")
+    if not file.filename.lower().endswith(('.xlsx', '.xls', '.csv')):
+        raise HTTPException(400, "Formato no permitido. Sube un archivo .xlsx, .xls o .csv")
     contents = await file.read()
     try:
-        return await student_service.import_students_from_excel(contents, tipo_estudiante)
+        return await student_service.import_students_from_excel(contents, tipo_estudiante, curso_id, file.filename)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -369,3 +371,42 @@ async def bulk_delete_students(*, payload: BulkDeleteRequest, current_user: User
     await Student.find({"_id": {"$in": payload.ids}}).delete()
     
     return {"message": f"Se eliminaron {len(payload.ids)} estudiantes.", "deleted_count": len(payload.ids)}
+
+
+@router.get(
+    "/{id}/financial-summary",
+    response_model=dict,
+    summary="Resumen Financiero del Estudiante"
+)
+async def read_student_financial_summary(
+    *,
+    id: PydanticObjectId,
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> Any:
+    """
+    Obtener ficha de estado de cuenta unificada del estudiante (Total Invertido, Pagado, En Proceso, Saldo Pendiente).
+    Excluye explícitamente al rol CPD según políticas de segregación de funciones.
+    """
+    # 1. Si el usuario actual es un Estudiante, solo puede consultar su propia ficha
+    if isinstance(current_user, Student) and current_user.id != id:
+        raise HTTPException(
+            status_code=403,
+            detail="Acceso denegado: No tienes permiso para visualizar el estado financiero de otro estudiante."
+        )
+    
+    # 2. Si el usuario es un personal de la institución (User), validar segregación de funciones (CPD restringido)
+    if isinstance(current_user, User):
+        from models.enums import UserRole
+        if current_user.rol == UserRole.CPD:
+            raise HTTPException(
+                status_code=403,
+                detail="Acceso denegado: El rol de Gestión Académica (CPD) no tiene permisos para visualizar datos financieros."
+            )
+            
+    student = await student_service.get_student(id=id)
+    if not student:
+        raise HTTPException(status_code=404, detail="Estudiante no encontrado")
+        
+    summary = await student_service.get_student_financial_summary(student_id=id)
+    return summary
+
