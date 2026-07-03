@@ -67,6 +67,17 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     return encoded_jwt
 
 
+def create_password_reset_token(user_id: str, user_type: str) -> str:
+    """
+    Crear un token de un solo propósito para restablecer la contraseña.
+    Expira según PASSWORD_RESET_EXPIRE_MINUTES.
+    """
+    return create_access_token(
+        {"sub": user_id, "user_type": user_type, "purpose": "password_reset"},
+        expires_delta=timedelta(minutes=settings.PASSWORD_RESET_EXPIRE_MINUTES)
+    )
+
+
 def decode_access_token(token: str) -> Optional[dict]:
     """
     Decodificar y validar un token JWT

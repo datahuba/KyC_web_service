@@ -32,8 +32,21 @@ class Settings(BaseSettings):
     CLOUDINARY_CLOUD_NAME: str = Field(..., env="CLOUDINARY_CLOUD_NAME")
     CLOUDINARY_API_KEY: str = Field(..., env="CLOUDINARY_API_KEY")
     CLOUDINARY_API_SECRET: str = Field(..., env="CLOUDINARY_API_SECRET")
-    
-    
+
+    # Email / SMTP (opcional). Si no está configurado, el flujo de reseteo funciona
+    # pero el enlace se registra en los logs en lugar de enviarse por correo.
+    SMTP_HOST: Optional[str] = Field(default=None, env="SMTP_HOST")
+    SMTP_PORT: int = Field(default=587, env="SMTP_PORT")
+    SMTP_USER: Optional[str] = Field(default=None, env="SMTP_USER")
+    SMTP_PASSWORD: Optional[str] = Field(default=None, env="SMTP_PASSWORD")
+    SMTP_FROM: Optional[str] = Field(default=None, env="SMTP_FROM")
+    SMTP_FROM_NAME: str = Field(default="Postgrado UAGRM", env="SMTP_FROM_NAME")
+    SMTP_USE_TLS: bool = Field(default=True, env="SMTP_USE_TLS")
+
+    # URL pública del frontend (para construir enlaces en correos)
+    FRONTEND_URL: str = Field(default="http://localhost:5173", env="FRONTEND_URL")
+    PASSWORD_RESET_EXPIRE_MINUTES: int = Field(default=30, env="PASSWORD_RESET_EXPIRE_MINUTES")
+
     model_config = {
         "env_file": ".env",
         "case_sensitive": True

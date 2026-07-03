@@ -7,6 +7,15 @@ class LoginRequest(BaseModel):
     username: str
     password: str
 
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(..., description="Token recibido en el correo")
+    new_password: str = Field(..., min_length=5, description="Nueva contraseña (mínimo 5 caracteres)")
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str
