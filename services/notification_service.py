@@ -13,15 +13,27 @@ async def create_notification(
     tipo_destinatario: str,
     titulo: str,
     mensaje: str,
-    tipo_alerta: str = "info"
+    tipo_alerta: str = "info",
+    ruta: Optional[str] = None,
+    referencia_tipo: Optional[str] = None,
+    referencia_id: Optional[PydanticObjectId] = None
 ) -> Notification:
-    """Crear y registrar una notificación in-app"""
+    """
+    Crear y registrar una notificación in-app.
+
+    `ruta` habilita el deep-linking: al hacer click en la campana, el frontend
+    navega a esa ruta (ej. '/app/payments'). `referencia_tipo`/`referencia_id`
+    permiten resaltar/abrir la entidad concreta (pago, inscripción, etc.).
+    """
     notification = Notification(
         destinatario_id=destinatario_id,
         tipo_destinatario=tipo_destinatario,
         titulo=titulo,
         mensaje=mensaje,
-        tipo_alerta=tipo_alerta
+        tipo_alerta=tipo_alerta,
+        ruta=ruta,
+        referencia_tipo=referencia_tipo,
+        referencia_id=referencia_id
     )
     await notification.insert()
     return notification
