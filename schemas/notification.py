@@ -4,6 +4,7 @@ Schemas de Notificaciones
 """
 
 from datetime import datetime
+from typing import Optional
 from pydantic import BaseModel, Field
 from models.base import PyObjectId
 
@@ -15,6 +16,9 @@ class NotificationResponse(BaseModel):
     titulo: str
     mensaje: str
     tipo_alerta: str
+    ruta: Optional[str] = None
+    referencia_tipo: Optional[str] = None
+    referencia_id: Optional[PyObjectId] = None
     leido: bool
     created_at: datetime
 

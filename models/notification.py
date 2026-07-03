@@ -41,7 +41,25 @@ class Notification(MongoBaseModel):
         default="info",
         description="Nivel de alerta visual: 'info', 'success', 'warning', 'error'"
     )
-    
+
+    # ------------------------------------------------------------------
+    # DEEP-LINKING: a dónde llevar al usuario cuando hace click en la alerta
+    # ------------------------------------------------------------------
+    ruta: Optional[str] = Field(
+        None,
+        description="Ruta del frontend a la que dirige la notificación al hacer click (ej. '/app/payments')"
+    )
+
+    referencia_tipo: Optional[str] = Field(
+        None,
+        description="Tipo de entidad referenciada: 'payment', 'enrollment', 'student', etc."
+    )
+
+    referencia_id: Optional[PyObjectId] = Field(
+        None,
+        description="ID de la entidad referenciada (pago, inscripción, etc.) para contexto/resaltado"
+    )
+
     leido: bool = Field(
         default=False,
         description="¿El destinatario ya marcó la notificación como leída?"

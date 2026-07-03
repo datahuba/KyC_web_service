@@ -238,7 +238,10 @@ async def create_payment(
                 tipo_destinatario="user",
                 titulo="Nuevo Pago Pendiente",
                 mensaje=f"El estudiante {student_name} ({student_obj.registro if student_obj else ''}) ha subido un comprobante de Bs. {monto_real} por el concepto '{concepto_final}'.",
-                tipo_alerta="info"
+                tipo_alerta="info",
+                ruta="/app/payments",
+                referencia_tipo="payment",
+                referencia_id=payment.id
             )
     except Exception as e:
         print(f"Error al enviar notificación de pago pendiente: {str(e)}")
@@ -356,7 +359,10 @@ async def aprobar_pago(
             tipo_destinatario="student",
             titulo="Pago Aprobado",
             mensaje=f"Tu pago de Bs. {payment.cantidad_pago} por el concepto '{payment.concepto}' ha sido conciliado y aprobado de forma exitosa.",
-            tipo_alerta="success"
+            tipo_alerta="success",
+            ruta="/app/payments",
+            referencia_tipo="payment",
+            referencia_id=payment.id
         )
     except Exception as e:
         print(f"Error al enviar notificación de pago aprobado: {str(e)}")
@@ -399,7 +405,10 @@ async def rechazar_pago(
             tipo_destinatario="student",
             titulo="Pago Rechazado",
             mensaje=f"Tu comprobante de pago por Bs. {payment.cantidad_pago} para '{payment.concepto}' ha sido rechazado. Motivo: {motivo}",
-            tipo_alerta="error"
+            tipo_alerta="error",
+            ruta="/app/payments",
+            referencia_tipo="payment",
+            referencia_id=payment.id
         )
     except Exception as e:
         print(f"Error al enviar notificación de pago rechazado: {str(e)}")
@@ -451,7 +460,10 @@ async def anular_pago(
             tipo_destinatario="student",
             titulo="Pago Anulado (Reversión)",
             mensaje=f"Atención: Tu pago aprobado de Bs. {payment.cantidad_pago} por el concepto '{payment.concepto}' ha sido anulado. Razón: {motivo}",
-            tipo_alerta="warning"
+            tipo_alerta="warning",
+            ruta="/app/payments",
+            referencia_tipo="payment",
+            referencia_id=payment.id
         )
     except Exception as e:
         print(f"Error al enviar notificación de pago anulado: {str(e)}")
@@ -553,7 +565,10 @@ async def create_caja_directo_payment(
             tipo_destinatario="student",
             titulo="Pago Registrado en Caja",
             mensaje=f"Se ha registrado un pago directo en Caja por Bs. {cantidad_pago} para el concepto '{concepto_final}'. El pago ha sido aprobado automáticamente.",
-            tipo_alerta="success"
+            tipo_alerta="success",
+            ruta="/app/payments",
+            referencia_tipo="payment",
+            referencia_id=payment.id
         )
     except Exception as e:
         print(f"Error al notificar pago directo en caja: {str(e)}")
