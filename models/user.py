@@ -7,10 +7,10 @@ Colección MongoDB: users
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 import pymongo
 from pydantic import Field, EmailStr
-from .base import MongoBaseModel
+from .base import MongoBaseModel, PyObjectId
 from .enums import UserRole
 
 class User(MongoBaseModel):
@@ -28,6 +28,19 @@ class User(MongoBaseModel):
     rol: UserRole = Field(default=UserRole.ADMIN, description="Rol para permisos")
     activo: bool = Field(default=True, description="Si el usuario puede acceder al sistema")
     ultimo_acceso: Optional[datetime] = Field(None, description="Fecha del último login exitoso")
+
+    # ISSUE-R-ROLES: nombre por función/programa (no por persona) para roles rotativos
+    nombre_funcional: Optional[str] = Field(
+        None,
+        max_length=150,
+        description="Nombre por función/programa (ej. 'Encargado Maestría Gerencia Tributaria'). Obligatorio si rol es ENCARGADO_CURSO o COORDINADOR."
+    )
+
+    # ISSUE-R-ROLES / ISSUE-P-SEGMENTACION: cursos que este usuario puede operar (ENCARGADO_CURSO o COBRANZA)
+    cursos_asignados: List[PyObjectId] = Field(
+        default_factory=list,
+        description="IDs de cursos asignados a este usuario. Relevante si rol es ENCARGADO_CURSO o COBRANZA."
+    )
     
     class Settings:
         name = "users"

@@ -154,6 +154,8 @@ class UserRole(str, Enum):
     MAE = "mae"
     CPD = "cpd"
     COBRANZA = "cobranza"
+    ENCARGADO_CURSO = "encargado_curso"  # NUEVO (ISSUE-R-ROLES): responsable operativo de curso(s) específico(s)
+    COORDINADOR = "coordinador"  # NUEVO (ISSUE-R-ROLES): supervisa Encargados de Curso de una misma área
 
 
 class AssignmentType(str, Enum):

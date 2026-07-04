@@ -12,10 +12,14 @@ Schemas incluidos:
 """
 
 from datetime import datetime
-from typing import Optional
-from pydantic import BaseModel, Field, EmailStr
+from typing import Optional, List
+from pydantic import BaseModel, Field, EmailStr, field_validator
 from models.enums import UserRole
 from models.base import PyObjectId
+
+# Roles que requieren nombre_funcional obligatorio (ISSUE-R-ROLES)
+_ROLES_REQUIEREN_NOMBRE_FUNCIONAL = {UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR}
+
 
 class UserCreate(BaseModel):
     """
@@ -27,7 +31,25 @@ class UserCreate(BaseModel):
     email: EmailStr = Field(..., description="Correo electrónico único")
     password: str = Field(..., min_length=5, description="Contraseña (será hasheada)")
     rol: UserRole = Field(default=UserRole.ADMIN, description="Rol de usuario")
-    
+
+    # ISSUE-R-ROLES
+    nombre_funcional: Optional[str] = Field(
+        None, max_length=150, validate_default=True,
+        description="Nombre por función/programa. Obligatorio si rol es ENCARGADO_CURSO o COORDINADOR."
+    )
+    cursos_asignados: List[PyObjectId] = Field(
+        default_factory=list,
+        description="IDs de cursos asignados. Relevante si rol es ENCARGADO_CURSO o COBRANZA."
+    )
+
+    @field_validator("nombre_funcional")
+    @classmethod
+    def validar_nombre_funcional(cls, v, info):
+        rol = info.data.get("rol")
+        if rol in _ROLES_REQUIEREN_NOMBRE_FUNCIONAL and not v:
+            raise ValueError("nombre_funcional es obligatorio para los roles Encargado de Curso y Coordinador")
+        return v
+
     model_config = {
         "json_schema_extra": {
             "example": {
@@ -53,6 +75,8 @@ class UserResponse(BaseModel):
     ultimo_acceso: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
+    nombre_funcional: Optional[str] = None
+    cursos_asignados: List[PyObjectId] = Field(default_factory=list)
     
     
     model_config = {
@@ -84,7 +108,17 @@ class UserUpdate(BaseModel):
     password: Optional[str] = Field(None, min_length=5)
     rol: Optional[UserRole] = None
     activo: Optional[bool] = None
-    
+    nombre_funcional: Optional[str] = Field(None, max_length=150, validate_default=True)
+    cursos_asignados: Optional[List[PyObjectId]] = None
+
+    @field_validator("nombre_funcional")
+    @classmethod
+    def validar_nombre_funcional(cls, v, info):
+        rol = info.data.get("rol")
+        if rol in _ROLES_REQUIEREN_NOMBRE_FUNCIONAL and not v:
+            raise ValueError("nombre_funcional es obligatorio para los roles Encargado de Curso y Coordinador")
+        return v
+
     model_config = {
         "json_schema_extra": {
             "example": {

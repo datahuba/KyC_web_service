@@ -18,9 +18,14 @@ class ModuloEstadoSchema(BaseModel):
     # Campos académicos (ISSUE P)
     nota: Optional[float] = None
     estado_academico: Optional[str] = "Cursando"
+    # ISSUE-P-RECALCULO-NOTA
+    costo_sin_beca_personal: Optional[float] = None
+    # ISSUE-Q-NOTA-BORRADOR
+    nota_borrador: Optional[float] = None
+    estado_validacion_nota: Optional[str] = "sin_borrador"
 
 class ModuloNotaUpdate(BaseModel):
-    """Schema para actualizar la calificación de un submódulo"""
+    """Schema para actualizar la calificación de un submódulo (docente -> borrador; CPD/Admin -> oficial directa)"""
     nota: float = Field(..., ge=0, le=100, description="Calificación del módulo (0-100)")
 
 class EnrollmentCreate(BaseModel):
@@ -76,6 +81,8 @@ class EnrollmentResponse(BaseModel):
     updated_at: datetime
     
     matricula_pagada: Optional[bool] = False
+    nota_minima_beca: Optional[float] = None  # ISSUE-P-RECALCULO-NOTA
+    beca_respaldo_url: Optional[str] = None  # ISSUE-P-BECA-RESPALDO
 
     model_config = {
         "populate_by_name": True,
