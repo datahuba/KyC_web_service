@@ -120,6 +120,12 @@ class Student(MongoBaseModel):
     lista_cursos_ids: List[PyObjectId] = Field(default_factory=list,description="Lista de IDs de cursos en los que el estudiante está inscrito")
 
     # ========================================================================
+    # ISSUE-Q-PRE: Términos y Condiciones (aceptación en el primer login)
+    # ========================================================================
+    terminos_aceptados: bool = Field(default=False, description="Si el estudiante ya aceptó el reglamento de Postgrado. Se exige en el primer login.")
+    fecha_aceptacion_terminos: Optional[datetime] = Field(default=None, description="Fecha (UTC) en la que el estudiante aceptó los términos por primera vez.")
+
+    # ========================================================================
     # DOCUMENTACIÓN (Cargados desde el Panel de Admin)
     # ========================================================================
     cv_url: Optional[str] = Field(None, description="URL del Currículum Vitae (PDF)")

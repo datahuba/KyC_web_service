@@ -122,6 +122,28 @@ async def change_password(
     return current_user
 
 
+@router.post(
+    "/me/accept-terms",
+    response_model=StudentResponse,
+    summary="Aceptar Términos y Condiciones (ISSUE-Q-PRE)"
+)
+async def accept_terms(
+    *,
+    current_user: Student = Depends(get_current_user)
+) -> Any:
+    """
+    Registra la aceptación del reglamento de Postgrado por parte del estudiante.
+
+    Se exige en el primer inicio de sesión (bloqueado por el frontend hasta
+    que se llame este endpoint). Es idempotente: llamarlo de nuevo no falla
+    ni pisa la fecha de la primera aceptación.
+    """
+    if not isinstance(current_user, Student):
+        raise HTTPException(status_code=403, detail="Solo estudiantes")
+    student = await student_service.accept_terms(student=current_user)
+    return student
+
+
 @router.put(
     "/{id}",
     response_model=StudentResponse,
