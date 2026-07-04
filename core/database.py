@@ -23,6 +23,8 @@ from models.assignment import Assignment
 from models.submission import Submission
 from models.notification import Notification
 from models.account_request import AccountRequest
+from models.passive_request import PassiveRequest
+from models.bank_statement_entry import BankStatementEntry
 
 
 async def _sanitize_legacy_database(db):
@@ -173,6 +175,8 @@ async def init_db():
             Student,
             Notification,
             AccountRequest,
+            PassiveRequest,
+            BankStatementEntry,
             Course,
             Enrollment,
             Payment,

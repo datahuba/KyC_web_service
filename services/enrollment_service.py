@@ -83,6 +83,12 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
     
     # MATEMÁTICA FINANCIERA CORREGIDA:
     total_final = colegiatura_final + costo_matricula
+
+    # ISSUE-P-RECALCULO-NOTA: snapshot de la nota mínima exigida por el descuento personal
+    # (solo si viene de un Discount vinculado con condición académica; descuento_personalizado libre no aplica)
+    nota_minima_snapshot = None
+    if descuento_estudiante_id and discount_sel and discount_sel.nota_minima_requerida is not None:
+        nota_minima_snapshot = discount_sel.nota_minima_requerida
     
     # 7. Copiar requisitos del curso
     requisitos_enrollment = [template.to_requisito() for template in course.requisitos]
@@ -92,9 +98,11 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
     if course.modulos:
         suma_costo_modulos = sum(mod.costo for mod in course.modulos)
         total_asignado = 0.0
+        total_asignado_sin_beca = 0.0  # ISSUE-P-RECALCULO-NOTA
         
         for i, mod in enumerate(course.modulos):
-            if i == len(course.modulos) - 1:
+            es_ultimo = i == len(course.modulos) - 1
+            if es_ultimo:
                 costo_final_mod = max(0.0, round(colegiatura_final - total_asignado, 2))
             else:
                 if suma_costo_modulos > 0:
@@ -102,11 +110,25 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
                 else:
                     costo_final_mod = round(colegiatura_final / len(course.modulos), 2)
                 total_asignado += costo_final_mod
+
+            # ISSUE-P-RECALCULO-NOTA: distribución paralela SIN el descuento personal,
+            # usando la misma proporción, solo si el descuento tiene condición académica.
+            costo_sin_beca_mod = None
+            if nota_minima_snapshot is not None:
+                if es_ultimo:
+                    costo_sin_beca_mod = max(0.0, round(total_con_descuento_curso - total_asignado_sin_beca, 2))
+                else:
+                    if suma_costo_modulos > 0:
+                        costo_sin_beca_mod = round((mod.costo / suma_costo_modulos) * total_con_descuento_curso, 2)
+                    else:
+                        costo_sin_beca_mod = round(total_con_descuento_curso / len(course.modulos), 2)
+                    total_asignado_sin_beca += costo_sin_beca_mod
             
             modulos_enrollment.append(
                 ModuloEstado(
                     nombre=mod.nombre,
                     costo=costo_final_mod,
+                    costo_sin_beca_personal=costo_sin_beca_mod,
                     estado="Pendiente",
                     monto_pagado=0.0,
                     nota=None,
@@ -133,7 +155,8 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
         saldo_pendiente=round(total_final, 2),
         estado=EstadoInscripcion.PENDIENTE_PAGO,
         matricula_pagada=False,
-        requisitos=requisitos_enrollment
+        requisitos=requisitos_enrollment,
+        nota_minima_beca=nota_minima_snapshot  # ISSUE-P-RECALCULO-NOTA
     )
     
     await enrollment.insert()
@@ -178,9 +201,14 @@ async def get_all_enrollments(
     q: Optional[str] = None,
     estado: Optional[EstadoInscripcion] = None,
     curso_id: Optional[PydanticObjectId] = None,
-    estudiante_id: Optional[PydanticObjectId] = None
+    estudiante_id: Optional[PydanticObjectId] = None,
+    cursos_permitidos: Optional[List[PydanticObjectId]] = None
 ) -> tuple[List[Enrollment], int]:
-    
+    """
+    cursos_permitidos (ISSUE-R-ROLES): si se provee (no None), restringe los resultados
+    únicamente a inscripciones de esos cursos. Se usa para segmentar el rol ENCARGADO_CURSO
+    (y en el futuro COBRANZA, ISSUE-P-SEGMENTACION) a sus cursos asignados.
+    """
     query = Enrollment.find()
     
     if estado:
@@ -189,6 +217,8 @@ async def get_all_enrollments(
         query = query.find(Enrollment.curso_id == curso_id)
     if estudiante_id:
         query = query.find(Enrollment.estudiante_id == estudiante_id)
+    if cursos_permitidos is not None:
+        query = query.find(In(Enrollment.curso_id, cursos_permitidos))
         
     if q:
         regex_pattern = {"$regex": q, "$options": "i"}
@@ -342,19 +372,136 @@ async def actualizar_nota_modulo(
     if modulo_index < 0 or modulo_index >= len(enrollment.modulos):
         raise ValueError(f"Índice de módulo {modulo_index} fuera de rango")
         
-    enrollment.modulos[modulo_index].nota = round(nota, 2)
+    modulo = enrollment.modulos[modulo_index]
+    modulo.nota = round(nota, 2)
     
     if nota >= 64.0:
-        enrollment.modulos[modulo_index].estado_academico = "Aprobado"
+        modulo.estado_academico = "Aprobado"
     else:
-        enrollment.modulos[modulo_index].estado_academico = "Reprobado"
-        
+        modulo.estado_academico = "Reprobado"
+
+    # ========================================================================
+    # ISSUE-P-RECALCULO-NOTA: pérdida de beca por módulo si no se mantiene la nota mínima
+    # ========================================================================
+    recalculo_necesario = False
+    if (
+        enrollment.nota_minima_beca is not None
+        and modulo.costo_sin_beca_personal is not None
+        and nota < enrollment.nota_minima_beca
+        and modulo.costo != modulo.costo_sin_beca_personal
+    ):
+        modulo.costo = modulo.costo_sin_beca_personal
+        recalculo_necesario = True
+
     notas_evaluadas = [m.nota for m in enrollment.modulos if m.nota is not None]
     if notas_evaluadas:
         promedio = sum(notas_evaluadas) / len(notas_evaluadas)
         enrollment.nota_final = round(promedio, 2)
-        
+
+    if recalculo_necesario:
+        # El módulo afectado ya no vale lo mismo: recalculamos el total a pagar
+        # (matrícula + costos de módulo actualizados). saldo_pendiente se actualiza
+        # aquí también (aunque sea una aproximación) para no violar el validador del
+        # modelo; el valor definitivo lo recompone actualizar_saldo_enrollment justo debajo.
+        enrollment.total_a_pagar = round(
+            enrollment.costo_matricula + sum(m.costo for m in enrollment.modulos), 2
+        )
+        enrollment.saldo_pendiente = round(max(0.0, enrollment.total_a_pagar - enrollment.total_pagado), 2)
+
     enrollment.updated_at = datetime.utcnow()
     await enrollment.save()
+
+    if recalculo_necesario:
+        # Reconstruye monto_pagado/estado por módulo y saldo_pendiente global a partir
+        # de los pagos históricos aprobados (misma cascada de ISSUE-F-PRORRATEO).
+        # No modifica ni elimina ningún registro de Payment.
+        await actualizar_saldo_enrollment(enrollment_id)
+        enrollment = await Enrollment.get(enrollment_id)
     
+    return enrollment
+
+
+# ========================================================================
+# ISSUE-Q-NOTA-BORRADOR: Notas de docente como borrador validado por CPD
+# ========================================================================
+async def subir_nota_borrador(
+    enrollment_id: PydanticObjectId,
+    modulo_index: int,
+    nota_borrador: float
+) -> Enrollment:
+    """
+    El docente propone una nota que queda como BORRADOR hasta que CPD la valide.
+    No afecta nota_final ni la lógica de pérdida de beca (ISSUE-P-RECALCULO-NOTA).
+    """
+    enrollment = await Enrollment.get(enrollment_id)
+    if not enrollment:
+        raise ValueError("Inscripción no encontrada")
+    if modulo_index < 0 or modulo_index >= len(enrollment.modulos):
+        raise ValueError(f"Índice de módulo {modulo_index} fuera de rango")
+
+    modulo = enrollment.modulos[modulo_index]
+    modulo.nota_borrador = round(nota_borrador, 2)
+    modulo.estado_validacion_nota = "pendiente_validacion"
+    enrollment.updated_at = datetime.utcnow()
+    await enrollment.save()
+    return enrollment
+
+
+async def validar_nota_borrador(
+    enrollment_id: PydanticObjectId,
+    modulo_index: int,
+    evaluador_username: str
+) -> Enrollment:
+    """
+    CPD/Admin/Superadmin validan el borrador: lo convierte en nota oficial
+    reutilizando actualizar_nota_modulo (mismo recálculo de promedio y beca).
+    """
+    enrollment = await Enrollment.get(enrollment_id)
+    if not enrollment:
+        raise ValueError("Inscripción no encontrada")
+    if modulo_index < 0 or modulo_index >= len(enrollment.modulos):
+        raise ValueError(f"Índice de módulo {modulo_index} fuera de rango")
+
+    modulo = enrollment.modulos[modulo_index]
+    if modulo.estado_validacion_nota != "pendiente_validacion" or modulo.nota_borrador is None:
+        raise ValueError("Este módulo no tiene un borrador pendiente de validación")
+
+    nota_a_oficializar = modulo.nota_borrador
+
+    enrollment_actualizado = await actualizar_nota_modulo(
+        enrollment_id=enrollment_id,
+        modulo_index=modulo_index,
+        nota=nota_a_oficializar,
+        evaluador_username=evaluador_username
+    )
+
+    # actualizar_nota_modulo no toca nota_borrador/estado_validacion_nota; lo hacemos aquí
+    enrollment_actualizado.modulos[modulo_index].estado_validacion_nota = "validada"
+    enrollment_actualizado.modulos[modulo_index].nota_borrador = None
+    await enrollment_actualizado.save()
+    return enrollment_actualizado
+
+
+async def rechazar_nota_borrador(
+    enrollment_id: PydanticObjectId,
+    modulo_index: int
+) -> Enrollment:
+    """
+    CPD rechaza el borrador propuesto por el docente. No toca la nota oficial
+    (que puede mantener un valor validado previamente, si existía).
+    """
+    enrollment = await Enrollment.get(enrollment_id)
+    if not enrollment:
+        raise ValueError("Inscripción no encontrada")
+    if modulo_index < 0 or modulo_index >= len(enrollment.modulos):
+        raise ValueError(f"Índice de módulo {modulo_index} fuera de rango")
+
+    modulo = enrollment.modulos[modulo_index]
+    if modulo.estado_validacion_nota != "pendiente_validacion":
+        raise ValueError("Este módulo no tiene un borrador pendiente de validación")
+
+    modulo.nota_borrador = None
+    modulo.estado_validacion_nota = "sin_borrador"
+    enrollment.updated_at = datetime.utcnow()
+    await enrollment.save()
     return enrollment

@@ -8,7 +8,7 @@ Auditoría y Algoritmo de Prorrateo.
 
 from typing import List, Optional
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from models.payment import Payment
 from models.enrollment import Enrollment
 from models.student import Student
@@ -18,6 +18,25 @@ from schemas.payment import PaymentCreate
 from beanie import PydanticObjectId
 from beanie.operators import In, Or
 from services import enrollment_service
+
+# ISSUE-P-REVERSION: ventana en la que el banco puede revertir una transferencia ya aprobada
+VENTANA_REVERSION_HORAS = 48
+
+
+def _calcular_en_ventana_reversion(payment: Payment) -> bool:
+    """
+    True si el pago fue aprobado por transferencia y todavía está dentro de las
+    48h en que el banco podría revertir la operación. Es un valor calculado en
+    tiempo de respuesta (depende de "ahora"), nunca se persiste en base de datos.
+    """
+    if payment.estado_pago != EstadoPago.APROBADO:
+        return False
+    if "transferencia" not in (payment.metodo_pago or "").lower():
+        return False
+    if not payment.fecha_verificacion:
+        return False
+    limite = payment.fecha_verificacion + timedelta(hours=VENTANA_REVERSION_HORAS)
+    return datetime.utcnow() < limite
 
 # ========================================================================
 # MOTOR DE AUDITORÍA FINANCIERA
@@ -71,7 +90,8 @@ async def enrich_payment_with_details(payment: Payment) -> dict:
         "estado": payment.estado_pago.value if payment.estado_pago else "",
         "total_cuotas": total_cuotas,
         "created_at": created_at_bolivia,
-        "updated_at": updated_at_bolivia
+        "updated_at": updated_at_bolivia,
+        "en_ventana_reversion": _calcular_en_ventana_reversion(payment)  # ISSUE-P-REVERSION
     })
     
     return payment_dict
@@ -112,7 +132,8 @@ async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dic
             "estado": payment.estado_pago.value if payment.estado_pago else "",
             "total_cuotas": total_cuotas,
             "created_at": to_bolivia_time(payment.created_at),
-            "updated_at": to_bolivia_time(payment.updated_at)
+            "updated_at": to_bolivia_time(payment.updated_at),
+            "en_ventana_reversion": _calcular_en_ventana_reversion(payment)  # ISSUE-P-REVERSION
         })
         enriched_list.append(p_dict)
 

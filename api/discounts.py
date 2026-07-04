@@ -7,7 +7,9 @@ from services import discount_service
 from beanie import PydanticObjectId
 
 # Nuevas dependencias de seguridad del ISSUE L
-from api.dependencies import require_superadmin, require_cobranza, require_staff
+# ISSUE-P-DESCUENTO-ROL: la gestión de descuentos (crear/editar/asignar) pasa de
+# Cobranza a Administrativo, ya que Cobranza solo ejecuta el cobro, no autoriza beneficios.
+from api.dependencies import require_superadmin, require_admin, require_staff
 
 router = APIRouter()
 
@@ -55,7 +57,7 @@ async def read_discounts(
 async def create_discount(
     *,
     discount_in: DiscountCreate,
-    current_user: User = Depends(require_cobranza) # <-- COBRANZA CREA DESCUENTOS
+    current_user: User = Depends(require_admin) # <-- ADMINISTRATIVO CREA DESCUENTOS (ISSUE-P-DESCUENTO-ROL)
 ) -> Any:
     """Crear nuevo descuento"""
     discount = await discount_service.create_discount(discount_in=discount_in)
@@ -86,7 +88,7 @@ async def update_discount(
     *,
     id: PydanticObjectId,
     discount_in: DiscountUpdate,
-    current_user: User = Depends(require_cobranza) # <-- COBRANZA ACTUALIZA
+    current_user: User = Depends(require_admin) # <-- ADMINISTRATIVO ACTUALIZA (ISSUE-P-DESCUENTO-ROL)
 ) -> Any:
     """Actualizar descuento existente"""
     discount = await discount_service.get_discount(id=id)
@@ -117,7 +119,7 @@ async def add_student_to_discount(
     *,
     id: PydanticObjectId,
     student_id: PydanticObjectId,
-    current_user: User = Depends(require_cobranza) # <-- COBRANZA ASIGNA BECAS
+    current_user: User = Depends(require_admin) # <-- ADMINISTRATIVO ASIGNA BECAS (ISSUE-P-DESCUENTO-ROL)
 ) -> Any:
     """Agregar un estudiante a un descuento"""
     discount = await discount_service.add_student_to_discount(
@@ -133,7 +135,7 @@ async def remove_student_from_discount(
     *,
     id: PydanticObjectId,
     student_id: PydanticObjectId,
-    current_user: User = Depends(require_cobranza) # <-- COBRANZA RETIRA BECAS
+    current_user: User = Depends(require_admin) # <-- ADMINISTRATIVO RETIRA BECAS (ISSUE-P-DESCUENTO-ROL)
 ) -> Any:
     """Remover un estudiante de un descuento"""
     discount = await discount_service.remove_student_from_discount(

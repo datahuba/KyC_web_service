@@ -138,6 +138,14 @@ class Discount(MongoBaseModel):
         default=True,
         description="Si el descuento está activo y puede ser usado"
     )
+
+    # ISSUE-P-RECALCULO-NOTA: condición académica opcional para conservar la beca
+    nota_minima_requerida: Optional[float] = Field(
+        None,
+        ge=0,
+        le=100,
+        description="Nota mínima que el estudiante debe mantener por módulo para conservar este descuento. None = sin condición académica."
+    )
     
     # ========================================================================
     # VALIDADORES

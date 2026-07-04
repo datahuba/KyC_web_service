@@ -33,6 +33,22 @@ class ModuloEstado(BaseModel):
     nota: Optional[float] = Field(default=None, ge=0, le=100, description="Calificación obtenida en el módulo (0-100)")
     estado_academico: str = Field(default="Cursando", description="Puede ser: Cursando, Aprobado, Reprobado")
 
+    # ISSUE-P-RECALCULO-NOTA: costo de respaldo sin el descuento personal (beca)
+    costo_sin_beca_personal: Optional[float] = Field(
+        default=None, ge=0,
+        description="Costo de este módulo aplicando solo el descuento del curso, sin el descuento personal. Referencia si el estudiante pierde la beca por nota."
+    )
+
+    # ISSUE-Q-NOTA-BORRADOR: nota propuesta por el docente, pendiente de validación de CPD
+    nota_borrador: Optional[float] = Field(
+        default=None, ge=0, le=100,
+        description="Nota propuesta por el docente, pendiente de validación de CPD. No afecta cálculos hasta ser validada."
+    )
+    estado_validacion_nota: str = Field(
+        default="sin_borrador",
+        description="'sin_borrador' | 'pendiente_validacion' | 'validada'"
+    )
+
 
 class Enrollment(MongoBaseModel):
     """
@@ -95,6 +111,18 @@ class Enrollment(MongoBaseModel):
     nota_final: Optional[float] = Field(None, ge=0, le=100)
     
     matricula_pagada: bool = Field(default=False, description="¿Ya pagó la matrícula el estudiante para este curso?")
+
+    # ISSUE-P-RECALCULO-NOTA: snapshot de la nota mínima exigida por el descuento personal
+    nota_minima_beca: Optional[float] = Field(
+        default=None, ge=0, le=100,
+        description="Nota mínima exigida por el descuento personal al momento de inscribirse. None = sin condición académica."
+    )
+
+    # ISSUE-P-BECA-RESPALDO: documento de respaldo de la beca/descuento aplicado
+    beca_respaldo_url: Optional[str] = Field(
+        default=None,
+        description="URL del documento de respaldo (resolución académica o de directorio) de la beca aplicada. None si aún no se ha subido."
+    )
 
     # ========================================================================
     # VALIDADORES

@@ -241,6 +241,89 @@ def require_mae(
     return current_user
 
 
+def require_encargado_curso(
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> User:
+    """
+    Requiere que el usuario sea Encargado de Curso, Coordinador (supervisa), CPD o superior.
+
+    Permite el acceso a roles: ENCARGADO_CURSO, COORDINADOR, CPD, ADMIN y SUPERADMIN.
+    (ISSUE-R-ROLES)
+    """
+    if not isinstance(current_user, User):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Se requiere credenciales de Encargado de Curso o superior"
+        )
+
+    allowed = [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR, UserRole.CPD, UserRole.ADMIN, UserRole.SUPERADMIN]
+    if current_user.rol not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso restringido. Esta acción está reservada para el Encargado de Curso o Administración"
+        )
+
+    return current_user
+
+
+def require_coordinador(
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> User:
+    """
+    Requiere que el usuario sea Coordinador, ADMIN o SUPERADMIN.
+    (ISSUE-R-ROLES)
+    """
+    if not isinstance(current_user, User):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Se requiere credenciales de Coordinador o superior"
+        )
+
+    if current_user.rol not in [UserRole.COORDINADOR, UserRole.ADMIN, UserRole.SUPERADMIN]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso restringido. Esta sección está reservada para Coordinación o Administración"
+        )
+
+    return current_user
+
+
+def require_extracto_bancario(
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> User:
+    """
+    Requiere Cobranza, CPD, ADMIN o SUPERADMIN.
+    (ISSUE-P-EXTRACTO): registro y cruce manual del extracto bancario.
+    """
+    if not isinstance(current_user, User):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Se requiere credenciales de Cobranza/CPD o superior"
+        )
+
+    allowed = [UserRole.COBRANZA, UserRole.CPD, UserRole.ADMIN, UserRole.SUPERADMIN]
+    if current_user.rol not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso restringido a Cobranza/CPD o Administración"
+        )
+
+    return current_user
+
+
+def filtro_cursos_por_rol(current_user: User) -> Optional[dict]:
+    """
+    Devuelve un filtro Mongo para segmentar resultados por curso, o None si el usuario
+    tiene acceso total (sin restricción).
+
+    (ISSUE-R-ROLES / ISSUE-P-SEGMENTACION): reutilizable en cualquier servicio que liste
+    inscripciones/estudiantes/pagos filtrando por curso.
+    """
+    if current_user.rol == UserRole.ENCARGADO_CURSO:
+        return {"curso_id": {"$in": current_user.cursos_asignados}}
+    return None
+
+
 def get_current_active_user(
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Union[User, Student]:
@@ -303,7 +386,10 @@ def require_staff(
             detail="Se requiere cuenta de personal administrativo."
         )
     
-    staff_roles = [UserRole.ADMIN, UserRole.SUPERADMIN, UserRole.MAE, UserRole.CPD, UserRole.COBRANZA]
+    staff_roles = [
+        UserRole.ADMIN, UserRole.SUPERADMIN, UserRole.MAE, UserRole.CPD, UserRole.COBRANZA,
+        UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR,  # ISSUE-R-ROLES
+    ]
     if current_user.rol not in staff_roles:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

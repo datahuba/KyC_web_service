@@ -135,6 +135,8 @@ class PaymentResponse(BaseModel):
     
     created_at: datetime
     updated_at: datetime
+
+    en_ventana_reversion: bool = False  # ISSUE-P-REVERSION
     
     model_config = {
         "populate_by_name": True,

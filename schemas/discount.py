@@ -43,6 +43,12 @@ class DiscountCreate(BaseModel):
         description="Si el descuento está activo"
     )
 
+    # ISSUE-P-RECALCULO-NOTA
+    nota_minima_requerida: Optional[float] = Field(
+        None, ge=0, le=100,
+        description="Nota mínima que el estudiante debe mantener por módulo para conservar esta beca (opcional)."
+    )
+
     @field_validator("nombre")
     @classmethod
     def validate_nombre(cls, v: str) -> str:
@@ -81,6 +87,7 @@ class DiscountResponse(BaseModel):
     activo: bool
     created_at: datetime
     updated_at: datetime
+    nota_minima_requerida: Optional[float] = None
     
     model_config = {
         "populate_by_name": True,
@@ -109,6 +116,7 @@ class DiscountUpdate(BaseModel):
     nombre: Optional[str] = Field(None, min_length=1, max_length=200)
     porcentaje: Optional[float] = Field(None, gt=0.0, le=100)
     activo: Optional[bool] = None
+    nota_minima_requerida: Optional[float] = Field(None, ge=0, le=100)
 
     @field_validator("nombre")
     @classmethod

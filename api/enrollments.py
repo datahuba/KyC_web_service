@@ -17,12 +17,13 @@ Permisos (Según Jerarquía UAGRM):
 """
 
 from typing import List, Any, Optional, Union
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Path
 from models.enrollment import Enrollment
 from models.student import Student
 from models.course import Course
 from models.user import User
-from models.enums import EstadoInscripcion, EstadoRequisito
+from models.enums import EstadoInscripcion, EstadoRequisito, UserRole
 from core.cloudinary_utils import upload_image, upload_pdf
 from schemas.requisito import RequisitoResponse, RequisitoRechazarRequest, RequisitoListResponse
 from schemas.enrollment import (
@@ -36,7 +37,7 @@ from services import enrollment_service, payment_service
 from beanie import PydanticObjectId
 
 # Nuevas dependencias de seguridad del ISSUE L
-from api.dependencies import require_superadmin, require_cpd, require_staff, require_docente, get_current_user
+from api.dependencies import require_superadmin, require_cpd, require_staff, require_docente, get_current_user, filtro_cursos_por_rol, require_encargado_curso
 
 router = APIRouter()
 
@@ -53,9 +54,13 @@ import math
 async def create_enrollment(
     *,
     enrollment_in: EnrollmentCreate,
-    current_user: User = Depends(require_cpd) # <-- CPD CREA INSCRIPCIONES
+    current_user: User = Depends(require_encargado_curso) # <-- CPD, ENCARGADO_CURSO, COORDINADOR o superior (ISSUE-R-ROLES)
 ) -> Any:
     """Crear nueva inscripción de estudiante a un curso"""
+    # ISSUE-R-ROLES: un Encargado de Curso solo puede inscribir en sus cursos asignados
+    if current_user.rol == UserRole.ENCARGADO_CURSO and enrollment_in.curso_id not in current_user.cursos_asignados:
+        raise HTTPException(status_code=403, detail="No tienes asignado este curso")
+
     try:
         enrollment = await enrollment_service.create_enrollment(
             enrollment_in=enrollment_in,
@@ -84,10 +89,14 @@ async def list_enrollments(
 ) -> Any:
     """Listar inscripciones con paginación y filtros avanzados"""
     if isinstance(current_user, User):
-        # Todo el STAFF (Mae, Cobranza, Cpd, Admin) puede leer la tabla
+        # Todo el STAFF (Mae, Cobranza, Cpd, Admin, Coordinador) puede leer la tabla;
+        # ENCARGADO_CURSO se segmenta a sus cursos asignados (ISSUE-R-ROLES).
+        filtro_rol = filtro_cursos_por_rol(current_user)
+        cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
         enrollments, total_count = await enrollment_service.get_all_enrollments(
             page=page, per_page=per_page, q=q, estado=estado,
-            curso_id=curso_id, estudiante_id=estudiante_id
+            curso_id=curso_id, estudiante_id=estudiante_id,
+            cursos_permitidos=cursos_permitidos
         )
     elif isinstance(current_user, Student):
         all_enrollments = await enrollment_service.get_enrollments_by_student(
@@ -282,7 +291,10 @@ async def update_modulo_nota(
     current_user: User = Depends(require_docente) # Docentes, CPD, Admins
 ) -> Any:
     """
-    Ingresa o actualiza la calificación de un módulo y recalcula el promedio.
+    ISSUE-Q-NOTA-BORRADOR: si el usuario es DOCENTE, la nota queda como BORRADOR
+    pendiente de validación de CPD (no afecta promedio ni beca todavía).
+    Si es CPD/ADMIN/SUPERADMIN, califica directamente (comportamiento actual,
+    sin cambios: recalcula promedio y aplica lógica de beca por nota mínima).
     """
     try:
         # BUG R FIX: Verificación de desfase de array y existencia de módulos
@@ -303,14 +315,57 @@ async def update_modulo_nota(
             )
             
         username = current_user.username if hasattr(current_user, 'username') else "docente_autorizado"
-        
-        updated_enrollment = await enrollment_service.actualizar_nota_modulo(
-            enrollment_id=id,
-            modulo_index=index,
-            nota=nota_update.nota,
-            evaluador_username=username
-        )
+
+        if current_user.rol == UserRole.DOCENTE:
+            updated_enrollment = await enrollment_service.subir_nota_borrador(
+                enrollment_id=id, modulo_index=index, nota_borrador=nota_update.nota
+            )
+        else:
+            updated_enrollment = await enrollment_service.actualizar_nota_modulo(
+                enrollment_id=id,
+                modulo_index=index,
+                nota=nota_update.nota,
+                evaluador_username=username
+            )
         return await enrollment_service.enrich_enrollment_dates(updated_enrollment)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/{id}/modulos/{index}/nota/validar",
+    response_model=EnrollmentResponse,
+    summary="Validar Borrador de Nota (CPD)"
+)
+async def validar_modulo_nota(
+    *,
+    id: PydanticObjectId,
+    index: int = Path(..., ge=0),
+    current_user: User = Depends(require_cpd)  # CPD, ADMIN, SUPERADMIN
+) -> Any:
+    """ISSUE-Q-NOTA-BORRADOR: convierte el borrador del docente en nota oficial."""
+    try:
+        updated = await enrollment_service.validar_nota_borrador(id, index, current_user.username)
+        return await enrollment_service.enrich_enrollment_dates(updated)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/{id}/modulos/{index}/nota/rechazar",
+    response_model=EnrollmentResponse,
+    summary="Rechazar Borrador de Nota (CPD)"
+)
+async def rechazar_modulo_nota(
+    *,
+    id: PydanticObjectId,
+    index: int = Path(..., ge=0),
+    current_user: User = Depends(require_cpd)
+) -> Any:
+    """ISSUE-Q-NOTA-BORRADOR: descarta el borrador propuesto por el docente."""
+    try:
+        updated = await enrollment_service.rechazar_nota_borrador(id, index)
+        return await enrollment_service.enrich_enrollment_dates(updated)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -424,3 +479,45 @@ async def rechazar_requisito(
     enrollment.requisitos[index].rechazar(current_user.username, rechazo.motivo)
     await enrollment.save()
     return enrollment.requisitos[index]
+
+
+@router.post(
+    "/{id}/beca-respaldo",
+    response_model=EnrollmentResponse,
+    summary="Subir Respaldo Documental de Beca"
+)
+async def subir_beca_respaldo(
+    *,
+    id: PydanticObjectId,
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_cpd)  # <-- CPD, ADMIN, SUPERADMIN (ISSUE-P-BECA-RESPALDO)
+) -> Any:
+    """
+    Sube (o reemplaza) el documento de respaldo de la beca/descuento aplicado a
+    esta inscripción. No bloquea ni exige nada al crear/editar la inscripción;
+    es un adjunto que puede subirse en cualquier momento posterior.
+    """
+    enrollment = await Enrollment.get(id)
+    if not enrollment:
+        raise HTTPException(404, "Inscripción no encontrada")
+
+    try:
+        folder = f"enrollments/{id}/beca_respaldo"
+        public_id = "respaldo"
+
+        image_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
+        if file.content_type in image_types:
+            url = await upload_image(file, folder, public_id)
+        elif file.content_type == "application/pdf":
+            url = await upload_pdf(file, folder, public_id)
+        else:
+            raise HTTPException(400, f"Formato no permitido: {file.content_type}")
+
+        enrollment.beca_respaldo_url = url
+        enrollment.updated_at = datetime.utcnow()
+        await enrollment.save()
+        return await enrollment_service.enrich_enrollment_dates(enrollment)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Error: {str(e)}")
