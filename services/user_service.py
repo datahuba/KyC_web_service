@@ -23,7 +23,13 @@ async def get_users(page: int = 1, per_page: int = 10) -> tuple[List[User], int]
             User.rol == UserRole.SUPERADMIN,
             User.rol == UserRole.MAE,
             User.rol == UserRole.CPD,
-            User.rol == UserRole.COBRANZA
+            User.rol == UserRole.COBRANZA,
+            # ISSUE-R-ROLES: estos 2 roles se agregaron al enum pero nunca se
+            # sumaron a este filtro — quedaban invisibles en /users/ pese a
+            # poder crearse desde UserForm.svelte. Bug encontrado al verificar
+            # ISSUE-R-VISTA-CURSOS (agrupación Globales/Asignados a Curso).
+            User.rol == UserRole.ENCARGADO_CURSO,
+            User.rol == UserRole.COORDINADOR
         )
     )
     total_count = await query.count()

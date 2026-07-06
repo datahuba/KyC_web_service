@@ -112,6 +112,27 @@ class Enrollment(MongoBaseModel):
     
     matricula_pagada: bool = Field(default=False, description="¿Ya pagó la matrícula el estudiante para este curso?")
 
+    # ISSUE-M-EXENCION: bypass de matrícula otorgado por MAE. NO condona la
+    # deuda financiera (saldo_pendiente sigue reflejando la realidad); solo
+    # desacopla el estado académico (poder cursar) del pago de matrícula.
+    matricula_exenta: bool = Field(default=False, description="Si MAE autorizó cursar sin haber pagado la matrícula. La deuda financiera se mantiene intacta.")
+    matricula_exenta_otorgada_por: Optional[str] = Field(default=None, description="Username del MAE/Admin/Superadmin que otorgó la exención.")
+    matricula_exenta_fecha: Optional[datetime] = Field(default=None, description="Fecha (UTC) en que se otorgó la exención vigente.")
+
+    # ISSUE-P-CONGELADO: motivo específico cuando estado=SUSPENDIDO. Reutiliza
+    # el mismo estado que ISSUE-R-SOLICITUD-PASIVO ('pasivo') para no explotar
+    # el enum EstadoInscripcion con valores redundantes; este campo diferencia
+    # el origen real de la suspensión para reglas de reincorporación distintas.
+    motivo_suspension: Optional[str] = Field(
+        default=None,
+        description="'pasivo' | 'congelado' | 'abandono'. None si estado no es SUSPENDIDO."
+    )
+    fecha_congelamiento: Optional[datetime] = Field(default=None, description="Fecha (UTC) en que se congeló voluntariamente la inscripción.")
+    tasa_congelamiento_pagada: bool = Field(default=False, description="Si se registró el pago de la tasa de congelamiento (150 Bs).")
+    fecha_abandono: Optional[datetime] = Field(default=None, description="Fecha (UTC) en que el sistema detectó y marcó el abandono automático.")
+    multa_reincorporacion_pendiente: bool = Field(default=False, description="Si al reactivar esta inscripción corresponde cobrar la multa de reincorporación (300 Bs) por abandono.")
+    mora_notificada: bool = Field(default=False, description="Si ya se notificó al encargado/CPD de mora preventiva (evita re-notificar en cada corrida del job).")
+
     # ISSUE-P-RECALCULO-NOTA: snapshot de la nota mínima exigida por el descuento personal
     nota_minima_beca: Optional[float] = Field(
         default=None, ge=0, le=100,

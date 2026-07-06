@@ -29,11 +29,13 @@ class User(MongoBaseModel):
     activo: bool = Field(default=True, description="Si el usuario puede acceder al sistema")
     ultimo_acceso: Optional[datetime] = Field(None, description="Fecha del último login exitoso")
 
-    # ISSUE-R-ROLES: nombre por función/programa (no por persona) para roles rotativos
+    # ISSUE-R-ROLES / ISSUE-R-PERFIL-GENERICO: nombre por función/programa (no por
+    # persona) para roles rotativos. Obligatorio para ENCARGADO_CURSO, COORDINADOR
+    # y COBRANZA (perfiles institucionales que rotan de responsable con frecuencia).
     nombre_funcional: Optional[str] = Field(
         None,
         max_length=150,
-        description="Nombre por función/programa (ej. 'Encargado Maestría Gerencia Tributaria'). Obligatorio si rol es ENCARGADO_CURSO o COORDINADOR."
+        description="Nombre por función/programa (ej. 'Encargado Maestría Gerencia Tributaria', 'Cajero Ventanilla 1'). Obligatorio si rol es ENCARGADO_CURSO, COORDINADOR o COBRANZA."
     )
 
     # ISSUE-R-ROLES / ISSUE-P-SEGMENTACION: cursos que este usuario puede operar (ENCARGADO_CURSO o COBRANZA)

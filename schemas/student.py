@@ -183,6 +183,10 @@ class StudentResponse(BaseModel):
     lista_cursos_ids: List[PyObjectId] = []
     created_at: datetime
     updated_at: datetime
+
+    # ISSUE-Q-PRE: Términos y Condiciones
+    terminos_aceptados: bool = False
+    fecha_aceptacion_terminos: Optional[datetime] = None
     
     model_config = {
         "populate_by_name": True,

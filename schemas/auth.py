@@ -36,6 +36,10 @@ class CurrentUserResponse(BaseModel):
     nombre: Optional[str] = None
     registro: Optional[str] = None
 
+    # ISSUE-Q-PRE: si el estudiante ya aceptó el reglamento de Postgrado.
+    # Siempre True para personal administrativo/docente (no aplica a ellos).
+    terminos_aceptados: bool = True
+
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True

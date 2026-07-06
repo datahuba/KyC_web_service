@@ -351,9 +351,72 @@ async def actualizar_saldo_enrollment(
     elif not enrollment.esta_completamente_pagado() and enrollment.matricula_pagada:
         # Prevención de retroceso en caso de reversión de pagos
         enrollment.estado = EstadoInscripcion.ACTIVO
+    elif enrollment.matricula_exenta and enrollment.estado == EstadoInscripcion.PENDIENTE_PAGO:
+        # ISSUE-M-EXENCION: MAE autorizó cursar sin haber pagado la matrícula.
+        # NO se toca matricula_pagada (sigue reflejando la realidad financiera
+        # para reportes/caja); solo se desbloquea el estado académico.
+        enrollment.estado = EstadoInscripcion.ACTIVO
     
     enrollment.updated_at = datetime.utcnow()
     await enrollment.save()
+
+
+# ========================================================================
+# ISSUE-M-EXENCION: BYPASS DE MATRÍCULA (SOLO MAE)
+# ========================================================================
+async def otorgar_matricula_exenta(enrollment_id: PydanticObjectId, otorgado_por: str) -> Enrollment:
+    """
+    Autoriza a un estudiante a cursar académicamente SIN haber pagado la
+    matrícula institucional. NO condona la deuda: `saldo_pendiente` y
+    `matricula_pagada` siguen reflejando la realidad financiera exacta
+    (Cobranza sigue viendo y cobrando la deuda con normalidad).
+
+    Solo desbloquea el estado académico (`estado` pasa a ACTIVO) para que
+    el estudiante pueda acceder a módulos/aula virtual mientras se resuelve
+    su situación de matrícula.
+    """
+    enrollment = await Enrollment.get(enrollment_id)
+    if not enrollment:
+        raise ValueError(f"Inscripción {enrollment_id} no encontrada")
+
+    if enrollment.estado in (EstadoInscripcion.COMPLETADO, EstadoInscripcion.CANCELADO):
+        raise ValueError(f"No se puede otorgar exención sobre una inscripción en estado '{enrollment.estado.value}'")
+
+    enrollment.matricula_exenta = True
+    enrollment.matricula_exenta_otorgada_por = otorgado_por
+    enrollment.matricula_exenta_fecha = datetime.utcnow()
+
+    # Desbloqueo académico inmediato (no depende de que llegue un pago nuevo)
+    if enrollment.estado == EstadoInscripcion.PENDIENTE_PAGO:
+        enrollment.estado = EstadoInscripcion.ACTIVO
+
+    enrollment.updated_at = datetime.utcnow()
+    await enrollment.save()
+    return enrollment
+
+
+async def revocar_matricula_exenta(enrollment_id: PydanticObjectId) -> Enrollment:
+    """
+    Revoca una exención de matrícula previamente otorgada. Si la matrícula
+    real sigue sin pagarse, el estado académico vuelve a PENDIENTE_PAGO
+    (se re-bloquea el acceso). Si mientras tanto ya se pagó la matrícula de
+    forma real, el estado ACTIVO se mantiene por la vía normal.
+    """
+    enrollment = await Enrollment.get(enrollment_id)
+    if not enrollment:
+        raise ValueError(f"Inscripción {enrollment_id} no encontrada")
+
+    if not enrollment.matricula_exenta:
+        raise ValueError("Esta inscripción no tiene una exención de matrícula activa")
+
+    enrollment.matricula_exenta = False
+
+    if not enrollment.matricula_pagada and enrollment.estado == EstadoInscripcion.ACTIVO:
+        enrollment.estado = EstadoInscripcion.PENDIENTE_PAGO
+
+    enrollment.updated_at = datetime.utcnow()
+    await enrollment.save()
+    return enrollment
 
 
 # ========================================================================

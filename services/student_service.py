@@ -72,6 +72,23 @@ async def get_student(id: PydanticObjectId) -> Optional[Student]:
     return await Student.get(id)
 
 
+async def accept_terms(student: Student) -> Student:
+    """
+    ISSUE-Q-PRE: Registra la aceptación del reglamento de Postgrado.
+
+    Idempotente: si ya había aceptado antes, no pisa la fecha original
+    de la primera aceptación (se conserva como evidencia histórica).
+    """
+    from datetime import datetime
+
+    if not student.terminos_aceptados:
+        student.terminos_aceptados = True
+        student.fecha_aceptacion_terminos = datetime.utcnow()
+        await student.save()
+
+    return student
+
+
 async def create_student(student_in: StudentCreate) -> Student:
     """
     Crear nuevo estudiante

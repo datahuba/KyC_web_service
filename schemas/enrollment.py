@@ -81,8 +81,17 @@ class EnrollmentResponse(BaseModel):
     updated_at: datetime
     
     matricula_pagada: Optional[bool] = False
+    matricula_exenta: Optional[bool] = False  # ISSUE-M-EXENCION
+    matricula_exenta_otorgada_por: Optional[str] = None  # ISSUE-M-EXENCION
+    matricula_exenta_fecha: Optional[datetime] = None  # ISSUE-M-EXENCION
     nota_minima_beca: Optional[float] = None  # ISSUE-P-RECALCULO-NOTA
     beca_respaldo_url: Optional[str] = None  # ISSUE-P-BECA-RESPALDO
+    # ISSUE-P-CONGELADO
+    motivo_suspension: Optional[str] = None
+    fecha_congelamiento: Optional[datetime] = None
+    tasa_congelamiento_pagada: Optional[bool] = False
+    fecha_abandono: Optional[datetime] = None
+    multa_reincorporacion_pendiente: Optional[bool] = False
 
     model_config = {
         "populate_by_name": True,

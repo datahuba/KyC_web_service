@@ -264,6 +264,7 @@ async def get_me(
             activo=current_user.activo,
             ultimo_acceso=None,
             nombre=current_user.nombre,  # Inyección del nombre real desde la ficha del estudiante
-            registro=current_user.registro  # Inyección del código de registro oficial
+            registro=current_user.registro,  # Inyección del código de registro oficial
+            terminos_aceptados=current_user.terminos_aceptados  # ISSUE-Q-PRE
         )
     

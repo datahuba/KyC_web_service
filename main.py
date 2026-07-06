@@ -1,9 +1,38 @@
+import asyncio
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from core.config import settings
 from core.database import init_db
 from api.api import api_router
+
+logger = logging.getLogger("kyc.congelado_job")
+
+# ISSUE-P-CONGELADO / ISSUE-R-NOTIFICACION-MORA: job periódico (cada 24h) que
+# revisa inactividad de pagos, notifica mora preventiva y marca abandono
+# automático como último recurso. Corre en background sin dependencias
+# nuevas (asyncio.create_task); también existe el endpoint manual
+# POST /enrollments/jobs/verificar-inactividad para disparo bajo demanda.
+_INTERVALO_JOB_CONGELADO_SEGUNDOS = 24 * 60 * 60
+
+
+async def _job_verificar_inactividad_periodico():
+    from services import congelado_service
+
+    while True:
+        # IMPORTANTE: se espera el intervalo COMPLETO antes de la primera
+        # ejecución. Con uvicorn --reload en desarrollo, el evento de
+        # startup se dispara en CADA guardado de archivo; si esta corrida
+        # fuera inmediata, el job real (sin acotar) se ejecutaría contra la
+        # base de datos compartida (la misma de producción) en cada reload,
+        # afectando inscripciones reales sin ninguna intención de hacerlo.
+        await asyncio.sleep(_INTERVALO_JOB_CONGELADO_SEGUNDOS)
+        try:
+            resultado = await congelado_service.verificar_inactividad_pagos()
+            logger.info(f"[job-congelado] {resultado}")
+        except Exception as e:
+            logger.error(f"[job-congelado] Error en la verificación periódica: {str(e)}")
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -27,6 +56,15 @@ if settings.DEBUG:
 @app.on_event("startup")
 async def start_db():
     await init_db()
+    # ISSUE-P-CONGELADO: lanza el job periódico en background, sin bloquear
+    # el arranque del servidor ni requerir un scheduler externo. Desactivable
+    # vía JOB_CONGELADO_ACTIVO=False en .env (recomendado en desarrollo local
+    # con --reload, para no correr el job real contra la base compartida con
+    # producción en cada guardado de archivo).
+    if settings.JOB_CONGELADO_ACTIVO:
+        asyncio.create_task(_job_verificar_inactividad_periodico())
+    else:
+        logger.warning("[job-congelado] DESACTIVADO por JOB_CONGELADO_ACTIVO=False")
 
 @app.get("/")
 async def root():
