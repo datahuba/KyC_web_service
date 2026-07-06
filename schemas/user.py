@@ -17,8 +17,11 @@ from pydantic import BaseModel, Field, EmailStr, field_validator
 from models.enums import UserRole
 from models.base import PyObjectId
 
-# Roles que requieren nombre_funcional obligatorio (ISSUE-R-ROLES)
-_ROLES_REQUIEREN_NOMBRE_FUNCIONAL = {UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR}
+# Roles que requieren nombre_funcional obligatorio (ISSUE-R-ROLES + ISSUE-R-PERFIL-GENERICO)
+# Estos roles rotan de persona con frecuencia; identificarlos por función/programa
+# (no por el nombre de quien lo ocupa) permite rotar al responsable sin perder
+# historial ni migrar datos entre cuentas.
+_ROLES_REQUIEREN_NOMBRE_FUNCIONAL = {UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR, UserRole.COBRANZA}
 
 
 class UserCreate(BaseModel):
@@ -47,7 +50,7 @@ class UserCreate(BaseModel):
     def validar_nombre_funcional(cls, v, info):
         rol = info.data.get("rol")
         if rol in _ROLES_REQUIEREN_NOMBRE_FUNCIONAL and not v:
-            raise ValueError("nombre_funcional es obligatorio para los roles Encargado de Curso y Coordinador")
+            raise ValueError("nombre_funcional es obligatorio para los roles Encargado de Curso, Coordinador y Cobranza")
         return v
 
     model_config = {
@@ -116,7 +119,7 @@ class UserUpdate(BaseModel):
     def validar_nombre_funcional(cls, v, info):
         rol = info.data.get("rol")
         if rol in _ROLES_REQUIEREN_NOMBRE_FUNCIONAL and not v:
-            raise ValueError("nombre_funcional es obligatorio para los roles Encargado de Curso y Coordinador")
+            raise ValueError("nombre_funcional es obligatorio para los roles Encargado de Curso, Coordinador y Cobranza")
         return v
 
     model_config = {

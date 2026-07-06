@@ -37,7 +37,7 @@ from services import enrollment_service, payment_service
 from beanie import PydanticObjectId
 
 # Nuevas dependencias de seguridad del ISSUE L
-from api.dependencies import require_superadmin, require_cpd, require_staff, require_docente, get_current_user, filtro_cursos_por_rol, require_encargado_curso
+from api.dependencies import require_superadmin, require_cpd, require_staff, require_docente, get_current_user, filtro_cursos_por_rol, require_encargado_curso, require_mae
 
 router = APIRouter()
 
@@ -521,3 +521,131 @@ async def subir_beca_respaldo(
         raise
     except Exception as e:
         raise HTTPException(500, f"Error: {str(e)}")
+
+
+@router.post(
+    "/{id}/matricula-exenta",
+    response_model=EnrollmentResponse,
+    summary="Otorgar Matrícula Exenta (MAE)"
+)
+async def otorgar_matricula_exenta_endpoint(
+    *,
+    id: PydanticObjectId,
+    current_user: User = Depends(require_mae)  # <-- SOLO MAE, ADMIN, SUPERADMIN (ISSUE-M-EXENCION)
+) -> Any:
+    """
+    Autoriza a un estudiante a cursar académicamente sin haber pagado la
+    matrícula institucional. NO condona la deuda financiera: `saldo_pendiente`
+    y `matricula_pagada` no se alteran, Cobranza sigue viendo y cobrando la
+    deuda con normalidad. Solo desbloquea el estado académico.
+    """
+    try:
+        enrollment = await enrollment_service.otorgar_matricula_exenta(
+            enrollment_id=id, otorgado_por=current_user.username
+        )
+        return await enrollment_service.enrich_enrollment_dates(enrollment)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete(
+    "/{id}/matricula-exenta",
+    response_model=EnrollmentResponse,
+    summary="Revocar Matrícula Exenta (MAE)"
+)
+async def revocar_matricula_exenta_endpoint(
+    *,
+    id: PydanticObjectId,
+    current_user: User = Depends(require_mae)  # <-- SOLO MAE, ADMIN, SUPERADMIN (ISSUE-M-EXENCION)
+) -> Any:
+    """
+    Revoca una exención de matrícula previamente otorgada. Si la matrícula
+    real sigue sin pagarse, el estudiante vuelve a estado PENDIENTE_PAGO
+    (se re-bloquea el acceso académico).
+    """
+    try:
+        enrollment = await enrollment_service.revocar_matricula_exenta(enrollment_id=id)
+        return await enrollment_service.enrich_enrollment_dates(enrollment)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ========================================================================
+# ISSUE-P-CONGELADO: Congelamiento voluntario y reactivación desde
+# congelamiento/abandono. Reutiliza EstadoInscripcion.SUSPENDIDO (mismo
+# patrón que ISSUE-R-SOLICITUD-PASIVO) diferenciado por motivo_suspension.
+# ========================================================================
+
+@router.post(
+    "/{id}/congelar",
+    response_model=EnrollmentResponse,
+    summary="Congelar Inscripción (CPD)"
+)
+async def congelar_enrollment_endpoint(
+    *,
+    id: PydanticObjectId,
+    current_user: User = Depends(require_cpd)  # <-- CPD, ADMIN, SUPERADMIN
+) -> Any:
+    """
+    Congelamiento voluntario de estudios (tasa fija, configurable vía
+    settings.TASA_CONGELAMIENTO_BS). Distinto de 'Solicitar Pasivo'
+    (ISSUE-R-SOLICITUD-PASIVO): el congelamiento es una acción directa del
+    CPD, no requiere flujo de solicitud/aprobación por separado.
+    """
+    from services import congelado_service
+    try:
+        enrollment = await congelado_service.congelar_inscripcion(
+            enrollment_id=id, registrado_por=current_user.username
+        )
+        return await enrollment_service.enrich_enrollment_dates(enrollment)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/{id}/reactivar-congelado",
+    response_model=EnrollmentResponse,
+    summary="Reactivar Inscripción Congelada o en Abandono (CPD)"
+)
+async def reactivar_congelado_endpoint(
+    *,
+    id: PydanticObjectId,
+    current_user: User = Depends(require_cpd)  # <-- CPD, ADMIN, SUPERADMIN
+) -> Any:
+    """
+    Reactiva una inscripción SUSPENDIDA por congelamiento o abandono. Si el
+    motivo fue 'abandono', marca `multa_reincorporacion_pendiente=True` para
+    que Cobranza sepa que corresponde cobrar la multa (no se genera un
+    Payment automático).
+    """
+    from services import congelado_service
+    try:
+        enrollment = await congelado_service.reactivar_desde_congelado_o_abandono(
+            enrollment_id=id, admin_username=current_user.username
+        )
+        return await enrollment_service.enrich_enrollment_dates(enrollment)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/jobs/verificar-inactividad",
+    summary="Disparo Manual del Job de Inactividad (Congelado/Mora/Abandono)"
+)
+async def disparar_verificacion_inactividad(
+    *,
+    enrollment_id: Optional[PydanticObjectId] = Query(
+        None, description="Si se provee, acota la verificación SOLO a esta inscripción (recomendado para pruebas puntuales)."
+    ),
+    current_user: User = Depends(require_cpd)  # <-- CPD, ADMIN, SUPERADMIN
+) -> Any:
+    """
+    Ejecuta manualmente la verificación de inactividad de pagos (la misma
+    lógica que corre automáticamente cada 24h). Sin `enrollment_id` revisa
+    TODAS las inscripciones activas/pendientes reales — usar con cuidado en
+    producción. Con `enrollment_id` acota la revisión a una sola inscripción.
+    """
+    from services import congelado_service
+    ids = [enrollment_id] if enrollment_id else None
+    resultado = await congelado_service.verificar_inactividad_pagos(enrollment_ids=ids)
+    return resultado

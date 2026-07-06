@@ -47,6 +47,17 @@ class Settings(BaseSettings):
     FRONTEND_URL: str = Field(default="http://localhost:5173", env="FRONTEND_URL")
     PASSWORD_RESET_EXPIRE_MINUTES: int = Field(default=30, env="PASSWORD_RESET_EXPIRE_MINUTES")
 
+    # ISSUE-P-CONGELADO: montos y plazos configurables sin tocar código
+    TASA_CONGELAMIENTO_BS: float = Field(default=150.0, env="TASA_CONGELAMIENTO_BS")
+    MULTA_REINCORPORACION_BS: float = Field(default=300.0, env="MULTA_REINCORPORACION_BS")
+    DIAS_INACTIVIDAD_MORA: int = Field(default=20, env="DIAS_INACTIVIDAD_MORA")  # ISSUE-R-NOTIFICACION-MORA
+    DIAS_INACTIVIDAD_ABANDONO: int = Field(default=30, env="DIAS_INACTIVIDAD_ABANDONO")
+    # Apaga el job automático en background (útil en desarrollo local para no
+    # afectar la base compartida con producción por accidente en cada reload).
+    # Por defecto ACTIVO; poner en False explícitamente en .env local si se
+    # está iterando sobre este código con --reload.
+    JOB_CONGELADO_ACTIVO: bool = Field(default=True, env="JOB_CONGELADO_ACTIVO")
+
     model_config = {
         "env_file": ".env",
         "case_sensitive": True
