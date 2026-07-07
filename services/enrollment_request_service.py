@@ -150,6 +150,31 @@ async def approve_enrollment_request(request_id: PydanticObjectId, admin_usernam
     except Exception as e:
         print(f"Error notificando aprobación de inscripción al estudiante: {str(e)}")
 
+    # Correo real de aprobación (ISSUE-A-SMTP ya operativo). Si el estudiante no
+    # tiene email registrado o SMTP falla, no bloquea la aprobación (solo se loguea).
+    try:
+        student = await Student.get(solicitud.estudiante_id)
+        course = await Course.get(solicitud.curso_id)
+        if student and student.email and course:
+            from core.email_utils import send_email, build_enrollment_approved_email
+            from core.config import settings
+
+            portal_link = f"{settings.FRONTEND_URL.rstrip('/')}/app/enrollments"
+            html = build_enrollment_approved_email(
+                nombre=student.nombre or student.registro,
+                curso_nombre=course.nombre_programa,
+                total_a_pagar=enrollment.total_a_pagar,
+                matricula=enrollment.costo_matricula,
+                portal_link=portal_link
+            )
+            await send_email(
+                student.email,
+                f"Inscripción aprobada - {course.nombre_programa} · Postgrado UAGRM",
+                html
+            )
+    except Exception as e:
+        print(f"Error enviando correo de aprobación de inscripción: {str(e)}")
+
     return enrollment
 
 
