@@ -111,8 +111,14 @@ async def login_user(login_data: LoginRequest) -> Any:
     
     **Retorna:** JWT Token de acceso
     """
-    # Buscar usuario por username
-    user = await User.find_one(User.username == login_data.username)
+    # Buscar usuario por username o email (el formulario del frontend acepta ambos)
+    identificador = login_data.username.strip()
+    user = await User.find_one(
+        Or(
+            User.username == identificador,
+            User.email == identificador.lower()
+        )
+    )
     
     if not user:
         raise HTTPException(
@@ -180,8 +186,14 @@ async def login_student(login_data: LoginRequest) -> Any:
     
     **Retorna:** JWT Token de acceso
     """
-    # Buscar estudiante por registro
-    student = await Student.find_one(Student.registro == login_data.username)
+    # Buscar estudiante por registro o email (el formulario del frontend acepta ambos)
+    identificador = login_data.username.strip()
+    student = await Student.find_one(
+        Or(
+            Student.registro == identificador,
+            Student.email == identificador.lower()
+        )
+    )
     
     if not student:
         raise HTTPException(
