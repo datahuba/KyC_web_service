@@ -253,7 +253,16 @@ async def create_payment(
     await payment.insert()
     
     # [NOTIFICACIONES - ISSUE-U-BUZON]
-    # Notificar a todo el personal de Cobranzas y Administración sobre el pago pendiente
+    # BUG CORREGIDO (reportado por el usuario: pagos/inscripciones no llegaban
+    # a las notificaciones correctas): esto SIEMPRE notificaba solo a
+    # COBRANZA, sin importar el concepto. Pero el propio sistema bloquea a
+    # Cobranza de aprobar pagos con concepto "Matrícula" (solo CPD puede,
+    # ver aprobar_pago en api/payments.py) -- un pago de Matrícula pendiente
+    # nunca le llegaba a quien realmente debía aprobarlo (CPD), y Cobranza
+    # recibía una notificación de un pago que ni siquiera podía gestionar.
+    # Ahora se notifica al rol correcto según el concepto, con el mismo
+    # criterio (regex "matr[ií]cula") usado en el resto de endpoints de
+    # pagos para mantener consistencia.
     try:
         from models.user import User
         from models.enums import UserRole
@@ -261,15 +270,27 @@ async def create_payment(
         
         student_obj = await Student.get(student_id)
         student_name = student_obj.nombre if student_obj and student_obj.nombre else "Estudiante registrado"
-        
-        cobradores = await User.find(
-            User.rol == UserRole.COBRANZA,
-            User.activo == True
+
+        concepto_lower = (concepto_final or "").lower().strip()
+        is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
+        rol_revisor = UserRole.CPD if is_matricula else UserRole.COBRANZA
+
+        from beanie.operators import Or
+        revisores = await User.find(
+            User.activo == True,
+            Or(
+                User.rol == rol_revisor,
+                # Admin/Superadmin pueden aprobar cualquier pago sin importar
+                # el concepto (ver aprobar_pago en api/payments.py), así que
+                # también deben enterarse siempre, no solo el rol específico.
+                User.rol == UserRole.ADMIN,
+                User.rol == UserRole.SUPERADMIN
+            )
         ).to_list()
         
-        for cob in cobradores:
+        for revisor in revisores:
             await create_notification(
-                destinatario_id=cob.id,
+                destinatario_id=revisor.id,
                 tipo_destinatario="user",
                 titulo="Nuevo Pago Pendiente",
                 mensaje=f"El estudiante {student_name} ({student_obj.registro if student_obj else ''}) ha subido un comprobante de Bs. {monto_real} por el concepto '{concepto_final}'.",
