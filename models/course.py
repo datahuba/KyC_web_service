@@ -43,6 +43,22 @@ class Modulo(BaseModel):
     )
 
 
+# ========================================================================
+# SUB-MODELO: CARGO ADICIONAL MULTI-ÍTEM (ISSUE-P-CARGO-MULTIITEM, 2026-07-08)
+# ========================================================================
+class CargoAdicionalItem(BaseModel):
+    """
+    Un ítem individual del cargo adicional/complementario al programa
+    (ej. "Taller de Excel Avanzado" con costo 100 Bs). Reemplaza el diseño
+    anterior de un solo monto+concepto (ISSUE-P-PRECIO-UNICO): la reunión
+    de postgrado contaduría del 2026-07-08 confirmó que puede haber VARIOS
+    gastos complementarios simultáneos (ej. dos talleres distintos), cada
+    uno con su propio nombre y costo, igual que la lista de módulos.
+    """
+    nombre: str = Field(..., min_length=1, max_length=200, description="Concepto del ítem (ej. 'Taller de Excel Avanzado')")
+    costo: float = Field(..., ge=0, description="Costo individual de este ítem")
+
+
 class Course(MongoBaseModel):
     """
     Modelo de Curso/Programa Académico
@@ -84,8 +100,8 @@ class Course(MongoBaseModel):
     # otro lugar (Student.es_estudiante_interno sigue existiendo solo como
     # dato informativo de procedencia, ya NO determina el precio a pagar).
     # Los campos que antes se llamaban "costo_total_externo"/"matricula_externo"
-    # se retiraron de este propósito; ver cargo_adicional_monto/concepto abajo
-    # para el nuevo significado (gasto complementario opcional al programa).
+    # se retiraron de este propósito; ver cargo_adicional_items abajo para el
+    # nuevo significado (gastos complementarios opcionales al programa).
 
     costo_total_interno: float = Field(
         ...,
@@ -100,24 +116,20 @@ class Course(MongoBaseModel):
     )
 
     # ========================================================================
-    # CARGO ADICIONAL (opcional): gasto complementario al programa
+    # CARGO ADICIONAL (opcional): gastos complementarios al programa
     # ========================================================================
-    # Ej: "Taller de Excel Avanzado" con un costo extra de 100 Bs, necesario
-    # o recomendado además de la colegiatura del programa. Si se define,
-    # se suma al total a pagar de TODOS los estudiantes inscritos a este
-    # curso (no es opcional por estudiante individual; es una condición del
-    # programa en su conjunto). Si el usuario quiere que sea opcional por
-    # estudiante, deberá gestionarse manualmente por ahora (fuera de alcance).
-    cargo_adicional_monto: Optional[float] = Field(
-        None,
-        ge=0,
-        description="Monto del cargo adicional/complementario al programa (ej. un taller incluido). None = sin cargo adicional."
-    )
-
-    cargo_adicional_concepto: Optional[str] = Field(
-        None,
-        max_length=200,
-        description="Concepto/descripción del cargo adicional (ej. 'Taller de Excel Avanzado'). Obligatorio si cargo_adicional_monto está definido."
+    # ISSUE-P-CARGO-MULTIITEM (2026-07-08, reunión de postgrado contaduría):
+    # rediseñado de un solo monto+concepto a una LISTA de ítems (mismo patrón
+    # que `modulos`), ya que puede haber varios gastos complementarios
+    # simultáneos (ej. "Taller de Excel Avanzado" 100 Bs + "Certificación
+    # Internacional" 50 Bs). Si la lista tiene elementos, la suma se agrega
+    # al total a pagar de TODOS los estudiantes inscritos a este curso (no
+    # es opcional por estudiante individual; es una condición del programa
+    # en su conjunto). Si el usuario quiere que sea opcional por estudiante,
+    # deberá gestionarse manualmente por ahora (fuera de alcance).
+    cargo_adicional_items: List[CargoAdicionalItem] = Field(
+        default_factory=list,
+        description="Lista de ítems de cargo adicional/complementario al programa (ej. talleres incluidos). Lista vacía = sin cargo adicional."
     )
     
     # ========================================================================
@@ -215,6 +227,13 @@ class Course(MongoBaseModel):
     def get_matricula(self) -> float:
         """Obtiene el costo de matrícula. Precio único para todos los estudiantes."""
         return self.matricula_interno
+
+    def get_cargo_adicional_total(self) -> float:
+        """
+        Suma de todos los ítems de cargo adicional/complementario
+        (ISSUE-P-CARGO-MULTIITEM). 0.0 si la lista está vacía.
+        """
+        return round(sum(item.costo for item in self.cargo_adicional_items), 2)
     
     class Settings:
         name = "courses"
@@ -239,8 +258,9 @@ class Course(MongoBaseModel):
                 "modalidad": "híbrido",
                 "costo_total_interno": 3000.0,
                 "matricula_interno": 500.0,
-                "cargo_adicional_monto": 100.0,
-                "cargo_adicional_concepto": "Taller de Excel Avanzado (complementario)",
+                "cargo_adicional_items": [
+                    {"nombre": "Taller de Excel Avanzado", "costo": 100.0}
+                ],
                 "cantidad_cuotas": 5,
                 "modulos": [
                     {"nombre": "Módulo 1", "costo": 500.0, "docente_id": "60a7f1c4e1f4b8c9d4b8e5c1"}

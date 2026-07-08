@@ -28,6 +28,12 @@ class ModuloNotaUpdate(BaseModel):
     """Schema para actualizar la calificación de un submódulo (docente -> borrador; CPD/Admin -> oficial directa)"""
     nota: float = Field(..., ge=0, le=100, description="Calificación del módulo (0-100)")
 
+
+class CargoAdicionalItemSchema(BaseModel):
+    """ISSUE-P-CARGO-MULTIITEM: snapshot de un ítem de cargo adicional en la respuesta de la inscripción."""
+    nombre: str
+    costo: float
+
 class EnrollmentCreate(BaseModel):
     """Schema para crear una nueva inscripción"""
     estudiante_id: PyObjectId = Field(..., description="ID del estudiante a inscribir")
@@ -57,9 +63,8 @@ class EnrollmentResponse(BaseModel):
     cantidad_cuotas: int
     modulos: List[ModuloEstadoSchema] = Field(default_factory=list)
 
-    # ISSUE-P-PRECIO-UNICO
-    cargo_adicional_monto: Optional[float] = None
-    cargo_adicional_concepto: Optional[str] = None
+    # ISSUE-P-CARGO-MULTIITEM: snapshot de la lista de ítems de cargo adicional
+    cargo_adicional_items: List[CargoAdicionalItemSchema] = Field(default_factory=list)
     
     # Descuentos
     descuento_curso_id: Optional[PyObjectId] = None

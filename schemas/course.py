@@ -26,6 +26,12 @@ class ModuloCreate(BaseModel):
     docente_id: Optional[PyObjectId] = Field(None, description="ID del docente asignado al módulo")
 
 
+class CargoAdicionalItemCreate(BaseModel):
+    """ISSUE-P-CARGO-MULTIITEM: un ítem individual de cargo adicional (nombre + costo)."""
+    nombre: str = Field(..., min_length=1, max_length=200)
+    costo: float = Field(..., ge=0)
+
+
 class CourseCreate(BaseModel):
     """
     Schema para crear un nuevo curso
@@ -43,18 +49,10 @@ class CourseCreate(BaseModel):
     costo_total_interno: float = Field(..., gt=0, description="Costo total (colegiatura) del programa")
     matricula_interno: float = Field(..., ge=0, description="Matrícula institucional del programa")
 
-    # Cargo adicional opcional (gasto complementario al programa, ej. un taller)
-    cargo_adicional_monto: Optional[float] = Field(None, ge=0)
-    cargo_adicional_concepto: Optional[str] = Field(None, max_length=200)
+    # ISSUE-P-CARGO-MULTIITEM: lista de ítems de cargo adicional/complementario
+    # al programa (ej. varios talleres, cada uno con su propio costo).
+    cargo_adicional_items: Optional[List[CargoAdicionalItemCreate]] = Field(default_factory=list)
 
-    @field_validator("cargo_adicional_concepto")
-    @classmethod
-    def validar_concepto_requerido_si_hay_monto(cls, v, info):
-        monto = info.data.get("cargo_adicional_monto")
-        if monto is not None and monto > 0 and not (v and v.strip()):
-            raise ValueError("Debes indicar el concepto del cargo adicional (ej. 'Taller de Excel Avanzado').")
-        return v
-    
     # Estructura de pago y módulos
     cantidad_cuotas: int = Field(..., ge=1)
     modulos: Optional[List[ModuloCreate]] = Field(
@@ -86,8 +84,9 @@ class CourseCreate(BaseModel):
                 "modalidad": "hibrido",
                 "costo_total_interno": 3500.0,
                 "matricula_interno": 600.0,
-                "cargo_adicional_monto": 100.0,
-                "cargo_adicional_concepto": "Taller de Excel Avanzado (complementario)",
+                "cargo_adicional_items": [
+                    {"nombre": "Taller de Excel Avanzado", "costo": 100.0}
+                ],
                 "cantidad_cuotas": 5,
                 "modulos": [{"nombre": "Módulo 1", "costo": 580, "docente_id": "664cbb0a22a3e6181fcd3155"}],
                 "descuento_id": "507f1f77bcf86cd799439077",
@@ -117,8 +116,7 @@ class CourseResponse(BaseModel):
     costo_total_interno: float
     matricula_interno: float
 
-    cargo_adicional_monto: Optional[float] = None
-    cargo_adicional_concepto: Optional[str] = None
+    cargo_adicional_items: List[CargoAdicionalItemCreate] = Field(default_factory=list)
     
     cantidad_cuotas: int
     modulos: List[ModuloCreate] = Field(default_factory=list)
@@ -155,8 +153,9 @@ class CourseResponse(BaseModel):
                 "modalidad": "hibrido",
                 "costo_total_interno": 3500.0,
                 "matricula_interno": 600.0,
-                "cargo_adicional_monto": 100.0,
-                "cargo_adicional_concepto": "Taller de Excel Avanzado (complementario)",
+                "cargo_adicional_items": [
+                    {"nombre": "Taller de Excel Avanzado", "costo": 100.0}
+                ],
                 "cantidad_cuotas": 5,
                 "modulos": [{"nombre": "Módulo 1", "costo": 580}],
                 "descuento_id": "507f1f77bcf86cd799439077",
@@ -187,8 +186,7 @@ class CourseUpdate(BaseModel):
     costo_total_interno: Optional[float] = Field(None, gt=0)
     matricula_interno: Optional[float] = Field(None, ge=0)
 
-    cargo_adicional_monto: Optional[float] = Field(None, ge=0)
-    cargo_adicional_concepto: Optional[str] = Field(None, max_length=200)
+    cargo_adicional_items: Optional[List[CargoAdicionalItemCreate]] = None
     
     cantidad_cuotas: Optional[int] = Field(None, ge=1)
     modulos: Optional[List[ModuloCreate]] = None

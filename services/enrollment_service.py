@@ -13,7 +13,7 @@ Permisos:
 
 from typing import List, Optional
 from datetime import datetime
-from models.enrollment import Enrollment, ModuloEstado
+from models.enrollment import Enrollment, ModuloEstado, CargoAdicionalItemSnapshot
 from models.student import Student
 from models.course import Course
 from models.enums import TipoEstudiante, EstadoInscripcion
@@ -90,10 +90,10 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
         
     colegiatura_final = total_con_descuento_curso - (total_con_descuento_curso * descuento_personal / 100)
 
-    # ISSUE-P-PRECIO-UNICO: cargo adicional/complementario al programa (ej. un
-    # taller incluido). NO recibe descuentos de curso/estudiante -- es un
-    # concepto aparte de la colegiatura, se cobra por el monto íntegro definido.
-    cargo_adicional = course.cargo_adicional_monto or 0.0
+    # ISSUE-P-CARGO-MULTIITEM: suma de todos los ítems de cargo adicional/
+    # complementario al programa (ej. varios talleres incluidos). NINGÚN
+    # ítem recibe descuentos de curso/estudiante -- se cobran íntegros.
+    cargo_adicional = course.get_cargo_adicional_total()
     
     # MATEMÁTICA FINANCIERA:
     total_final = colegiatura_final + costo_matricula + cargo_adicional
@@ -165,10 +165,13 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
         descuento_estudiante_id=descuento_estudiante_id,
         descuento_personalizado=descuento_personal,
 
-        # ISSUE-P-PRECIO-UNICO: snapshot del cargo adicional al momento de
-        # inscribirse (si el curso lo tenía definido en ese momento).
-        cargo_adicional_monto=cargo_adicional if cargo_adicional > 0 else None,
-        cargo_adicional_concepto=course.cargo_adicional_concepto if cargo_adicional > 0 else None,
+        # ISSUE-P-CARGO-MULTIITEM: snapshot de la lista de ítems de cargo
+        # adicional al momento de inscribirse (si el curso los tenía
+        # definidos en ese momento).
+        cargo_adicional_items=[
+            CargoAdicionalItemSnapshot(nombre=item.nombre, costo=item.costo)
+            for item in course.cargo_adicional_items
+        ],
         
         total_a_pagar=round(total_final, 2),
         saldo_pendiente=round(total_final, 2),
@@ -277,10 +280,10 @@ async def update_enrollment_descuento(
     
     total_con_descuento_curso = enrollment.costo_total - (enrollment.costo_total * enrollment.descuento_curso_aplicado / 100)
     colegiatura_final = total_con_descuento_curso - (total_con_descuento_curso * descuento_personalizado / 100)
-    # ISSUE-P-PRECIO-UNICO: el cargo adicional (si esta inscripción lo tiene
-    # como snapshot) se mantiene fuera del recálculo por descuento -- no
-    # recibe descuentos de curso/estudiante, se preserva íntegro.
-    total_final = colegiatura_final + enrollment.costo_matricula + (enrollment.cargo_adicional_monto or 0.0)
+    # ISSUE-P-CARGO-MULTIITEM: el cargo adicional (snapshot de ítems de esta
+    # inscripción) se mantiene fuera del recálculo por descuento -- ningún
+    # ítem recibe descuentos de curso/estudiante, se preserva íntegro.
+    total_final = colegiatura_final + enrollment.costo_matricula + enrollment.get_cargo_adicional_total()
 
     # Redistribuir el costo de cada módulo con la misma proporción que tenía
     # el curso original (mismo patrón que create_enrollment), preservando
