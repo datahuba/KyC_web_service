@@ -80,12 +80,22 @@ async def get_user_by_username_excluding_id(username: str, user_id: PydanticObje
 
 
 async def create_user(user_in: UserCreate) -> User:
-    """Crear nuevo usuario (hasheo automático)"""
+    """
+    Crear nuevo usuario (hasheo automático).
+
+    GAP-1 (audio 2026-07-08): si no se especifica `password` pero sí `carnet`,
+    se genera la contraseña inicial con la convención institucional
+    'Uagrm.<CI>' (ej. CI 1234567 -> 'Uagrm.1234567'). El schema `UserCreate`
+    ya garantiza que al menos uno de los dos esté presente.
+    """
     from core.security import get_password_hash
-    
+
     user_data = user_in.model_dump()
-    user_data["password"] = get_password_hash(user_data["password"])
-    
+    password_plano = user_data.get("password")
+    if not password_plano:
+        password_plano = f"Uagrm.{user_data['carnet']}"
+    user_data["password"] = get_password_hash(password_plano)
+
     user = User(**user_data)
     await user.insert()
     return user

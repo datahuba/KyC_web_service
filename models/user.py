@@ -29,6 +29,16 @@ class User(MongoBaseModel):
     activo: bool = Field(default=True, description="Si el usuario puede acceder al sistema")
     ultimo_acceso: Optional[datetime] = Field(None, description="Fecha del último login exitoso")
 
+    # GAP-1 (audio 2026-07-08): Carnet de Identidad del personal (docentes/staff).
+    # Si se completa al crear el usuario y no se especifica contraseña, se genera
+    # automáticamente como 'Uagrm.<CI>' (convención institucional confirmada por
+    # el usuario). Opcional y sin índice único: no reemplaza al username.
+    carnet: Optional[str] = Field(
+        None,
+        max_length=20,
+        description="Carnet de Identidad (CI) del personal. Si se completa y no se especifica contraseña al crear, se genera automáticamente como 'Uagrm.<CI>'."
+    )
+
     # ISSUE-R-ROLES / ISSUE-R-PERFIL-GENERICO: nombre por función/programa (no por
     # persona) para roles rotativos. Obligatorio para ENCARGADO_CURSO, COORDINADOR
     # y COBRANZA (perfiles institucionales que rotan de responsable con frecuencia).
