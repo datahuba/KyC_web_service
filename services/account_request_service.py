@@ -132,7 +132,7 @@ async def approve_account_request(request_id: PydanticObjectId, admin_username: 
 
     student = Student(
         registro=registro_final,
-        password=get_password_hash(solicitud.carnet),  # contraseña inicial = carnet
+        password=get_password_hash(f"Uagrm.{solicitud.carnet}"),  # ISSUE-Q-PASSWORD-UNIFICADA: contraseña inicial = 'Uagrm.<CI>'
         nombre=solicitud.nombre,
         email=solicitud.email,
         carnet=solicitud.carnet,

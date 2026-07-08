@@ -140,10 +140,14 @@ async def create_student(student_in: StudentCreate) -> Student:
             raise ValueError("El curso seleccionado está inactivo")
 
     # 3. Lógica Inteligente de Contraseña
+    # ISSUE-Q-PASSWORD-UNIFICADA (2026-07-08): la contraseña inicial de
+    # estudiantes ahora usa la misma convención institucional 'Uagrm.<CI>'
+    # que ya se usaba para docentes/staff (GAP-1), unificando el criterio en
+    # toda la plataforma. Antes era el carnet crudo sin prefijo.
     if password_input:
         student_data["password"] = get_password_hash(password_input)
     else:
-        student_data["password"] = get_password_hash(student_data["carnet"])
+        student_data["password"] = get_password_hash(f"Uagrm.{student_data['carnet']}")
         
     # 4. Persistir Estudiante
     student = Student(**student_data)
@@ -260,37 +264,53 @@ def _clean_text(value) -> Optional[str]:
     return s if s else None
 
 
-def _clean_carnet(value) -> Optional[str]:
+def _split_carnet(value) -> tuple[Optional[str], Optional[str]]:
     """
-    Limpia un carnet de identidad, quedándose SOLO con los números antes del
-    complemento (ej. '2726683 - 1J' -> '2726683', '1313665-1D' -> '1313665').
-    El complemento (extensión de expedición del CI, ej. '1D'/'1J'/'1O') se
-    descarta aquí porque el modelo ya tiene un campo separado `extension`
-    para el complemento de LUGAR de expedición (SC/LPZ/CBBA, etc.) -- no es
-    lo mismo, y mezclar ambos duplicaría/confundiría el dato. Además, sin
-    esta limpieza, un mismo estudiante con y sin el complemento en distintos
-    archivos no se detectaría como duplicado.
+    Separa un carnet de identidad en (numero_limpio, complemento).
+
+    Ej: '2726683 - 1J' -> ('2726683', '1J'), '1313665-1D' -> ('1313665', '1D'),
+    '2969698' -> ('2969698', None).
+
+    El complemento (ej. '1D'/'1J'/'1O') es un dato oficial DISTINTO de
+    `extension` (que es el lugar de expedición del carnet, ej. 'SC'/'LPZ') --
+    se guarda aparte en `Student.complemento_carnet` en vez de descartarse,
+    y el número limpio (sin complemento) es el que se usa para las
+    validaciones de unicidad/duplicados entre archivos y con la BD.
     """
     cleaned = _clean_text(value)
     if not cleaned:
-        return None
-    # Cortar en el primer guion (con o sin espacios alrededor) y quedarse
-    # solo con la parte numérica inicial.
-    solo_numeros = re.split(r"\s*-\s*", cleaned)[0].strip()
-    return solo_numeros if solo_numeros else None
+        return None, None
+    partes = re.split(r"\s*-\s*", cleaned, maxsplit=1)
+    numero = partes[0].strip() if partes and partes[0].strip() else None
+    complemento = partes[1].strip() if len(partes) > 1 and partes[1].strip() else None
+    return numero, complemento
+
+
+def _clean_carnet(value) -> Optional[str]:
+    """Compatibilidad: devuelve solo el número limpio del carnet (sin complemento)."""
+    numero, _ = _split_carnet(value)
+    return numero
 
 
 def _parse_fecha_nacimiento(value):
     """
-    Parsea la fecha de nacimiento de una celda del Excel.
+    Parsea la fecha de nacimiento de una celda del Excel, detectando
+    automáticamente si el formato es DÍA/MES/AÑO o MES/DÍA/AÑO (la etiqueta
+    de la cabecera del archivo NO es confiable: puede decir "mm/dd/aaaa" y
+    en realidad venir en día/mes/año, o viceversa, según quién armó la
+    plantilla).
 
-    IMPORTANTE: aunque la cabecera del formulario diga "(mm/dd/aaaa)", los
-    valores reales que llenan los estudiantes (y que Google Forms/Excel
-    terminan grabando como texto en muchos casos) vienen en formato
-    DÍA/MES/AÑO (ej. '21/4/1979' -> 21 no puede ser un mes, es el día).
-    Por eso se interpreta explícitamente como día/mes/año, ignorando la
-    etiqueta de la cabecera. Si la celda ya es un datetime real (Excel la
-    guardó como fecha nativa), se usa tal cual sin reinterpretar.
+    Heurística de detección (sobre los dos primeros números separados por
+    '/' o '-'):
+    - Si el PRIMER número es > 12, no puede ser un mes -> es DÍA/MES/AÑO.
+    - Si el SEGUNDO número es > 12, no puede ser un mes -> es MES/DÍA/AÑO
+      (el primer número es el mes).
+    - Si ambos son <= 12 (ambiguo, ej. '4/5/1990'), se asume DÍA/MES/AÑO por
+      ser la convención predominante en Bolivia/Latinoamérica.
+
+    Si la celda ya es un datetime real (Excel la guardó como fecha nativa),
+    se usa tal cual sin reinterpretar -- solo se aplica esta heurística a
+    celdas de texto.
 
     Devuelve un datetime o None si no se pudo parsear.
     """
@@ -303,13 +323,110 @@ def _parse_fecha_nacimiento(value):
     s = str(value).strip()
     if not s:
         return None
-    # Formatos día/mes/año más comunes en los archivos reales (con '/' o '-').
-    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%m-%y"):
-        try:
-            return _dt.strptime(s, fmt)
-        except ValueError:
-            continue
-    return None
+
+    m = re.match(r"^(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})$", s)
+    if not m:
+        return None
+
+    primero, segundo, anio_str = m.groups()
+    primero_n, segundo_n = int(primero), int(segundo)
+    anio = int(anio_str)
+    if anio < 100:
+        # Años de 2 dígitos: asumir 1900s si > 30 (heurística estándar), sino 2000s.
+        anio += 1900 if anio > 30 else 2000
+
+    if primero_n > 12:
+        dia, mes = primero_n, segundo_n
+    elif segundo_n > 12:
+        mes, dia = primero_n, segundo_n
+    else:
+        # Ambiguo: convención día/mes/año (Bolivia/Latinoamérica) por defecto.
+        dia, mes = primero_n, segundo_n
+
+    try:
+        return _dt(anio, mes, dia)
+    except ValueError:
+        return None
+
+
+def _detectar_leyenda_colores(sheet) -> dict:
+    """
+    Detecta una leyenda de colores al final de la hoja (ISSUE-Q-LEYENDA-COLORES,
+    2026-07-08): algunos archivos reales marcan filas con un color de fondo
+    para indicar una condición especial (ej. "Descuento Facultad", "Pendiente
+    de pago"), y más abajo en la misma hoja incluyen una leyenda: una celda
+    con ESE MISMO color de fondo junto a una celda de texto que explica qué
+    significa. Esto es importante porque indica a qué estudiantes aplica un
+    descuento y a cuáles no -- información que de otro modo se perdería
+    silenciosamente al importar (el importador no lee colores, solo valores).
+
+    Retorna un dict {color_rgb: texto_significado}. Vacío si no se encuentra
+    ninguna leyenda reconocible.
+    """
+    leyenda = {}
+    try:
+        for row in range(1, sheet.max_row + 1):
+            for col in range(1, min(sheet.max_column, 6) + 1):
+                cell = sheet.cell(row=row, column=col)
+                # Patrón real de una muestra de leyenda: la celda coloreada
+                # está VACÍA (el color es solo la "muestra"/swatch); si la
+                # celda coloreada tiene contenido, es una fila de datos
+                # normal marcada con ese color, no la leyenda.
+                if cell.value is not None:
+                    continue
+                fill = cell.fill
+                if not fill or fill.patternType != "solid":
+                    continue
+                try:
+                    color = fill.fgColor.rgb
+                except Exception:
+                    continue
+                if not isinstance(color, str) or color in ("00000000", "FFFFFFFF", None):
+                    continue
+                if color in leyenda:
+                    continue
+                # Buscar el texto explicativo en otra celda de la misma fila
+                # que NO tenga relleno de color (para no confundir con otra
+                # celda coloreada que sea dato, no leyenda).
+                for otro_col in range(1, sheet.max_column + 1):
+                    if otro_col == col:
+                        continue
+                    otra_cell = sheet.cell(row=row, column=otro_col)
+                    otro_fill = otra_cell.fill
+                    tiene_color = bool(
+                        otro_fill and otro_fill.patternType == "solid"
+                        and isinstance(getattr(otro_fill.fgColor, "rgb", None), str)
+                        and otro_fill.fgColor.rgb not in ("00000000", "FFFFFFFF")
+                    )
+                    if tiene_color:
+                        continue
+                    texto_val = otra_cell.value
+                    if texto_val and isinstance(texto_val, str) and texto_val.strip():
+                        leyenda[color] = texto_val.strip()
+                        break
+    except Exception:
+        # La detección de leyenda es un extra informativo, nunca debe romper
+        # la importación real de estudiantes si falla por algún motivo.
+        return {}
+    return leyenda
+
+
+def _inferir_tipo_estudiante(extension: Optional[str], force_tipo: TipoEstudiante) -> TipoEstudiante:
+    """
+    Determina si un estudiante es INTERNO o EXTERNO usando como referencia el
+    lugar de expedición de su carnet (`extension`, ej. 'SC'/'LPZ'/'CBBA'),
+    ya que hoy no hay forma de verificar la residencia real del estudiante
+    (ISSUE-Q-INTERNO-EXTERNO, 2026-07-08). Se asume INTERNO si el CI fue
+    expedido en Santa Cruz de la Sierra ('SC'), EXTERNO en cualquier otro
+    caso. Es solo informativo desde ISSUE-P-PRECIO-UNICO (el precio del
+    programa ya es el mismo para todos, este dato no afecta ningún monto).
+
+    Si la fila no trae `extension`, se usa `force_tipo` (la selección hecha
+    por el CPD en el modal de importación) como respaldo.
+    """
+    if extension:
+        return TipoEstudiante.INTERNO if extension.strip().upper() == "SC" else TipoEstudiante.EXTERNO
+    return force_tipo
 
 
 def _parse_amount(value) -> float:
@@ -435,7 +552,13 @@ async def import_students_from_excel(
         raise ValueError("No se encontró la columna de 'Nombre' en la fila de cabecera del archivo.")
     if col_carnet == 0:
         raise ValueError("No se encontró la columna de 'CI' o 'Carnet' en la fila de cabecera del archivo.")
-        
+
+    # ISSUE-Q-LEYENDA-COLORES: detectar si el archivo trae una leyenda de
+    # colores (ej. "amarillo = Descuento Facultad") para reportar qué filas
+    # coinciden con cada color -- informativo, NO crea descuentos automáticamente.
+    leyenda_colores = _detectar_leyenda_colores(sheet)
+    marcados_por_color: dict = {}  # {significado_leyenda: [nombres de estudiantes]}
+
     errors = []
     candidates = []
     
@@ -455,11 +578,14 @@ async def import_students_from_excel(
             # Combinar Nombre(s) + Apellido(s) cuando el archivo los trae separados (ej. Google Forms)
             nombre_str = f"{nombres_str} {apellidos_str}".strip() if (col_apellido > 0 and apellidos_str) else nombres_str
 
-            # Carnet limpio: sin sufijo .0 de floats y SIN el complemento tras
-            # el guion (ej. '2726683 - 1J' -> '2726683'), para que el mismo CI
-            # se detecte como duplicado sin importar si el archivo lo trae con
-            # o sin complemento.
-            carnet = _clean_carnet(sheet.cell(row=row_idx, column=col_carnet).value if col_carnet > 0 else None)
+            # Carnet limpio: sin sufijo .0 de floats y con el complemento tras
+            # el guion separado aparte (ej. '2726683 - 1J' -> carnet='2726683',
+            # complemento_carnet='1J'), para que el mismo CI se detecte como
+            # duplicado sin importar si el archivo lo trae con o sin
+            # complemento, sin perder el dato oficial completo.
+            carnet, complemento_carnet = _split_carnet(
+                sheet.cell(row=row_idx, column=col_carnet).value if col_carnet > 0 else None
+            )
             carnet_str = carnet if carnet else ""
 
             if not nombre_str and not carnet_str:
@@ -516,6 +642,25 @@ async def import_students_from_excel(
                 if comp_str and comp_str.lower().startswith("http"):
                     matricula_comprobante_url = comp_str
                     
+            # ISSUE-Q-LEYENDA-COLORES: si esta fila (columna Nombre o Apellido)
+            # tiene el color de fondo de alguna entrada de la leyenda, registrar
+            # a qué significado corresponde (ej. "Descuento Facultad").
+            if leyenda_colores and nombre_str:
+                for col_check in (col_nombre, col_apellido):
+                    if col_check <= 0:
+                        continue
+                    fill_check = sheet.cell(row=row_idx, column=col_check).fill
+                    color_check = None
+                    if fill_check and fill_check.patternType == "solid":
+                        try:
+                            color_check = fill_check.fgColor.rgb
+                        except Exception:
+                            color_check = None
+                    if color_check and color_check in leyenda_colores:
+                        significado = leyenda_colores[color_check]
+                        marcados_por_color.setdefault(significado, []).append(nombre_str)
+                        break
+
             if not nombre:
                 errors.append(f"Fila {row_idx}: El nombre completo es obligatorio.")
                 continue
@@ -555,12 +700,16 @@ async def import_students_from_excel(
                 "nombre": nombre,
                 "email": email,
                 "carnet": carnet,
+                "complemento_carnet": complemento_carnet,
                 "extension": extension,
                 "celular": celular,
                 "domicilio": domicilio,
                 "fecha_nacimiento": fecha_nacimiento,
                 "tipo_sangre": tipo_sangre,
-                "es_estudiante_interno": force_tipo, # ISSUE G
+                # ISSUE-Q-INTERNO-EXTERNO: se infiere por el lugar de expedición
+                # del CI (extension) si el archivo lo trae; si no, se usa la
+                # selección forzada del modal de importación (force_tipo, ISSUE G).
+                "es_estudiante_interno": _inferir_tipo_estudiante(extension, force_tipo),
                 "pagos": pagos_fila, # Montos a migrar (si el archivo trae columnas financieras)
                 "matricula_comprobante_url": matricula_comprobante_url # Link del voucher de matrícula
             })
@@ -614,7 +763,9 @@ async def import_students_from_excel(
         if has_error:
             continue
             
-        hashed_password = get_password_hash(c["carnet"])
+        # ISSUE-Q-PASSWORD-UNIFICADA: contraseña inicial 'Uagrm.<CI>' (misma
+        # convención institucional que docentes/staff, GAP-1).
+        hashed_password = get_password_hash(f"Uagrm.{c['carnet']}")
         
         students_to_insert.append(
             Student(
@@ -623,6 +774,7 @@ async def import_students_from_excel(
                 nombre=c["nombre"],
                 email=c["email"],
                 carnet=c["carnet"],
+                complemento_carnet=c["complemento_carnet"],
                 extension=c["extension"],
                 celular=c["celular"],
                 domicilio=c["domicilio"],
@@ -768,7 +920,11 @@ async def import_students_from_excel(
         "enrolled_count": enrolled_count,
         "migrated_payments_count": migrated_payments_count,
         "matricula_vouchers_count": matricula_vouchers_count,
-        "errors": errors
+        "errors": errors,
+        # ISSUE-Q-LEYENDA-COLORES: informativo -- el CPD debe revisar estos
+        # grupos manualmente y decidir si crea/asigna el descuento correspondiente
+        # (el importador NUNCA crea ni asigna descuentos automáticamente).
+        "marcados_por_color": marcados_por_color
     }
 
 

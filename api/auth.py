@@ -271,7 +271,7 @@ async def login_student(login_data: LoginRequest, request: Request) -> Any:
     
     **Credenciales:**
     - `username`: Número de registro del estudiante
-    - `password`: Contraseña (inicialmente = carnet)
+    - `password`: Contraseña (inicialmente = 'Uagrm.<CI>')
     
     **Retorna:** JWT Token de acceso
     """
