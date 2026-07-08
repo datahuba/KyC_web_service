@@ -77,35 +77,47 @@ class Course(MongoBaseModel):
     )
     
     # ========================================================================
-    # PRECIOS PARA ESTUDIANTES INTERNOS
+    # PRECIO ÚNICO DEL PROGRAMA
     # ========================================================================
-    
+    # DECISIÓN DE NEGOCIO (2026-07-08): el precio del programa es EL MISMO
+    # para todos los estudiantes, sin importar si son de Santa Cruz o de
+    # otro lugar (Student.es_estudiante_interno sigue existiendo solo como
+    # dato informativo de procedencia, ya NO determina el precio a pagar).
+    # Los campos que antes se llamaban "costo_total_externo"/"matricula_externo"
+    # se retiraron de este propósito; ver cargo_adicional_monto/concepto abajo
+    # para el nuevo significado (gasto complementario opcional al programa).
+
     costo_total_interno: float = Field(
         ...,
         gt=0,
-        description="Costo total del curso para estudiantes de la universidad"
+        description="Costo total (colegiatura) del programa. Precio único, aplica a todos los estudiantes por igual."
     )
     
     matricula_interno: float = Field(
         ...,
         ge=0,
-        description="Costo de matrícula inicial para estudiantes internos"
+        description="Costo de matrícula institucional. Precio único, aplica a todos los estudiantes por igual."
     )
-    
+
     # ========================================================================
-    # PRECIOS PARA ESTUDIANTES EXTERNOS
+    # CARGO ADICIONAL (opcional): gasto complementario al programa
     # ========================================================================
-    
-    costo_total_externo: float = Field(
-        0,
+    # Ej: "Taller de Excel Avanzado" con un costo extra de 100 Bs, necesario
+    # o recomendado además de la colegiatura del programa. Si se define,
+    # se suma al total a pagar de TODOS los estudiantes inscritos a este
+    # curso (no es opcional por estudiante individual; es una condición del
+    # programa en su conjunto). Si el usuario quiere que sea opcional por
+    # estudiante, deberá gestionarse manualmente por ahora (fuera de alcance).
+    cargo_adicional_monto: Optional[float] = Field(
+        None,
         ge=0,
-        description="Costo total del curso para estudiantes externos (público general)"
+        description="Monto del cargo adicional/complementario al programa (ej. un taller incluido). None = sin cargo adicional."
     )
-    
-    matricula_externo: float = Field(
-        ...,
-        ge=0,
-        description="Costo de matrícula inicial para estudiantes externos"
+
+    cargo_adicional_concepto: Optional[str] = Field(
+        None,
+        max_length=200,
+        description="Concepto/descripción del cargo adicional (ej. 'Taller de Excel Avanzado'). Obligatorio si cargo_adicional_monto está definido."
     )
     
     # ========================================================================
@@ -185,23 +197,24 @@ class Course(MongoBaseModel):
     # MÉTODOS HELPER
     # ========================================================================
     
-    def get_costo_total(self, es_interno: bool) -> float:
+    def get_costo_total(self) -> float:
         """
-        Obtiene el costo total según el tipo de estudiante
+        Obtiene el costo total (colegiatura) del programa. Precio único
+        para todos los estudiantes (ISSUE-P-PRECIO-UNICO, 2026-07-08).
         """
-        return self.costo_total_interno if es_interno else self.costo_total_externo
+        return self.costo_total_interno
     
-    def calcular_monto_cuota(self, es_interno: bool) -> float:
+    def calcular_monto_cuota(self) -> float:
         """
-        Calcula el monto de cada cuota según el tipo de estudiante
+        Calcula el monto de cada cuota. Precio único para todos los estudiantes.
         """
-        costo_total = self.get_costo_total(es_interno)
-        matricula = self.get_matricula(es_interno)
+        costo_total = self.get_costo_total()
+        matricula = self.get_matricula()
         return (costo_total - matricula) / self.cantidad_cuotas
     
-    def get_matricula(self, es_interno: bool) -> float:
-        """Obtiene el costo de matrícula según el tipo de estudiante"""
-        return self.matricula_interno if es_interno else self.matricula_externo
+    def get_matricula(self) -> float:
+        """Obtiene el costo de matrícula. Precio único para todos los estudiantes."""
+        return self.matricula_interno
     
     class Settings:
         name = "courses"
@@ -226,8 +239,8 @@ class Course(MongoBaseModel):
                 "modalidad": "híbrido",
                 "costo_total_interno": 3000.0,
                 "matricula_interno": 500.0,
-                "costo_total_externo": 5000.0,
-                "matricula_externo": 500.0,
+                "cargo_adicional_monto": 100.0,
+                "cargo_adicional_concepto": "Taller de Excel Avanzado (complementario)",
                 "cantidad_cuotas": 5,
                 "modulos": [
                     {"nombre": "Módulo 1", "costo": 500.0, "docente_id": "60a7f1c4e1f4b8c9d4b8e5c1"}

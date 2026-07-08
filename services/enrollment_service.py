@@ -53,12 +53,14 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
             f"El estudiante ya está inscrito en este curso (Inscripción ID: {existing.id})"
         )
     
-    # 3. Determinar tipo de estudiante (usar el del Student)
-    es_interno = student.es_estudiante_interno == TipoEstudiante.INTERNO
+    # 3. ISSUE-P-PRECIO-UNICO (2026-07-08): el precio del programa es el
+    # mismo para todos los estudiantes, sin importar procedencia/tipo. El
+    # campo Student.es_estudiante_interno se conserva solo como dato
+    # informativo (de dónde es el estudiante), ya no determina el precio.
     
-    # 4. Obtener precios del curso
-    costo_total = course.get_costo_total(es_interno) 
-    costo_matricula = course.get_matricula(es_interno) 
+    # 4. Obtener precios del curso (precio único)
+    costo_total = course.get_costo_total()
+    costo_matricula = course.get_matricula()
     
     # 5. Aplicar descuento del curso 
     descuento_curso = 0.0
@@ -87,9 +89,14 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
         descuento_personal = enrollment_in.descuento_personalizado
         
     colegiatura_final = total_con_descuento_curso - (total_con_descuento_curso * descuento_personal / 100)
+
+    # ISSUE-P-PRECIO-UNICO: cargo adicional/complementario al programa (ej. un
+    # taller incluido). NO recibe descuentos de curso/estudiante -- es un
+    # concepto aparte de la colegiatura, se cobra por el monto íntegro definido.
+    cargo_adicional = course.cargo_adicional_monto or 0.0
     
-    # MATEMÁTICA FINANCIERA CORREGIDA:
-    total_final = colegiatura_final + costo_matricula
+    # MATEMÁTICA FINANCIERA:
+    total_final = colegiatura_final + costo_matricula + cargo_adicional
 
     # ISSUE-P-RECALCULO-NOTA: snapshot de la nota mínima exigida por el descuento personal
     # (solo si viene de un Discount vinculado con condición académica; descuento_personalizado libre no aplica)
@@ -157,6 +164,11 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
         descuento_curso_aplicado=descuento_curso,
         descuento_estudiante_id=descuento_estudiante_id,
         descuento_personalizado=descuento_personal,
+
+        # ISSUE-P-PRECIO-UNICO: snapshot del cargo adicional al momento de
+        # inscribirse (si el curso lo tenía definido en ese momento).
+        cargo_adicional_monto=cargo_adicional if cargo_adicional > 0 else None,
+        cargo_adicional_concepto=course.cargo_adicional_concepto if cargo_adicional > 0 else None,
         
         total_a_pagar=round(total_final, 2),
         saldo_pendiente=round(total_final, 2),
@@ -265,7 +277,10 @@ async def update_enrollment_descuento(
     
     total_con_descuento_curso = enrollment.costo_total - (enrollment.costo_total * enrollment.descuento_curso_aplicado / 100)
     colegiatura_final = total_con_descuento_curso - (total_con_descuento_curso * descuento_personalizado / 100)
-    total_final = colegiatura_final + enrollment.costo_matricula
+    # ISSUE-P-PRECIO-UNICO: el cargo adicional (si esta inscripción lo tiene
+    # como snapshot) se mantiene fuera del recálculo por descuento -- no
+    # recibe descuentos de curso/estudiante, se preserva íntegro.
+    total_final = colegiatura_final + enrollment.costo_matricula + (enrollment.cargo_adicional_monto or 0.0)
 
     # Redistribuir el costo de cada módulo con la misma proporción que tenía
     # el curso original (mismo patrón que create_enrollment), preservando

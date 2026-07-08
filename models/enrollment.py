@@ -72,6 +72,12 @@ class Enrollment(MongoBaseModel):
     costo_matricula: float = Field(..., ge=0, description="Costo de matrícula")
     amount_cuotas: Optional[int] = None # Campo deprecado, mantenido para compatibilidad
     cantidad_cuotas: int = Field(..., ge=1, description="Cantidad de cuotas para pagar")
+
+    # ISSUE-P-PRECIO-UNICO (2026-07-08): snapshot del cargo adicional/complementario
+    # al programa (ej. un taller incluido), tomado del Course al momento de
+    # inscribirse. No recibe descuentos; se suma íntegro a total_a_pagar.
+    cargo_adicional_monto: Optional[float] = Field(default=None, ge=0, description="Monto del cargo adicional/complementario, si el curso lo tenía definido al inscribirse.")
+    cargo_adicional_concepto: Optional[str] = Field(default=None, description="Concepto del cargo adicional (ej. 'Taller de Excel Avanzado').")
     
     modulos: List[ModuloEstado] = Field(
         default_factory=list,

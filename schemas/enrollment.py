@@ -56,6 +56,10 @@ class EnrollmentResponse(BaseModel):
     costo_matricula: float
     cantidad_cuotas: int
     modulos: List[ModuloEstadoSchema] = Field(default_factory=list)
+
+    # ISSUE-P-PRECIO-UNICO
+    cargo_adicional_monto: Optional[float] = None
+    cargo_adicional_concepto: Optional[str] = None
     
     # Descuentos
     descuento_curso_id: Optional[PyObjectId] = None
