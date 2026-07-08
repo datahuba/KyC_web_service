@@ -584,6 +584,16 @@ async def revocar_matricula_exenta_endpoint(
 async def congelar_enrollment_endpoint(
     *,
     id: PydanticObjectId,
+    tasa_pagada: bool = Query(
+        False,
+        description=(
+            "Si la tasa de congelamiento ya fue cobrada. Por defecto False: "
+            "el congelamiento NO asume que el estudiante ya pagó (AUDITORÍA #6, "
+            "antes se marcaba tasa_congelamiento_pagada=True sin ningún Payment "
+            "real asociado). Cobranza debe registrar el cobro real y CPD puede "
+            "pasar tasa_pagada=true solo si ese cobro ya ocurrió."
+        )
+    ),
     current_user: User = Depends(require_cpd)  # <-- CPD, ADMIN, SUPERADMIN
 ) -> Any:
     """
@@ -595,7 +605,7 @@ async def congelar_enrollment_endpoint(
     from services import congelado_service
     try:
         enrollment = await congelado_service.congelar_inscripcion(
-            enrollment_id=id, registrado_por=current_user.username
+            enrollment_id=id, registrado_por=current_user.username, tasa_pagada=tasa_pagada
         )
         return await enrollment_service.enrich_enrollment_dates(enrollment)
     except ValueError as e:

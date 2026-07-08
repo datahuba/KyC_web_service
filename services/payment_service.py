@@ -17,6 +17,7 @@ from models.enums import EstadoPago
 from schemas.payment import PaymentCreate
 from beanie import PydanticObjectId
 from beanie.operators import In, Or
+from beanie.exceptions import RevisionIdWasChanged
 from services import enrollment_service
 
 # ISSUE-P-REVERSION: ventana en la que el banco puede revertir una transferencia ya aprobada
@@ -215,6 +216,19 @@ async def create_payment(
     cuota_final = payment_in.numero_cuota if payment_in.numero_cuota else next_payment["numero_cuota"]
     monto_real = payment_in.monto_comprobante if payment_in.monto_comprobante else payment_in.cantidad_pago
 
+    # AUDITORÍA (ALTO #4): sin este control, un pago (aún PENDIENTE, antes de
+    # que cobranza lo apruebe) podía exceder por completo el saldo pendiente
+    # real de la inscripción. actualizar_saldo_enrollment clampa
+    # saldo_pendiente a 0 al aprobar, pero total_pagado sigue creciendo sin
+    # límite -- "Pagado > Total" quedaba permanente sin ningún mecanismo de
+    # crédito/devolución. Se permite un pequeño margen (1 Bs) para redondeos
+    # legítimos del estudiante.
+    if monto_real > enrollment.saldo_pendiente + 1.0:
+        raise ValueError(
+            f"El monto reportado (Bs. {monto_real}) supera el saldo pendiente de la inscripción "
+            f"(Bs. {enrollment.saldo_pendiente}). Verifica el monto antes de registrar el pago."
+        )
+
     payment = Payment(
         inscripcion_id=payment_in.inscripcion_id,
         estudiante_id=enrollment.estudiante_id,
@@ -292,9 +306,14 @@ async def get_all_payments(
     q: Optional[str] = None,
     estado: Optional[str] = None,
     curso_id: Optional[PydanticObjectId] = None,
-    estudiante_id: Optional[PydanticObjectId] = None
+    estudiante_id: Optional[PydanticObjectId] = None,
+    cursos_permitidos: Optional[List[PydanticObjectId]] = None
 ) -> tuple[List[Payment], int]:
-    
+    """
+    cursos_permitidos (ISSUE-P-SEGMENTACION): si se provee (no None), restringe
+    los resultados únicamente a pagos de esos cursos. Reutiliza el mismo patrón
+    de segmentación que ENCARGADO_CURSO en enrollment_service.get_all_enrollments.
+    """
     query_dict = {}
     
     if estado and estado != "Todos los estados":
@@ -307,6 +326,9 @@ async def get_all_payments(
         enrollments = await Enrollment.find(Enrollment.curso_id == curso_id).to_list()
         enrollment_ids = [e.id for e in enrollments]
         query_dict["inscripcion_id"] = {"$in": enrollment_ids}
+
+    if cursos_permitidos is not None:
+        query_dict["curso_id"] = {"$in": cursos_permitidos}
         
     if q:
         regex_pattern = {"$regex": q, "$options": "i"}
@@ -337,7 +359,15 @@ async def get_all_payments(
     return payments, total_count
 
 
-async def get_payments_pendientes() -> List[Payment]:
+async def get_payments_pendientes(
+    cursos_permitidos: Optional[List[PydanticObjectId]] = None
+) -> List[Payment]:
+    """cursos_permitidos (ISSUE-P-SEGMENTACION): ver nota en get_all_payments."""
+    if cursos_permitidos is not None:
+        return await Payment.find(
+            Payment.estado_pago == EstadoPago.PENDIENTE,
+            In(Payment.curso_id, cursos_permitidos)
+        ).to_list()
     return await Payment.find(Payment.estado_pago == EstadoPago.PENDIENTE).to_list()
 
 
@@ -355,7 +385,16 @@ async def aprobar_pago(
         )
     
     payment.aprobar_pago(admin_username)
-    await payment.save()
+    try:
+        await payment.save()
+    except RevisionIdWasChanged:
+        # AUDITORÍA (CRÍTICO #2): otra request (aprobar/rechazar) ya modificó
+        # este pago entre la lectura y este guardado. Se rechaza limpio en
+        # vez de sobrescribir a ciegas (evita duplicar/inflar el saldo).
+        raise ValueError(
+            "Este pago ya fue modificado por otra acción (posible aprobación/rechazo simultáneo). "
+            "Actualiza la página e intenta de nuevo."
+        )
     
     await enrollment_service.actualizar_saldo_enrollment(
         enrollment_id=payment.inscripcion_id,
@@ -406,7 +445,14 @@ async def rechazar_pago(
         )
     
     payment.rechazar_pago(admin_username, motivo)
-    await payment.save()
+    try:
+        await payment.save()
+    except RevisionIdWasChanged:
+        # AUDITORÍA (CRÍTICO #2): ver nota equivalente en aprobar_pago.
+        raise ValueError(
+            "Este pago ya fue modificado por otra acción (posible aprobación/rechazo simultáneo). "
+            "Actualiza la página e intenta de nuevo."
+        )
 
     await _registrar_auditoria_financiera(
         accion="RECHAZAR PAGO",
@@ -456,7 +502,13 @@ async def anular_pago(
         )
     
     payment.anular_pago(admin_username, motivo)
-    await payment.save()
+    try:
+        await payment.save()
+    except RevisionIdWasChanged:
+        # AUDITORÍA (CRÍTICO #2): ver nota equivalente en aprobar_pago.
+        raise ValueError(
+            "Este pago ya fue modificado por otra acción simultánea. Actualiza la página e intenta de nuevo."
+        )
 
     await enrollment_service.actualizar_saldo_enrollment(
         enrollment_id=payment.inscripcion_id,
@@ -536,6 +588,15 @@ async def create_caja_directo_payment(
 
     concepto_final = concepto if concepto else next_payment["concepto"]
     cuota_final = numero_cuota if numero_cuota else next_payment["numero_cuota"]
+
+    # AUDITORÍA (ALTO #4): mismo control de sobrepago que create_payment. El
+    # cobro en Caja se crea directamente APROBADO, así que aquí el riesgo es
+    # mayor (no hay paso de revisión posterior que lo detecte).
+    if cantidad_pago > enrollment.saldo_pendiente + 1.0:
+        raise ValueError(
+            f"El monto a cobrar (Bs. {cantidad_pago}) supera el saldo pendiente de la inscripción "
+            f"(Bs. {enrollment.saldo_pendiente}). Verifica el monto antes de registrar el cobro."
+        )
 
     # Crear pago ya APROBADO naciendo en Caja
     payment = Payment(

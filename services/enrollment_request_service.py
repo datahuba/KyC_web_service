@@ -58,7 +58,13 @@ async def create_enrollment_request(
         mensaje=(data.mensaje.strip() if data.mensaje else None),
         estado="pendiente"
     )
-    await solicitud.insert()
+    try:
+        await solicitud.insert()
+    except Exception as e:
+        # AUDITORÍA (MEDIO #10): ver nota equivalente en passive_request_service.py.
+        if "duplicate key" in str(e).lower() or "E11000" in str(e):
+            raise ValueError("Ya tienes una solicitud pendiente para este curso")
+        raise
 
     try:
         from beanie.operators import Or

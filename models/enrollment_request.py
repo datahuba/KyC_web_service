@@ -45,8 +45,19 @@ class EnrollmentRequest(MongoBaseModel):
 
     class Settings:
         name = "enrollment_requests"
+        # AUDITORÍA (MEDIO): use_revision protege contra pisadas de la MISMA
+        # solicitud (aprobar/rechazar simultáneo), igual que en Payment.
+        use_revision = True
         indexes = [
             [("estado", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)],
             "estudiante_id",
             "curso_id",
+            # AUDITORÍA (MEDIO #10): índice único PARCIAL (solo mientras
+            # estado='pendiente') -- ver misma nota en passive_request.py.
+            pymongo.IndexModel(
+                [("estudiante_id", pymongo.ASCENDING), ("curso_id", pymongo.ASCENDING)],
+                unique=True,
+                partialFilterExpression={"estado": "pendiente"},
+                name="uniq_pendiente_por_estudiante_curso"
+            ),
         ]

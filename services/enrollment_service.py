@@ -34,7 +34,14 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
     course = await Course.get(enrollment_in.curso_id)
     if not course:
         raise ValueError(f"Curso {enrollment_in.curso_id} no encontrado")
-    
+
+    # AUDITORÍA (MEDIO #7): create_enrollment_request (solicitud del propio
+    # estudiante) sí valida curso.activo, pero esta vía directa (CPD/Encargado
+    # de Curso) no lo hacía -- dos rutas de entrada con validación asimétrica,
+    # permitiendo inscribir gente en cursos ya desactivados/cerrados.
+    if not course.activo:
+        raise ValueError("Este curso no está activo y no acepta nuevas inscripciones")
+
     # 2. Validar que no esté ya inscrito
     existing = await Enrollment.find_one(
         Enrollment.estudiante_id == enrollment_in.estudiante_id,
@@ -242,6 +249,16 @@ async def update_enrollment_descuento(
     descuento_personalizado: float,
     admin_username: str
 ) -> Enrollment:
+    """
+    AUDITORÍA (CRÍTICO #3): antes solo recalculaba total_a_pagar/saldo_pendiente
+    a nivel global, sin tocar el costo de cada módulo individual ni disparar
+    actualizar_saldo_enrollment -- el kardex por módulo (usado para el
+    prorrateo en cascada) quedaba desincronizado del nuevo total. Ahora se
+    redistribuye el costo por módulo con la misma proporción que
+    create_enrollment, y se llama a la cascada real al final para que
+    monto_pagado/estado por módulo y el estado de la inscripción queden
+    consistentes con los pagos históricos ya aprobados.
+    """
     enrollment = await Enrollment.get(enrollment_id)
     if not enrollment:
         raise ValueError(f"Inscripción {enrollment_id} no encontrada")
@@ -249,15 +266,37 @@ async def update_enrollment_descuento(
     total_con_descuento_curso = enrollment.costo_total - (enrollment.costo_total * enrollment.descuento_curso_aplicado / 100)
     colegiatura_final = total_con_descuento_curso - (total_con_descuento_curso * descuento_personalizado / 100)
     total_final = colegiatura_final + enrollment.costo_matricula
-    nuevo_saldo = total_final - enrollment.total_pagado
-    
+
+    # Redistribuir el costo de cada módulo con la misma proporción que tenía
+    # el curso original (mismo patrón que create_enrollment), preservando
+    # monto_pagado/nota/estado_academico de cada ModuloEstado.
+    if enrollment.modulos:
+        suma_costo_modulos_actual = sum(m.costo for m in enrollment.modulos)
+        total_asignado = 0.0
+        for i, mod in enumerate(enrollment.modulos):
+            es_ultimo = i == len(enrollment.modulos) - 1
+            if es_ultimo:
+                mod.costo = max(0.0, round(colegiatura_final - total_asignado, 2))
+            else:
+                if suma_costo_modulos_actual > 0:
+                    proporcion = mod.costo / suma_costo_modulos_actual
+                else:
+                    proporcion = 1 / len(enrollment.modulos)
+                mod.costo = round(proporcion * colegiatura_final, 2)
+                total_asignado += mod.costo
+
     enrollment.descuento_personalizado = descuento_personalizado
     enrollment.total_a_pagar = round(total_final, 2)
-    enrollment.saldo_pendiente = round(max(0.0, nuevo_saldo), 2)
+    # Valor provisional para no violar el validador de saldo_pendiente antes
+    # del primer save(); actualizar_saldo_enrollment recompone el definitivo
+    # justo debajo a partir de los pagos históricos reales.
+    enrollment.saldo_pendiente = round(max(0.0, total_final - enrollment.total_pagado), 2)
     enrollment.updated_at = datetime.utcnow()
     
     await enrollment.save()
-    return enrollment
+
+    await actualizar_saldo_enrollment(enrollment_id)
+    return await Enrollment.get(enrollment_id)
 
 
 async def cambiar_estado_enrollment(
@@ -265,10 +304,34 @@ async def cambiar_estado_enrollment(
     nuevo_estado: EstadoInscripcion,
     admin_username: str
 ) -> Enrollment:
+    """
+    AUDITORÍA (CRÍTICO #5): este endpoint genérico (PATCH /enrollments/{id})
+    permitía fijar estado=SUSPENDIDO directamente, sin pasar por
+    PassiveRequest ni congelado_service -- sin motivo_suspension, sin
+    notificar al estudiante, sin cobrar la tasa de congelamiento. También
+    permitía "sacar" una inscripción de SUSPENDIDO sin limpiar
+    motivo_suspension/fecha_congelamiento/multa_reincorporacion_pendiente,
+    dejando esos campos inconsistentes con el nuevo estado. Ambos casos
+    ahora se bloquean explícitamente; deben usarse los endpoints dedicados
+    (/passive-requests/, /enrollments/{id}/congelar,
+    /enrollments/{id}/reactivar-congelado).
+    """
     enrollment = await Enrollment.get(enrollment_id)
     if not enrollment:
         raise ValueError(f"Inscripción {enrollment_id} no encontrada")
-    
+
+    if nuevo_estado == EstadoInscripcion.SUSPENDIDO:
+        raise ValueError(
+            "No se puede suspender una inscripción directamente. Usa el flujo de "
+            "Solicitud de Pasivo o el de Congelamiento, que registran motivo y notifican al estudiante."
+        )
+
+    if enrollment.estado == EstadoInscripcion.SUSPENDIDO:
+        raise ValueError(
+            "Esta inscripción está suspendida (pasivo/congelado/abandono). "
+            "Usa el endpoint de reactivación correspondiente en vez de cambiar el estado directamente."
+        )
+
     enrollment.estado = nuevo_estado
     enrollment.updated_at = datetime.utcnow()
     

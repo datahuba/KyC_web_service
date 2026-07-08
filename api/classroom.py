@@ -52,6 +52,23 @@ def _require_teacher(current_user: Union[User, Student]) -> User:
     return current_user
 
 
+def _require_owner_teacher(classroom, current_user: User) -> None:
+    """
+    AUDITORÍA (ALTO): require_docente solo valida el ROL, nunca si el
+    classroom pertenece al docente autenticado. Sin este check, cualquier
+    DOCENTE podía subir material, crear/editar/eliminar actividades y
+    calificar entregas de una clase de OTRO docente. Admin/Superadmin
+    siguen sin restricción (ya tienen acceso total por diseño).
+    """
+    if current_user.rol in ("admin", "superadmin"):
+        return
+    if classroom.teacher_user_id != current_user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="No eres el docente asignado a esta clase."
+        )
+
+
 def _require_student(current_user: Union[User, Student]) -> Student:
     """Solo Student puede realizar acciones de estudiante."""
     if not isinstance(current_user, Student):
@@ -185,6 +202,9 @@ async def get_enrolled_students(
     # Solo docentes pueden ver la lista de estudiantes
     if not isinstance(current_user, User):
         raise HTTPException(status_code=403, detail="Solo docentes pueden ver la lista de estudiantes.")
+    # AUDITORÍA (MEDIO): mismo problema de ownership que el resto de endpoints
+    # de classroom -- un docente cualquiera podía ver el roster de una clase ajena.
+    _require_owner_teacher(classroom, current_user)
 
     students = await classroom_service.get_enrolled_students(classroom_id)
     return [ClassroomStudentResponse.from_doc(s) for s in students]
@@ -226,6 +246,7 @@ async def upload_material(
     classroom = await classroom_service.get_classroom(classroom_id)
     if not classroom:
         raise HTTPException(status_code=404, detail="Classroom no encontrado.")
+    _require_owner_teacher(classroom, current_user)
 
     material = await classroom_material_service.upload_material(
         classroom_id=classroom_id,
@@ -246,6 +267,11 @@ async def delete_material(
     current_user: User = Depends(require_docente),
 ) -> Any:
     """Elimina material de Cloudinary y lo marca inactivo en MongoDB."""
+    classroom = await classroom_service.get_classroom(classroom_id)
+    if not classroom:
+        raise HTTPException(status_code=404, detail="Classroom no encontrado.")
+    _require_owner_teacher(classroom, current_user)
+
     material = await classroom_material_service.get_material(material_id)
     if not material or material.classroom_id != classroom_id:
         raise HTTPException(status_code=404, detail="Material no encontrado.")
@@ -287,6 +313,7 @@ async def create_assignment(
     classroom = await classroom_service.get_classroom(classroom_id)
     if not classroom:
         raise HTTPException(status_code=404, detail="Classroom no encontrado.")
+    _require_owner_teacher(classroom, current_user)
 
     assignment = await assignment_service.create_assignment(data, classroom_id, current_user.id)
     return AssignmentResponse.from_doc(assignment)
@@ -303,6 +330,11 @@ async def update_assignment(
     data: AssignmentUpdate,
     current_user: User = Depends(require_docente),
 ) -> Any:
+    classroom = await classroom_service.get_classroom(classroom_id)
+    if not classroom:
+        raise HTTPException(status_code=404, detail="Classroom no encontrado.")
+    _require_owner_teacher(classroom, current_user)
+
     assignment = await assignment_service.get_assignment(assignment_id)
     if not assignment or assignment.classroom_id != classroom_id:
         raise HTTPException(status_code=404, detail="Actividad no encontrada.")
@@ -320,6 +352,11 @@ async def delete_assignment(
     assignment_id: PydanticObjectId,
     current_user: User = Depends(require_docente),
 ) -> Any:
+    classroom = await classroom_service.get_classroom(classroom_id)
+    if not classroom:
+        raise HTTPException(status_code=404, detail="Classroom no encontrado.")
+    _require_owner_teacher(classroom, current_user)
+
     assignment = await assignment_service.get_assignment(assignment_id)
     if not assignment or assignment.classroom_id != classroom_id:
         raise HTTPException(status_code=404, detail="Actividad no encontrada.")
@@ -381,6 +418,11 @@ async def get_submissions(
     current_user: User = Depends(require_docente),
 ) -> Any:
     """Todas las entregas de una actividad. **Requiere:** Admin."""
+    classroom = await classroom_service.get_classroom(classroom_id)
+    if not classroom:
+        raise HTTPException(status_code=404, detail="Classroom no encontrado.")
+    _require_owner_teacher(classroom, current_user)
+
     assignment = await assignment_service.get_assignment(assignment_id)
     if not assignment or assignment.classroom_id != classroom_id:
         raise HTTPException(status_code=404, detail="Actividad no encontrada.")
@@ -402,6 +444,11 @@ async def grade_submission(
     current_user: User = Depends(require_docente),
 ) -> Any:
     """Califica la entrega de un estudiante. **Requiere:** Admin (docente)."""
+    classroom = await classroom_service.get_classroom(classroom_id)
+    if not classroom:
+        raise HTTPException(status_code=404, detail="Classroom no encontrado.")
+    _require_owner_teacher(classroom, current_user)
+
     assignment = await assignment_service.get_assignment(assignment_id)
     if not assignment or assignment.classroom_id != classroom_id:
         raise HTTPException(status_code=404, detail="Actividad no encontrada.")

@@ -29,7 +29,7 @@ from services import payment_service
 from beanie import PydanticObjectId
 from beanie.operators import In
 
-from api.dependencies import require_cobranza, require_staff, get_current_user
+from api.dependencies import require_cobranza, require_staff, get_current_user, filtro_cursos_por_rol
 from schemas.common import PaginatedResponse, PaginationMeta
 import math
 
@@ -150,13 +150,25 @@ async def list_payments(
 ) -> Any:
     
     if isinstance(current_user, User):
+        # AUDITORÍA (CRÍTICO #1): sin este guard, cualquier rol autenticado
+        # (docente, encargado_curso, coordinador) caía en ningún filtro y veía
+        # TODOS los pagos/comprobantes del sistema. Solo el personal financiero
+        # y de gestión académica tiene algún tipo de acceso a esta vista.
+        if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
+            raise HTTPException(status_code=403, detail="No autorizado para ver pagos")
+
+        # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve pagos de esos cursos.
+        filtro_rol = filtro_cursos_por_rol(current_user)
+        cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
         payments, total_count = await payment_service.get_all_payments(
             page=page,
             per_page=per_page,
             q=q,
             estado=estado,
             curso_id=curso_id,
-            estudiante_id=estudiante_id
+            estudiante_id=estudiante_id,
+            cursos_permitidos=cursos_permitidos
         )
         
         # Filtrado de RBAC (CPD vs Cobranza)
@@ -228,6 +240,15 @@ async def get_payment(
             )
             
     if isinstance(current_user, User):
+        # AUDITORÍA (CRÍTICO #1): mismo guard general que en list_payments.
+        if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
+            raise HTTPException(status_code=403, detail="No autorizado para ver este pago")
+
+        # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados no puede ver pagos de otros cursos.
+        filtro_rol = filtro_cursos_por_rol(current_user)
+        if filtro_rol and payment.curso_id not in filtro_rol["curso_id"]["$in"]:
+            raise HTTPException(status_code=403, detail="No tienes asignado el curso de este pago")
+
         concepto_lower = (payment.concepto or "").lower().strip()
         is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
         
@@ -255,6 +276,11 @@ async def aprobar_pago(
     payment = await payment_service.get_payment(id)
     if not payment:
         raise HTTPException(status_code=404, detail="Pago no encontrado")
+
+    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados no puede aprobar pagos de otros cursos.
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    if filtro_rol and payment.curso_id not in filtro_rol["curso_id"]["$in"]:
+        raise HTTPException(status_code=403, detail="No tienes asignado el curso de este pago")
         
     concepto_lower = (payment.concepto or "").lower().strip()
     is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
@@ -291,6 +317,11 @@ async def rechazar_pago(
     payment = await payment_service.get_payment(id)
     if not payment:
         raise HTTPException(status_code=404, detail="Pago no encontrado")
+
+    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados no puede rechazar pagos de otros cursos.
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    if filtro_rol and payment.curso_id not in filtro_rol["curso_id"]["$in"]:
+        raise HTTPException(status_code=403, detail="No tienes asignado el curso de este pago")
         
     concepto_lower = (payment.concepto or "").lower().strip()
     is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
@@ -331,6 +362,13 @@ async def anular_pago(
             status_code=status.HTTP_403_FORBIDDEN, 
             detail="Solo el personal financiero (Cobranzas/Administrador) puede realizar reversiones de caja."
         )
+
+    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados no puede anular pagos de otros cursos.
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    if filtro_rol:
+        target_payment = await payment_service.get_payment(id)
+        if not target_payment or target_payment.curso_id not in filtro_rol["curso_id"]["$in"]:
+            raise HTTPException(status_code=403, detail="No tienes asignado el curso de este pago")
         
     try:
         payment = await payment_service.anular_pago(
@@ -359,7 +397,15 @@ async def get_payments_by_enrollment(
             
     if isinstance(current_user, User):
         if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
-            raise HTTPException(status_code=403, detail="No autorizado")
+            raise HTTPException(status_code=403, detail="No autorizado para ver los pagos de esta inscripción")
+
+        # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve inscripciones de esos cursos.
+        filtro_rol = filtro_cursos_por_rol(current_user)
+        if filtro_rol:
+            from services import enrollment_service
+            target_enrollment = await enrollment_service.get_enrollment(enrollment_id)
+            if not target_enrollment or target_enrollment.curso_id not in filtro_rol["curso_id"]["$in"]:
+                raise HTTPException(status_code=403, detail="No tienes asignado el curso de esta inscripción")
     
     payments = await payment_service.get_payments_by_enrollment(enrollment_id)
     
@@ -391,11 +437,24 @@ async def get_resumen_pagos(
         if enrollment.estudiante_id != current_user.id:
             raise HTTPException(status_code=403, detail="No tienes permiso")
             
-    if isinstance(current_user, User) and current_user.rol == "cpd":
-        raise HTTPException(
-            status_code=403,
-            detail="El rol CPD tiene estrictamente prohibido visualizar flujos de caja y estados financieros"
-        )
+    if isinstance(current_user, User):
+        # AUDITORÍA (CRÍTICO #1): mismo guard general, además de la restricción específica de CPD.
+        if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
+            raise HTTPException(status_code=403, detail="No autorizado para ver el resumen de pagos")
+
+        if current_user.rol == "cpd":
+            raise HTTPException(
+                status_code=403,
+                detail="El rol CPD tiene estrictamente prohibido visualizar flujos de caja y estados financieros"
+            )
+
+        # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve inscripciones de esos cursos.
+        filtro_rol = filtro_cursos_por_rol(current_user)
+        if filtro_rol:
+            from services import enrollment_service
+            target_enrollment = await enrollment_service.get_enrollment(enrollment_id)
+            if not target_enrollment or target_enrollment.curso_id not in filtro_rol["curso_id"]["$in"]:
+                raise HTTPException(status_code=403, detail="No tienes asignado el curso de esta inscripción")
     
     resumen = await payment_service.get_resumen_pagos_enrollment(enrollment_id)
     return resumen
@@ -408,8 +467,12 @@ async def get_payments_pendientes(
 ) -> Any:
     if current_user.rol not in ["superadmin", "admin", "cpd", "cobranza"]:
         raise HTTPException(status_code=403, detail="No autorizado para listar pagos pendientes")
-        
-    payments = await payment_service.get_payments_pendientes()
+
+    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve pendientes de esos cursos.
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
+    payments = await payment_service.get_payments_pendientes(cursos_permitidos=cursos_permitidos)
     
     filtered_payments = []
     for p in payments:
@@ -470,6 +533,11 @@ async def generar_reporte_excel_pagos(
         criteria["concepto"] = {"$regex": r"^matr[ií]cula$", "$options": "i"}
     elif current_user.rol == "cobranza":
         criteria["concepto"] = {"$not": {"$regex": r"^matr[ií]cula$", "$options": "i"}}
+
+    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo exporta pagos de esos cursos.
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    if filtro_rol:
+        criteria["curso_id"] = filtro_rol["curso_id"]
     
     payments = await Payment.find(criteria).sort("-fecha_subida").to_list()
     
@@ -568,6 +636,15 @@ async def registrar_cobro_caja_directo(
     Registrar un cobro físico directo en Caja para cualquier estudiante.
     Se crea directamente como APROBADO sin requerir la intervención o credenciales del estudiante.
     """
+    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados no puede cobrar en caja
+    # para inscripciones fuera de sus cursos.
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    if filtro_rol:
+        from services import enrollment_service
+        target_enrollment = await enrollment_service.get_enrollment(payload.inscripcion_id)
+        if not target_enrollment or target_enrollment.curso_id not in filtro_rol["curso_id"]["$in"]:
+            raise HTTPException(status_code=403, detail="No tienes asignado el curso de esta inscripción")
+
     try:
         payment = await payment_service.create_caja_directo_payment(
             estudiante_id=payload.estudiante_id,

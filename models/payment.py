@@ -165,6 +165,13 @@ class Payment(MongoBaseModel):
     
     class Settings:
         name = "payments"
+        # AUDITORÍA (CRÍTICO #2): optimistic locking. Sin esto, dos requests
+        # casi simultáneas (aprobar/rechazar el mismo pago PENDIENTE) podían
+        # ambas pasar el guard de estado en el service y pisarse una a otra
+        # (last-writer-wins), dejando el saldo del estudiante inconsistente.
+        # Con use_revision=True, el segundo .save() sobre un documento ya
+        # modificado lanza beanie.exceptions.RevisionIdWasChanged.
+        use_revision = True
         indexes = [
             "inscripcion_id",
             "estudiante_id",

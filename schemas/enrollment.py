@@ -104,7 +104,12 @@ class EnrollmentUpdate(BaseModel):
     descuento_id: Optional[PyObjectId] = None
     descuento_personalizado: Optional[float] = Field(None, ge=0, le=100)
     estado: Optional[EstadoInscripcion] = None
-    nota_final: Optional[float] = Field(None, ge=0, le=100)
+    # AUDITORÍA (BAJO #18): nota_final se eliminó de este schema. Es un campo
+    # 100% CALCULADO (promedio de las notas de módulos, ver
+    # actualizar_nota_modulo en enrollment_service.py) -- el endpoint nunca
+    # lo procesaba aunque el schema lo aceptara, dando la falsa impresión de
+    # que se podía editar directamente. Para cambiar la nota de un módulo,
+    # usar PATCH /enrollments/{id}/modulos/{index}/nota.
 
 class EnrollmentWithDetails(EnrollmentResponse):
     """Schema para mostrar inscripción con detalles de Student y Course"""

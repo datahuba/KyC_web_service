@@ -79,7 +79,19 @@ async def get_current_user(
             detail="Token inválido",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
+    # AUDITORÍA (ALTO #7 - seguridad): los tokens de un solo propósito
+    # (password_reset) llevan el mismo formato base que un token de sesión
+    # normal (sub + user_type), así que sin este rechazo explícito servían
+    # como credencial de sesión completa durante sus 30 min de vigencia en
+    # CUALQUIER endpoint protegido, no solo en /reset-password.
+    if payload.get("purpose") == "password_reset":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Este token es de un solo uso para restablecer la contraseña, no es válido para autenticación.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     # Buscar usuario según el tipo
     if user_type == "user":
         user = await User.get(PydanticObjectId(user_id))
@@ -318,8 +330,16 @@ def filtro_cursos_por_rol(current_user: User) -> Optional[dict]:
 
     (ISSUE-R-ROLES / ISSUE-P-SEGMENTACION): reutilizable en cualquier servicio que liste
     inscripciones/estudiantes/pagos filtrando por curso.
+
+    ISSUE-P-SEGMENTACION: COBRANZA se segmenta igual que ENCARGADO_CURSO SOLO SI
+    tiene cursos_asignados no vacío (mismo criterio usado en ISSUE-R-VISTA-CURSOS
+    para separar "Usuarios Globales" de "Asignados a Curso(s)"). Un cajero sin
+    cursos marcados conserva acceso total, para no romper cuentas de Cobranza
+    ya existentes que nunca se configuraron con cursos específicos.
     """
     if current_user.rol == UserRole.ENCARGADO_CURSO:
+        return {"curso_id": {"$in": current_user.cursos_asignados}}
+    if current_user.rol == UserRole.COBRANZA and current_user.cursos_asignados:
         return {"curso_id": {"$in": current_user.cursos_asignados}}
     return None
 

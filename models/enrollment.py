@@ -217,6 +217,12 @@ class Enrollment(MongoBaseModel):
     
     class Settings:
         name = "enrollments"
+        # AUDITORÍA: optimistic locking. Enrollment es el recurso más
+        # concurrido del sistema (pagos, notas, becas, pasivo/congelado
+        # pueden mutarlo casi simultáneamente); sin esto cualquier par de
+        # operaciones "leer-mutar-guardar" solapadas se pisan entre sí
+        # (last-writer-wins) perdiendo la escritura más reciente en silencio.
+        use_revision = True
         indexes = [
             # Índices de referencia cruzada acelerada para kyardex
             "estudiante_id",

@@ -7,7 +7,7 @@ Login y gestión de tokens.
 
 from datetime import datetime
 from typing import Any
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, Request
 from beanie import PydanticObjectId
 
 from core.security import (
@@ -19,6 +19,7 @@ from core.security import (
 )
 from core.config import settings
 from core.email_utils import send_email, build_password_reset_email
+from core.rate_limit import check_rate_limit
 from schemas.auth import (
     LoginRequest,
     TokenResponse,
@@ -36,11 +37,15 @@ router = APIRouter()
 
 
 @router.post("/forgot-password", summary="Solicitar restablecimiento de contraseña")
-async def forgot_password(data: ForgotPasswordRequest) -> Any:
+async def forgot_password(data: ForgotPasswordRequest, request: Request) -> Any:
     """
     Envía (de forma automática) un enlace de restablecimiento al correo si existe
     una cuenta (User o Student) con ese email. Respuesta genérica por seguridad.
     """
+    # AUDITORÍA (ALTO): sin límite, un atacante podía disparar envíos de
+    # correo masivos/spam a cualquier email con solo probar direcciones.
+    check_rate_limit(request, "forgot-password", max_intentos=5, ventana_segundos=15 * 60)
+
     email = data.email.strip().lower()
 
     user = await User.find_one(User.email == email)
@@ -99,7 +104,7 @@ async def reset_password(data: ResetPasswordRequest) -> Any:
         403: {"description": "Usuario inactivo"}
     }
 )
-async def login_user(login_data: LoginRequest) -> Any:
+async def login_user(login_data: LoginRequest, request: Request) -> Any:
     """
     Login para administradores
     
@@ -111,6 +116,10 @@ async def login_user(login_data: LoginRequest) -> Any:
     
     **Retorna:** JWT Token de acceso
     """
+    # AUDITORÍA (ALTO #8 - seguridad): sin límite, fuerza bruta de contraseñas
+    # era completamente viable contra este endpoint. Ver core/rate_limit.py.
+    check_rate_limit(request, "login", max_intentos=10, ventana_segundos=15 * 60)
+
     # Buscar usuario por username o email (el formulario del frontend acepta ambos)
     identificador = login_data.username.strip()
     user = await User.find_one(
@@ -174,7 +183,7 @@ async def login_user(login_data: LoginRequest) -> Any:
         403: {"description": "Estudiante inactivo"}
     }
 )
-async def login_student(login_data: LoginRequest) -> Any:
+async def login_student(login_data: LoginRequest, request: Request) -> Any:
     """
     Login para estudiantes
     
@@ -186,6 +195,9 @@ async def login_student(login_data: LoginRequest) -> Any:
     
     **Retorna:** JWT Token de acceso
     """
+    # AUDITORÍA (ALTO #8 - seguridad): ver nota equivalente en login_user.
+    check_rate_limit(request, "login-student", max_intentos=10, ventana_segundos=15 * 60)
+
     # Buscar estudiante por registro o email (el formulario del frontend acepta ambos)
     identificador = login_data.username.strip()
     student = await Student.find_one(
@@ -264,7 +276,9 @@ async def get_me(
             activo=current_user.activo,
             ultimo_acceso=current_user.ultimo_acceso,
             nombre=current_user.username,  # Fallback de nombre para el personal administrativo
-            registro=None
+            registro=None,
+            nombre_funcional=current_user.nombre_funcional,
+            cursos_asignados=current_user.cursos_asignados  # ISSUE-P-SEGMENTACION
         )
     else:  # Student
         return CurrentUserResponse(
