@@ -8,8 +8,14 @@ from beanie import PydanticObjectId
 
 # Nuevas dependencias de seguridad del ISSUE L
 # ISSUE-P-DESCUENTO-ROL: la gestión de descuentos (crear/editar/asignar) pasa de
-# Cobranza a Administrativo, ya que Cobranza solo ejecuta el cobro, no autoriza beneficios.
-from api.dependencies import require_superadmin, require_admin, require_staff
+# Cobranza a Administrativo (require_admin).
+# ISSUE-P-DESCUENTO-CPD (2026-07-08, reunión de postgrado contaduría): se
+# revierte a CPD como único responsable de crear/editar/asignar descuentos
+# ("no hay un usuario inferior ni superior que lo haga, solamente CPD").
+# require_cpd ya incluye CPD/ADMIN/SUPERADMIN por jerarquía, así que Admin y
+# Superadmin conservan acceso; lo que cambia es que CPD (antes sin acceso de
+# escritura desde ISSUE-P-DESCUENTO-ROL) ahora sí puede gestionar descuentos.
+from api.dependencies import require_superadmin, require_cpd, require_staff
 
 router = APIRouter()
 
@@ -57,7 +63,7 @@ async def read_discounts(
 async def create_discount(
     *,
     discount_in: DiscountCreate,
-    current_user: User = Depends(require_admin) # <-- ADMINISTRATIVO CREA DESCUENTOS (ISSUE-P-DESCUENTO-ROL)
+    current_user: User = Depends(require_cpd) # <-- CPD CREA DESCUENTOS (ISSUE-P-DESCUENTO-CPD)
 ) -> Any:
     """Crear nuevo descuento"""
     discount = await discount_service.create_discount(discount_in=discount_in)
@@ -88,7 +94,7 @@ async def update_discount(
     *,
     id: PydanticObjectId,
     discount_in: DiscountUpdate,
-    current_user: User = Depends(require_admin) # <-- ADMINISTRATIVO ACTUALIZA (ISSUE-P-DESCUENTO-ROL)
+    current_user: User = Depends(require_cpd) # <-- CPD ACTUALIZA (ISSUE-P-DESCUENTO-CPD)
 ) -> Any:
     """Actualizar descuento existente"""
     discount = await discount_service.get_discount(id=id)
@@ -119,7 +125,7 @@ async def add_student_to_discount(
     *,
     id: PydanticObjectId,
     student_id: PydanticObjectId,
-    current_user: User = Depends(require_admin) # <-- ADMINISTRATIVO ASIGNA BECAS (ISSUE-P-DESCUENTO-ROL)
+    current_user: User = Depends(require_cpd) # <-- CPD ASIGNA BECAS (ISSUE-P-DESCUENTO-CPD)
 ) -> Any:
     """Agregar un estudiante a un descuento"""
     discount = await discount_service.add_student_to_discount(
@@ -135,7 +141,7 @@ async def remove_student_from_discount(
     *,
     id: PydanticObjectId,
     student_id: PydanticObjectId,
-    current_user: User = Depends(require_admin) # <-- ADMINISTRATIVO RETIRA BECAS (ISSUE-P-DESCUENTO-ROL)
+    current_user: User = Depends(require_cpd) # <-- CPD RETIRA BECAS (ISSUE-P-DESCUENTO-CPD)
 ) -> Any:
     """Remover un estudiante de un descuento"""
     discount = await discount_service.remove_student_from_discount(
