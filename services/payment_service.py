@@ -544,6 +544,93 @@ async def anular_pago(
     return payment
 
 
+def _construir_filtro_reporte_caja(
+    fecha_desde_dt: datetime,
+    fecha_hasta_dt: datetime,
+    curso_id: Optional[PydanticObjectId] = None,
+    estado: Optional[str] = None,
+    cursos_permitidos: Optional[List[PydanticObjectId]] = None,
+) -> dict:
+    """
+    ISSUE-P-REPORTE: filtro compartido entre la tabla interactiva y el export
+    a Excel, para que ambos muestren siempre los mismos datos.
+
+    Filtra por `fecha_comprobante` (fecha REAL de la transacción aportada por
+    el usuario) O `fecha_subida` como respaldo si el pago no tiene
+    `fecha_comprobante` registrada (defensivo; el flujo real del frontend
+    siempre la envía, pero un pago creado por otra vía sin ese campo no debe
+    desaparecer silenciosamente del reporte) -- regla de negocio explícita:
+    "la contabilidad financiera se rige por la fecha real de la transacción,
+    no por la fecha de aprobación/verificación en el panel"
+    (steering/structure.md). El endpoint de Excel anterior filtraba solo por
+    fecha_subida; se corrige aquí para ambos casos (tabla y export).
+    """
+    criteria: dict = {
+        "$or": [
+            {"fecha_comprobante": {"$gte": fecha_desde_dt, "$lte": fecha_hasta_dt}},
+            {"fecha_comprobante": None, "fecha_subida": {"$gte": fecha_desde_dt, "$lte": fecha_hasta_dt}},
+        ]
+    }
+    if curso_id:
+        criteria["curso_id"] = curso_id
+    if estado and estado != "Todos los estados":
+        criteria["estado_pago"] = estado
+    if cursos_permitidos is not None:
+        # Si ya hay un curso_id específico Y además hay segmentación, deben
+        # combinarse (AND), no pisarse uno al otro.
+        if "curso_id" in criteria:
+            if criteria["curso_id"] not in cursos_permitidos:
+                # Curso solicitado fuera de los permitidos: forzar 0 resultados
+                # en vez de devolver datos de otro curso.
+                criteria["curso_id"] = {"$in": []}
+        else:
+            criteria["curso_id"] = {"$in": cursos_permitidos}
+    return criteria
+
+
+async def get_reporte_caja(
+    fecha_desde_dt: datetime,
+    fecha_hasta_dt: datetime,
+    page: int = 1,
+    per_page: int = 20,
+    curso_id: Optional[PydanticObjectId] = None,
+    estado: Optional[str] = None,
+    concepto_regex: Optional[dict] = None,
+    cursos_permitidos: Optional[List[PydanticObjectId]] = None,
+) -> dict:
+    """
+    ISSUE-P-REPORTE: tabla interactiva de ingresos por rango de fechas (fecha
+    real del pago), curso y estado, con totales agregados para el resumen
+    visual (no solo la lista paginada).
+    """
+    criteria = _construir_filtro_reporte_caja(
+        fecha_desde_dt, fecha_hasta_dt, curso_id=curso_id, estado=estado, cursos_permitidos=cursos_permitidos
+    )
+    if concepto_regex:
+        criteria.update(concepto_regex)
+
+    total_count = await Payment.find(criteria).count()
+    skip = (page - 1) * per_page
+    payments = await Payment.find(criteria).sort("-fecha_comprobante").skip(skip).limit(per_page).to_list()
+
+    # Totales agregados sobre TODO el rango filtrado (no solo la página actual)
+    todos_los_pagos_del_rango = await Payment.find(criteria).to_list()
+    total_aprobado = sum(p.cantidad_pago for p in todos_los_pagos_del_rango if p.estado_pago == EstadoPago.APROBADO)
+    total_pendiente = sum(p.cantidad_pago for p in todos_los_pagos_del_rango if p.estado_pago == EstadoPago.PENDIENTE)
+    total_anulado = sum(p.cantidad_pago for p in todos_los_pagos_del_rango if p.estado_pago == EstadoPago.ANULADO)
+
+    return {
+        "payments": payments,
+        "total_count": total_count,
+        "resumen": {
+            "cantidad_pagos": len(todos_los_pagos_del_rango),
+            "total_aprobado": round(total_aprobado, 2),
+            "total_pendiente": round(total_pendiente, 2),
+            "total_anulado": round(total_anulado, 2),
+        }
+    }
+
+
 async def get_resumen_pagos_enrollment(enrollment_id: PydanticObjectId) -> dict:
     payments = await get_payments_by_enrollment(enrollment_id)
     
