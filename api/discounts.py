@@ -1,10 +1,12 @@
+from datetime import datetime
 from typing import List, Any
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from models.discount import Discount
 from models.user import User
 from schemas.discount import DiscountCreate, DiscountResponse, DiscountUpdate
 from services import discount_service
 from beanie import PydanticObjectId
+from core.cloudinary_utils import upload_image, upload_pdf
 
 # Nuevas dependencias de seguridad del ISSUE L
 # ISSUE-P-DESCUENTO-ROL: la gestión de descuentos (crear/editar/asignar) pasa de
@@ -151,3 +153,46 @@ async def remove_student_from_discount(
     if not discount:
         raise HTTPException(status_code=404, detail="Descuento no encontrado")
     return discount
+
+
+@router.post(
+    "/{id}/resolucion",
+    response_model=DiscountResponse,
+    summary="Subir Documento de Resolución del Descuento"
+)
+async def subir_resolucion_descuento(
+    *,
+    id: PydanticObjectId,
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_cpd)  # <-- CPD, ADMIN, SUPERADMIN (ISSUE-P-DESCUENTO-RESOLUCION)
+) -> Any:
+    """
+    Sube (o reemplaza) el documento de resolución que respalda este descuento
+    (ISSUE-P-DESCUENTO-RESOLUCION, 2026-07-08). No bloqueante: el descuento
+    puede crearse primero y el respaldo subirse en cualquier momento
+    posterior, mismo patrón que /enrollments/{id}/beca-respaldo.
+    """
+    discount = await discount_service.get_discount(id=id)
+    if not discount:
+        raise HTTPException(status_code=404, detail="Descuento no encontrado")
+
+    try:
+        folder = f"discounts/{id}/resolucion"
+        public_id = "resolucion"
+
+        image_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
+        if file.content_type in image_types:
+            url = await upload_image(file, folder, public_id)
+        elif file.content_type == "application/pdf":
+            url = await upload_pdf(file, folder, public_id)
+        else:
+            raise HTTPException(400, f"Formato no permitido: {file.content_type}")
+
+        discount.resolucion_url = url
+        discount.updated_at = datetime.utcnow()
+        await discount.save()
+        return discount
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Error: {str(e)}")

@@ -88,6 +88,7 @@ class DiscountResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     nota_minima_requerida: Optional[float] = None
+    resolucion_url: Optional[str] = None  # ISSUE-P-DESCUENTO-RESOLUCION
     
     model_config = {
         "populate_by_name": True,
