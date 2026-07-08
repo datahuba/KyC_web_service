@@ -136,7 +136,7 @@ async def list_my_requests(
 )
 async def approve_request(id: PydanticObjectId, current_user: User = Depends(require_cpd)) -> Any:
     try:
-        enrollment = await enrollment_request_service.approve_enrollment_request(id, current_user.username)
+        enrollment = await enrollment_request_service.approve_enrollment_request(id, current_user.nombre_visible)
         return await enrollment_service.enrich_enrollment_dates(enrollment)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -153,6 +153,6 @@ async def reject_request(
     current_user: User = Depends(require_cpd)
 ) -> Any:
     try:
-        return await enrollment_request_service.reject_enrollment_request(id, current_user.username, body.motivo)
+        return await enrollment_request_service.reject_enrollment_request(id, current_user.nombre_visible, body.motivo)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

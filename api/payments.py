@@ -293,7 +293,9 @@ async def aprobar_pago(
     try:
         payment = await payment_service.aprobar_pago(
             payment_id=id,
-            admin_username=current_user.username
+            # ISSUE-R-PERFIL-GENERICO: nombre_visible en vez de username, para
+            # que Cobranza (rol rotativo) quede identificado por función.
+            admin_username=current_user.nombre_visible
         )
         return await payment_service.enrich_payment_with_details(payment)
     except ValueError as e:
@@ -334,7 +336,7 @@ async def rechazar_pago(
     try:
         payment = await payment_service.rechazar_pago(
             payment_id=id,
-            admin_username=current_user.username,
+            admin_username=current_user.nombre_visible,  # ISSUE-R-PERFIL-GENERICO
             motivo=rejection.motivo
         )
         return await payment_service.enrich_payment_with_details(payment)
@@ -373,7 +375,7 @@ async def anular_pago(
     try:
         payment = await payment_service.anular_pago(
             payment_id=id,
-            admin_username=current_user.username,
+            admin_username=current_user.nombre_visible,  # ISSUE-R-PERFIL-GENERICO
             motivo=reversion.motivo
         )
         return await payment_service.enrich_payment_with_details(payment)
@@ -723,7 +725,7 @@ async def registrar_cobro_caja_directo(
             estudiante_id=payload.estudiante_id,
             inscripcion_id=payload.inscripcion_id,
             cantidad_pago=payload.cantidad_pago,
-            admin_username=current_user.username,
+            admin_username=current_user.nombre_visible,  # ISSUE-R-PERFIL-GENERICO
             concepto=payload.concepto,
             numero_cuota=payload.numero_cuota,
             remitente=payload.remitente,

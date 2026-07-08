@@ -83,7 +83,7 @@ async def pending_count(current_user: User = Depends(require_cpd)) -> Any:
 )
 async def approve_request(id: PydanticObjectId, current_user: User = Depends(require_cpd)) -> Any:
     try:
-        student = await account_request_service.approve_account_request(id, current_user.username)
+        student = await account_request_service.approve_account_request(id, current_user.nombre_visible)
         return student
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -100,6 +100,6 @@ async def reject_request(
     current_user: User = Depends(require_cpd)
 ) -> Any:
     try:
-        return await account_request_service.reject_account_request(id, current_user.username, body.motivo)
+        return await account_request_service.reject_account_request(id, current_user.nombre_visible, body.motivo)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

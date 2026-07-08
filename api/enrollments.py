@@ -64,7 +64,7 @@ async def create_enrollment(
     try:
         enrollment = await enrollment_service.create_enrollment(
             enrollment_in=enrollment_in,
-            admin_username=current_user.username
+            admin_username=current_user.nombre_visible  # ISSUE-R-PERFIL-GENERICO
         )
         enriched_enrollment = await enrollment_service.enrich_enrollment_dates(enrollment)
         return enriched_enrollment
@@ -169,14 +169,14 @@ async def update_enrollment(
             enrollment = await enrollment_service.update_enrollment_descuento(
                 enrollment_id=id,
                 descuento_personalizado=enrollment_in.descuento_personalizado,
-                admin_username=current_user.username
+                admin_username=current_user.nombre_visible  # ISSUE-R-PERFIL-GENERICO
             )
         
         if enrollment_in.estado is not None:
             enrollment = await enrollment_service.cambiar_estado_enrollment(
                 enrollment_id=id,
                 nuevo_estado=enrollment_in.estado,
-                admin_username=current_user.username
+                admin_username=current_user.nombre_visible  # ISSUE-R-PERFIL-GENERICO
             )
         
         if enrollment_in.descuento_personalizado is None and enrollment_in.estado is None:
@@ -314,7 +314,9 @@ async def update_modulo_nota(
                 detail=f"Índice del módulo ({index}) inválido. El estudiante solo tiene {len(enrollment.modulos)} módulos registrados."
             )
             
-        username = current_user.username if hasattr(current_user, 'username') else "docente_autorizado"
+        # ISSUE-R-PERFIL-GENERICO: nombre_visible en vez de username (CPD/Docente
+        # normalmente no tienen nombre_funcional, así que cae al mismo username).
+        username = current_user.nombre_visible if hasattr(current_user, 'nombre_visible') else "docente_autorizado"
 
         if current_user.rol == UserRole.DOCENTE:
             updated_enrollment = await enrollment_service.subir_nota_borrador(
@@ -345,7 +347,7 @@ async def validar_modulo_nota(
 ) -> Any:
     """ISSUE-Q-NOTA-BORRADOR: convierte el borrador del docente en nota oficial."""
     try:
-        updated = await enrollment_service.validar_nota_borrador(id, index, current_user.username)
+        updated = await enrollment_service.validar_nota_borrador(id, index, current_user.nombre_visible)
         return await enrollment_service.enrich_enrollment_dates(updated)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -453,7 +455,7 @@ async def aprobar_requisito(
     if requisito.estado not in [EstadoRequisito.EN_PROCESO, EstadoRequisito.RECHAZADO]:
         raise HTTPException(400, "Estado incorrecto")
     
-    enrollment.requisitos[index].aprobar(current_user.username)
+    enrollment.requisitos[index].aprobar(current_user.nombre_visible)  # ISSUE-R-PERFIL-GENERICO
     await enrollment.save()
     return enrollment.requisitos[index]
 
@@ -476,7 +478,7 @@ async def rechazar_requisito(
     if requisito.estado != EstadoRequisito.EN_PROCESO:
         raise HTTPException(400, "Estado incorrecto")
     
-    enrollment.requisitos[index].rechazar(current_user.username, rechazo.motivo)
+    enrollment.requisitos[index].rechazar(current_user.nombre_visible, rechazo.motivo)  # ISSUE-R-PERFIL-GENERICO
     await enrollment.save()
     return enrollment.requisitos[index]
 
@@ -541,7 +543,7 @@ async def otorgar_matricula_exenta_endpoint(
     """
     try:
         enrollment = await enrollment_service.otorgar_matricula_exenta(
-            enrollment_id=id, otorgado_por=current_user.username
+            enrollment_id=id, otorgado_por=current_user.nombre_visible  # ISSUE-R-PERFIL-GENERICO
         )
         return await enrollment_service.enrich_enrollment_dates(enrollment)
     except ValueError as e:
@@ -605,7 +607,7 @@ async def congelar_enrollment_endpoint(
     from services import congelado_service
     try:
         enrollment = await congelado_service.congelar_inscripcion(
-            enrollment_id=id, registrado_por=current_user.username, tasa_pagada=tasa_pagada
+            enrollment_id=id, registrado_por=current_user.nombre_visible, tasa_pagada=tasa_pagada  # ISSUE-R-PERFIL-GENERICO
         )
         return await enrollment_service.enrich_enrollment_dates(enrollment)
     except ValueError as e:
@@ -631,7 +633,7 @@ async def reactivar_congelado_endpoint(
     from services import congelado_service
     try:
         enrollment = await congelado_service.reactivar_desde_congelado_o_abandono(
-            enrollment_id=id, admin_username=current_user.username
+            enrollment_id=id, admin_username=current_user.nombre_visible  # ISSUE-R-PERFIL-GENERICO
         )
         return await enrollment_service.enrich_enrollment_dates(enrollment)
     except ValueError as e:
