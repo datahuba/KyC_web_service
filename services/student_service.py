@@ -260,6 +260,58 @@ def _clean_text(value) -> Optional[str]:
     return s if s else None
 
 
+def _clean_carnet(value) -> Optional[str]:
+    """
+    Limpia un carnet de identidad, quedándose SOLO con los números antes del
+    complemento (ej. '2726683 - 1J' -> '2726683', '1313665-1D' -> '1313665').
+    El complemento (extensión de expedición del CI, ej. '1D'/'1J'/'1O') se
+    descarta aquí porque el modelo ya tiene un campo separado `extension`
+    para el complemento de LUGAR de expedición (SC/LPZ/CBBA, etc.) -- no es
+    lo mismo, y mezclar ambos duplicaría/confundiría el dato. Además, sin
+    esta limpieza, un mismo estudiante con y sin el complemento en distintos
+    archivos no se detectaría como duplicado.
+    """
+    cleaned = _clean_text(value)
+    if not cleaned:
+        return None
+    # Cortar en el primer guion (con o sin espacios alrededor) y quedarse
+    # solo con la parte numérica inicial.
+    solo_numeros = re.split(r"\s*-\s*", cleaned)[0].strip()
+    return solo_numeros if solo_numeros else None
+
+
+def _parse_fecha_nacimiento(value):
+    """
+    Parsea la fecha de nacimiento de una celda del Excel.
+
+    IMPORTANTE: aunque la cabecera del formulario diga "(mm/dd/aaaa)", los
+    valores reales que llenan los estudiantes (y que Google Forms/Excel
+    terminan grabando como texto en muchos casos) vienen en formato
+    DÍA/MES/AÑO (ej. '21/4/1979' -> 21 no puede ser un mes, es el día).
+    Por eso se interpreta explícitamente como día/mes/año, ignorando la
+    etiqueta de la cabecera. Si la celda ya es un datetime real (Excel la
+    guardó como fecha nativa), se usa tal cual sin reinterpretar.
+
+    Devuelve un datetime o None si no se pudo parsear.
+    """
+    from datetime import datetime as _dt
+
+    if value is None:
+        return None
+    if isinstance(value, _dt):
+        return value
+    s = str(value).strip()
+    if not s:
+        return None
+    # Formatos día/mes/año más comunes en los archivos reales (con '/' o '-').
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%m-%y"):
+        try:
+            return _dt.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def _parse_amount(value) -> float:
     """Convierte una celda monetaria a float. Devuelve 0.0 si no es un número válido."""
     if value is None:
@@ -332,6 +384,8 @@ async def import_students_from_excel(
     col_nombre = col_apellido = col_registro = col_carnet = 0
     col_extension = col_email = col_celular = col_domicilio = 0
     col_matricula = 0
+    col_fecha_nacimiento = 0
+    col_tipo_sangre = 0
     col_matricula_comprobante = 0  # columna con el LINK del comprobante de pago de matrícula (Google Forms)
     columnas_modulos = []  # lista de (col_idx, concepto) para pagos de módulos/cuotas
 
@@ -365,6 +419,10 @@ async def import_students_from_excel(
             col_celular = idx
         elif ("domicilio" in header or "direccion" in header) and col_domicilio == 0:
             col_domicilio = idx
+        elif ("nacimiento" in header or "fecha de nacimiento" in header) and col_fecha_nacimiento == 0:
+            col_fecha_nacimiento = idx
+        elif ("sangre" in header or "sanguineo" in header or "sanguinea" in header) and col_tipo_sangre == 0:
+            col_tipo_sangre = idx
         # --- Columnas financieras (para migrar pagos si se selecciona un curso) ---
         elif "matricula" in header and col_matricula == 0:
             col_matricula = idx
@@ -397,8 +455,11 @@ async def import_students_from_excel(
             # Combinar Nombre(s) + Apellido(s) cuando el archivo los trae separados (ej. Google Forms)
             nombre_str = f"{nombres_str} {apellidos_str}".strip() if (col_apellido > 0 and apellidos_str) else nombres_str
 
-            # Carnet limpio (sin sufijo .0 de floats)
-            carnet = _clean_text(sheet.cell(row=row_idx, column=col_carnet).value if col_carnet > 0 else None)
+            # Carnet limpio: sin sufijo .0 de floats y SIN el complemento tras
+            # el guion (ej. '2726683 - 1J' -> '2726683'), para que el mismo CI
+            # se detecte como duplicado sin importar si el archivo lo trae con
+            # o sin complemento.
+            carnet = _clean_carnet(sheet.cell(row=row_idx, column=col_carnet).value if col_carnet > 0 else None)
             carnet_str = carnet if carnet else ""
 
             if not nombre_str and not carnet_str:
@@ -420,6 +481,21 @@ async def import_students_from_excel(
             domicilio = str(domicilio_val).strip() if domicilio_val is not None else None
             if domicilio == "":
                 domicilio = None
+
+            fecha_nacimiento = _parse_fecha_nacimiento(
+                sheet.cell(row=row_idx, column=col_fecha_nacimiento).value if col_fecha_nacimiento > 0 else None
+            )
+
+            tipo_sangre_raw = _clean_text(
+                sheet.cell(row=row_idx, column=col_tipo_sangre).value if col_tipo_sangre > 0 else None
+            )
+            tipo_sangre = None
+            if tipo_sangre_raw:
+                candidato = tipo_sangre_raw.strip().upper().replace(" ", "")
+                # Normaliza variantes comunes ('0+' con cero en vez de letra O, etc.)
+                candidato = candidato.replace("0", "O")
+                if candidato in ("A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"):
+                    tipo_sangre = candidato
 
             # Recolectar pagos de la fila desde las columnas financieras detectadas
             pagos_fila = []
@@ -449,12 +525,11 @@ async def import_students_from_excel(
                 continue
                 
             if not registro:
-                if not email:
-                    errors.append(
-                        f"Fila {row_idx}: El estudiante '{nombre}' no tiene Registro académico ni Email de fallback."
-                    )
-                    continue
-                registro = email 
+                # Si el archivo no trae columna de registro académico, se usa
+                # el carnet (ya limpio de complemento) como usuario -- así
+                # el usuario y la contraseña inicial son ambos el CI, mismo
+                # formato usado en toda la plataforma para estudiantes.
+                registro = carnet
                 
             # Controlar duplicados en el mismo archivo para no meter llaves repetidas a BD
             if registro in registros_en_archivo:
@@ -483,6 +558,8 @@ async def import_students_from_excel(
                 "extension": extension,
                 "celular": celular,
                 "domicilio": domicilio,
+                "fecha_nacimiento": fecha_nacimiento,
+                "tipo_sangre": tipo_sangre,
                 "es_estudiante_interno": force_tipo, # ISSUE G
                 "pagos": pagos_fila, # Montos a migrar (si el archivo trae columnas financieras)
                 "matricula_comprobante_url": matricula_comprobante_url # Link del voucher de matrícula
@@ -549,6 +626,8 @@ async def import_students_from_excel(
                 extension=c["extension"],
                 celular=c["celular"],
                 domicilio=c["domicilio"],
+                fecha_nacimiento=c["fecha_nacimiento"],
+                tipo_sangre=c["tipo_sangre"],
                 es_estudiante_interno=c["es_estudiante_interno"],
                 activo=True,
                 lista_cursos_ids=[]
