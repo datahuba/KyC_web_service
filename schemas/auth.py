@@ -16,6 +16,11 @@ class ResetPasswordRequest(BaseModel):
     token: str = Field(..., description="Token recibido en el correo")
     new_password: str = Field(..., min_length=5, description="Nueva contraseña (mínimo 5 caracteres)")
 
+
+class VerifyEmailRequest(BaseModel):
+    """ISSUE-A-VERIFICACION: confirma el correo con el token recibido."""
+    token: str = Field(..., description="Token recibido en el correo de verificación")
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str
@@ -46,6 +51,10 @@ class CurrentUserResponse(BaseModel):
     # Lista vacía = sin restricción (acceso total, comportamiento por defecto).
     nombre_funcional: Optional[str] = None
     cursos_asignados: List[PyObjectId] = Field(default_factory=list)
+
+    # ISSUE-A-VERIFICACION: no bloqueante, solo informativo para mostrar un
+    # banner sugiriendo verificar el correo (no impide el uso del sistema).
+    email_verificado: bool = False
 
     model_config = {
         "populate_by_name": True,

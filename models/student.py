@@ -126,6 +126,12 @@ class Student(MongoBaseModel):
     fecha_aceptacion_terminos: Optional[datetime] = Field(default=None, description="Fecha (UTC) en la que el estudiante aceptó los términos por primera vez.")
 
     # ========================================================================
+    # ISSUE-A-VERIFICACION: Verificación de Correo Electrónico (NO bloqueante)
+    # ========================================================================
+    email_verificado: bool = Field(default=False, description="Si el estudiante confirmó que su correo es válido y accesible. No bloquea el acceso al sistema.")
+    fecha_verificacion_email: Optional[datetime] = Field(default=None, description="Fecha (UTC) en que se verificó el correo actual. Se reinicia a None si el correo cambia.")
+
+    # ========================================================================
     # DOCUMENTACIÓN (Cargados desde el Panel de Admin)
     # ========================================================================
     cv_url: Optional[str] = Field(None, description="URL del Currículum Vitae (PDF)")

@@ -43,6 +43,10 @@ class User(MongoBaseModel):
         default_factory=list,
         description="IDs de cursos asignados a este usuario. Relevante si rol es ENCARGADO_CURSO o COBRANZA."
     )
+
+    # ISSUE-A-VERIFICACION: Verificación de Correo Electrónico (NO bloqueante)
+    email_verificado: bool = Field(default=False, description="Si el usuario confirmó que su correo es válido y accesible. No bloquea el acceso al sistema.")
+    fecha_verificacion_email: Optional[datetime] = Field(default=None, description="Fecha (UTC) en que se verificó el correo actual. Se reinicia a None si el correo cambia.")
     
     class Settings:
         name = "users"

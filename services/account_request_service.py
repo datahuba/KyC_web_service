@@ -149,7 +149,22 @@ async def approve_account_request(request_id: PydanticObjectId, admin_username: 
     solicitud.estudiante_id = student.id
     await solicitud.save()
 
-    # Nota: la verificación por correo al estudiante queda pendiente (ISSUE-A-VERIFICACION).
+    # ISSUE-A-VERIFICACION: enviar automáticamente el correo de verificación
+    # al crear la cuenta. No bloqueante -- si falla el envío, la cuenta se
+    # crea igual (el estudiante puede pedir el reenvío desde su perfil).
+    if student.email:
+        try:
+            from core.config import settings
+            from core.security import create_email_verification_token
+            from core.email_utils import send_email, build_email_verification_email
+
+            token = create_email_verification_token(str(student.id), "student", student.email)
+            verify_link = f"{settings.FRONTEND_URL.rstrip('/')}/auth/verify-email?token={token}"
+            html = build_email_verification_email(student.nombre or "estudiante", verify_link, settings.EMAIL_VERIFICATION_EXPIRE_MINUTES // 60)
+            await send_email(student.email, "Confirma tu correo - Postgrado UAGRM", html)
+        except Exception as e:
+            print(f"Error enviando verificación de correo al aprobar cuenta: {str(e)}")
+
     return student
 
 

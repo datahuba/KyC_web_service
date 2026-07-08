@@ -101,6 +101,13 @@ async def update_user(
     if "password" in update_data:
         from core.security import get_password_hash
         update_data["password"] = get_password_hash(update_data["password"])
+
+    if "email" in update_data and update_data["email"]:
+        # ISSUE-A-VERIFICACION: si el correo realmente cambió, la verificación
+        # anterior (si existía) ya no aplica al nuevo correo.
+        if update_data["email"].strip().lower() != (user.email or "").strip().lower():
+            update_data["email_verificado"] = False
+            update_data["fecha_verificacion_email"] = None
     
     for field, value in update_data.items():
         setattr(user, field, value)

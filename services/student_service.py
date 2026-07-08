@@ -209,6 +209,11 @@ async def update_student(
         
     if "email" in update_data and update_data["email"]:
         update_data["email"] = update_data["email"].strip().lower()
+        # ISSUE-A-VERIFICACION: si el correo realmente cambió, la verificación
+        # anterior (si existía) ya no aplica al nuevo correo.
+        if update_data["email"] != (student.email or "").strip().lower():
+            update_data["email_verificado"] = False
+            update_data["fecha_verificacion_email"] = None
     
     for field, value in update_data.items():
         setattr(student, field, value)

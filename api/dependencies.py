@@ -92,6 +92,15 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    # ISSUE-A-VERIFICACION: mismo criterio que password_reset -- este token
+    # solo sirve para confirmar un correo, no como credencial de sesión.
+    if payload.get("purpose") == "email_verification":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Este token es de un solo uso para verificar tu correo, no es válido para autenticación.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     # Buscar usuario según el tipo
     if user_type == "user":
         user = await User.get(PydanticObjectId(user_id))
