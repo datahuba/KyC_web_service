@@ -1,6 +1,7 @@
+from datetime import datetime
 from typing import List, Any, Union, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from models.student import Student
 from models.user import User
 from models.enums import TipoEstudiante
@@ -9,7 +10,7 @@ from services import student_service
 from beanie import PydanticObjectId
 
 # IMPORTAMOS NUESTRAS LLAVES DE SEGURIDAD GRANULARES DE LA UAGRM
-from api.dependencies import require_superadmin, require_cpd, require_staff, get_current_user
+from api.dependencies import require_superadmin, require_cpd, require_staff, require_cobranza, get_current_user
 
 router = APIRouter()
 
@@ -80,6 +81,75 @@ async def read_student(
     if isinstance(current_user, Student) and current_user.id != id:
         raise HTTPException(status_code=403, detail="No tienes permiso")
     return student
+
+
+# ========================================================================
+# ISSUE-P-RECORDATORIO-PAGO (2026-07-08, reunión de postgrado contaduría):
+# Cobranza necesita poder enviar un recordatorio de pago manual a un
+# estudiante específico desde su perfil (in-app + correo real, no bloqueante
+# si el estudiante no tiene email o SMTP falla).
+# ========================================================================
+class RecordatorioPagoRequest(BaseModel):
+    mensaje: str = Field(..., min_length=5, max_length=1000, description="Texto del recordatorio a enviar al estudiante")
+
+
+@router.post(
+    "/{id}/recordatorio-pago",
+    status_code=status.HTTP_200_OK,
+    summary="Enviar Recordatorio de Pago Manual (Cobranza)"
+)
+async def enviar_recordatorio_pago(
+    *,
+    id: PydanticObjectId,
+    payload: RecordatorioPagoRequest,
+    current_user: User = Depends(require_cobranza)  # <-- COBRANZA, CPD, ADMIN, SUPERADMIN
+) -> Any:
+    """
+    Envía un recordatorio de pago manual al estudiante `id`: notificación
+    in-app (siempre) + correo real si tiene email registrado y SMTP está
+    configurado (no bloqueante si falla o no hay email).
+    """
+    student = await student_service.get_student(id=id)
+    if not student:
+        raise HTTPException(status_code=404, detail="Estudiante no encontrado")
+
+    from services.notification_service import create_notification
+    await create_notification(
+        destinatario_id=student.id,
+        tipo_destinatario="student",
+        titulo="Recordatorio de Pago",
+        mensaje=payload.mensaje,
+        tipo_alerta="warning",
+        ruta="/app/payments"
+    )
+
+    email_enviado = False
+    if student.email:
+        try:
+            from core.email_utils import send_email, build_recordatorio_pago_email
+            from core.config import settings
+
+            portal_link = f"{settings.FRONTEND_URL.rstrip('/')}/app/payments"
+            html = build_recordatorio_pago_email(
+                nombre=student.nombre or student.registro,
+                mensaje=payload.mensaje,
+                portal_link=portal_link
+            )
+            email_enviado = await send_email(
+                student.email,
+                "Recordatorio de Pago · Postgrado UAGRM",
+                html
+            )
+        except Exception as e:
+            print(f"Error enviando correo de recordatorio de pago: {str(e)}")
+
+    return {
+        "success": True,
+        "notificacion_in_app": True,
+        "email_enviado": email_enviado,
+        "detail": "Recordatorio enviado correctamente."
+    }
+
 
 @router.put(
     "/me",
