@@ -85,6 +85,8 @@ async def list_enrollments(
     estado: Optional[EstadoInscripcion] = Query(None, description="Filtrar por estado"),
     curso_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por Curso ID"),
     estudiante_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por Estudiante ID"),
+    con_descuento: Optional[bool] = Query(None, description="Filtrar solo inscripciones con (True) o sin (False) descuento personal aplicado"),
+    descuento_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por un Discount específico"),
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
     """Listar inscripciones con paginación y filtros avanzados"""
@@ -96,7 +98,8 @@ async def list_enrollments(
         enrollments, total_count = await enrollment_service.get_all_enrollments(
             page=page, per_page=per_page, q=q, estado=estado,
             curso_id=curso_id, estudiante_id=estudiante_id,
-            cursos_permitidos=cursos_permitidos
+            cursos_permitidos=cursos_permitidos,
+            con_descuento=con_descuento, descuento_id=descuento_id
         )
     elif isinstance(current_user, Student):
         all_enrollments = await enrollment_service.get_enrollments_by_student(
@@ -165,11 +168,16 @@ async def update_enrollment(
 ) -> Any:
     """Actualizar inscripción existente"""
     try:
-        if enrollment_in.descuento_personalizado is not None:
+        # BUG (2026-07-09, reportado por el usuario): antes solo se
+        # recalculaba si venía `descuento_personalizado`, ignorando
+        # `descuento_id` por completo -- asignar una beca real (Discount)
+        # desde el formulario nunca disparaba el recálculo.
+        if enrollment_in.descuento_personalizado is not None or enrollment_in.descuento_id is not None:
             enrollment = await enrollment_service.update_enrollment_descuento(
                 enrollment_id=id,
                 descuento_personalizado=enrollment_in.descuento_personalizado,
-                admin_username=current_user.nombre_visible  # ISSUE-R-PERFIL-GENERICO
+                admin_username=current_user.nombre_visible,  # ISSUE-R-PERFIL-GENERICO
+                descuento_id=enrollment_in.descuento_id
             )
         
         if enrollment_in.estado is not None:
@@ -179,7 +187,7 @@ async def update_enrollment(
                 admin_username=current_user.nombre_visible  # ISSUE-R-PERFIL-GENERICO
             )
         
-        if enrollment_in.descuento_personalizado is None and enrollment_in.estado is None:
+        if enrollment_in.descuento_personalizado is None and enrollment_in.descuento_id is None and enrollment_in.estado is None:
             enrollment = await enrollment_service.get_enrollment(id)
             if not enrollment:
                 raise HTTPException(status_code=404, detail="Inscripción no encontrada")

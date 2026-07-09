@@ -224,12 +224,19 @@ async def get_all_enrollments(
     estado: Optional[EstadoInscripcion] = None,
     curso_id: Optional[PydanticObjectId] = None,
     estudiante_id: Optional[PydanticObjectId] = None,
-    cursos_permitidos: Optional[List[PydanticObjectId]] = None
+    cursos_permitidos: Optional[List[PydanticObjectId]] = None,
+    con_descuento: Optional[bool] = None,
+    descuento_id: Optional[PydanticObjectId] = None
 ) -> tuple[List[Enrollment], int]:
     """
     cursos_permitidos (ISSUE-R-ROLES): si se provee (no None), restringe los resultados
     únicamente a inscripciones de esos cursos. Se usa para segmentar el rol ENCARGADO_CURSO
     (y en el futuro COBRANZA, ISSUE-P-SEGMENTACION) a sus cursos asignados.
+
+    con_descuento/descuento_id (fix 2026-07-09, reportado por el usuario: "no pude
+    seleccionar los que están con descuento y cuál descuento"): permiten filtrar
+    la tabla de inscripciones por si tienen algún descuento personal aplicado
+    (True) o no (False), y opcionalmente por un Discount específico.
     """
     query = Enrollment.find()
     
@@ -241,6 +248,20 @@ async def get_all_enrollments(
         query = query.find(Enrollment.estudiante_id == estudiante_id)
     if cursos_permitidos is not None:
         query = query.find(In(Enrollment.curso_id, cursos_permitidos))
+    if descuento_id:
+        query = query.find(Enrollment.descuento_estudiante_id == descuento_id)
+    elif con_descuento is True:
+        query = query.find(
+            Or(
+                Enrollment.descuento_estudiante_id != None,
+                Enrollment.descuento_personalizado > 0
+            )
+        )
+    elif con_descuento is False:
+        query = query.find(
+            Enrollment.descuento_estudiante_id == None,
+            Or(Enrollment.descuento_personalizado == None, Enrollment.descuento_personalizado <= 0)
+        )
         
     if q:
         regex_pattern = {"$regex": q, "$options": "i"}
@@ -261,8 +282,9 @@ async def get_all_enrollments(
 
 async def update_enrollment_descuento(
     enrollment_id: PydanticObjectId,
-    descuento_personalizado: float,
-    admin_username: str
+    descuento_personalizado: Optional[float],
+    admin_username: str,
+    descuento_id: Optional[PydanticObjectId] = None
 ) -> Enrollment:
     """
     AUDITORÍA (CRÍTICO #3): antes solo recalculaba total_a_pagar/saldo_pendiente
@@ -273,11 +295,43 @@ async def update_enrollment_descuento(
     create_enrollment, y se llama a la cascada real al final para que
     monto_pagado/estado por módulo y el estado de la inscripción queden
     consistentes con los pagos históricos ya aprobados.
+
+    BUG ENCONTRADO (2026-07-09, reportado por el usuario: "asigné la beca
+    pero no veo el recálculo"): `EnrollmentUpdate.descuento_id` existía en el
+    schema desde siempre, pero esta función SOLO leía `descuento_personalizado`
+    (el porcentaje libre) -- si el CPD seleccionaba un `Discount` real del
+    combo "Descuento Personal (Beca)", ese `descuento_id` se ignoraba en
+    silencio y el porcentaje aplicado quedaba en 0 (o en el valor libre
+    anterior), sin recalcular nada. Ahora, si se provee `descuento_id`, se
+    resuelve el `Discount` real (igual que en `create_enrollment`) y se usa
+    su porcentaje; `descuento_personalizado` sigue funcionando como
+    porcentaje libre si no se selecciona un `Discount` concreto.
     """
     enrollment = await Enrollment.get(enrollment_id)
     if not enrollment:
         raise ValueError(f"Inscripción {enrollment_id} no encontrada")
-    
+
+    descuento_estudiante_id = enrollment.descuento_estudiante_id
+    nota_minima_snapshot = enrollment.nota_minima_beca
+
+    if descuento_id is not None:
+        discount_sel = await Discount.get(descuento_id)
+        if not discount_sel:
+            raise ValueError(f"Descuento {descuento_id} no encontrado")
+        if not discount_sel.activo:
+            raise ValueError(f"El descuento '{discount_sel.nombre}' no está activo")
+        descuento_personalizado = discount_sel.porcentaje
+        descuento_estudiante_id = discount_sel.id
+        nota_minima_snapshot = discount_sel.nota_minima_requerida
+    elif descuento_personalizado is not None:
+        # Porcentaje libre (sin vincular a un Discount concreto): se limpia
+        # la referencia a un Discount anterior, si había, para no dejar un
+        # descuento_estudiante_id apuntando a un porcentaje que ya no aplica.
+        descuento_estudiante_id = None
+        nota_minima_snapshot = None
+    else:
+        descuento_personalizado = enrollment.descuento_personalizado or 0.0
+
     total_con_descuento_curso = enrollment.costo_total - (enrollment.costo_total * enrollment.descuento_curso_aplicado / 100)
     colegiatura_final = total_con_descuento_curso - (total_con_descuento_curso * descuento_personalizado / 100)
     # ISSUE-P-CARGO-MULTIITEM: el cargo adicional (snapshot de ítems de esta
@@ -287,23 +341,39 @@ async def update_enrollment_descuento(
 
     # Redistribuir el costo de cada módulo con la misma proporción que tenía
     # el curso original (mismo patrón que create_enrollment), preservando
-    # monto_pagado/nota/estado_academico de cada ModuloEstado.
+    # monto_pagado/nota/estado_academico de cada ModuloEstado. También se
+    # recalcula costo_sin_beca_personal (ISSUE-P-RECALCULO-NOTA) usando la
+    # misma proporción, para que la pérdida de beca por nota siga funcionando
+    # correctamente después de reasignar el descuento desde este endpoint.
     if enrollment.modulos:
         suma_costo_modulos_actual = sum(m.costo for m in enrollment.modulos)
         total_asignado = 0.0
+        total_asignado_sin_beca = 0.0
         for i, mod in enumerate(enrollment.modulos):
             es_ultimo = i == len(enrollment.modulos) - 1
+            if suma_costo_modulos_actual > 0:
+                proporcion = mod.costo / suma_costo_modulos_actual
+            else:
+                proporcion = 1 / len(enrollment.modulos)
+
             if es_ultimo:
                 mod.costo = max(0.0, round(colegiatura_final - total_asignado, 2))
             else:
-                if suma_costo_modulos_actual > 0:
-                    proporcion = mod.costo / suma_costo_modulos_actual
-                else:
-                    proporcion = 1 / len(enrollment.modulos)
                 mod.costo = round(proporcion * colegiatura_final, 2)
                 total_asignado += mod.costo
 
+            if nota_minima_snapshot is not None:
+                if es_ultimo:
+                    mod.costo_sin_beca_personal = max(0.0, round(total_con_descuento_curso - total_asignado_sin_beca, 2))
+                else:
+                    mod.costo_sin_beca_personal = round(proporcion * total_con_descuento_curso, 2)
+                    total_asignado_sin_beca += mod.costo_sin_beca_personal
+            else:
+                mod.costo_sin_beca_personal = None
+
     enrollment.descuento_personalizado = descuento_personalizado
+    enrollment.descuento_estudiante_id = descuento_estudiante_id
+    enrollment.nota_minima_beca = nota_minima_snapshot
     enrollment.total_a_pagar = round(total_final, 2)
     # Valor provisional para no violar el validador de saldo_pendiente antes
     # del primer save(); actualizar_saldo_enrollment recompone el definitivo
