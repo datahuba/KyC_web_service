@@ -441,7 +441,48 @@ async def subir_requisito(
         
         enrollment.requisitos[index].subir_documento(documento_url)
         await enrollment.save()
+
+        # ISSUE-Q-DOCUMENTOS-KYC (2026-07-09): al subir el estudiante, se
+        # notifica a quienes pueden aprobarlo (CPD/Admin/Superadmin siempre, +
+        # el Encargado de Curso asignado a ese curso) para que lo revisen. No
+        # bloqueante: si la notificación falla, la subida ya quedó registrada.
+        try:
+            from services.notification_service import create_notification
+            from beanie.operators import Or as _Or, In as _In
+
+            nombre_doc = enrollment.requisitos[index].descripcion
+            nombre_est = current_user.nombre or current_user.registro
+
+            revisores = await User.find(
+                User.activo == True,
+                _Or(
+                    User.rol == UserRole.CPD,
+                    User.rol == UserRole.ADMIN,
+                    User.rol == UserRole.SUPERADMIN,
+                    _In(User.cursos_asignados, [enrollment.curso_id])
+                )
+            ).to_list()
+
+            for revisor in revisores:
+                # El Encargado de Curso solo si el curso está entre sus asignados
+                if revisor.rol == UserRole.ENCARGADO_CURSO and enrollment.curso_id not in revisor.cursos_asignados:
+                    continue
+                await create_notification(
+                    destinatario_id=revisor.id,
+                    tipo_destinatario="user",
+                    titulo="Documento por revisar",
+                    mensaje=f"{nombre_est} subió el documento '{nombre_doc}' y requiere tu revisión.",
+                    tipo_alerta="info",
+                    ruta="/app/enrollments",
+                    referencia_tipo="enrollment",
+                    referencia_id=enrollment.id
+                )
+        except Exception as e:
+            print(f"Error notificando subida de documento a revisores: {str(e)}")
+
         return enrollment.requisitos[index]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Error: {str(e)}")
 
@@ -473,6 +514,23 @@ async def aprobar_requisito(
     
     enrollment.requisitos[index].aprobar(current_user.nombre_visible)  # ISSUE-R-PERFIL-GENERICO
     await enrollment.save()
+
+    # ISSUE-Q-DOCUMENTOS-KYC: notificar al estudiante que su documento fue aprobado.
+    try:
+        from services.notification_service import create_notification
+        await create_notification(
+            destinatario_id=enrollment.estudiante_id,
+            tipo_destinatario="student",
+            titulo="Documento aprobado",
+            mensaje=f"Tu documento '{enrollment.requisitos[index].descripcion}' fue aprobado.",
+            tipo_alerta="success",
+            ruta="/app/enrollments",
+            referencia_tipo="enrollment",
+            referencia_id=enrollment.id
+        )
+    except Exception as e:
+        print(f"Error notificando aprobación de documento al estudiante: {str(e)}")
+
     return enrollment.requisitos[index]
 
 
@@ -500,6 +558,23 @@ async def rechazar_requisito(
     
     enrollment.requisitos[index].rechazar(current_user.nombre_visible, rechazo.motivo)  # ISSUE-R-PERFIL-GENERICO
     await enrollment.save()
+
+    # ISSUE-Q-DOCUMENTOS-KYC: notificar al estudiante que su documento fue rechazado, con el motivo.
+    try:
+        from services.notification_service import create_notification
+        await create_notification(
+            destinatario_id=enrollment.estudiante_id,
+            tipo_destinatario="student",
+            titulo="Documento rechazado",
+            mensaje=f"Tu documento '{enrollment.requisitos[index].descripcion}' fue rechazado. Motivo: {rechazo.motivo}. Vuelve a subirlo corregido.",
+            tipo_alerta="error",
+            ruta="/app/enrollments",
+            referencia_tipo="enrollment",
+            referencia_id=enrollment.id
+        )
+    except Exception as e:
+        print(f"Error notificando rechazo de documento al estudiante: {str(e)}")
+
     return enrollment.requisitos[index]
 
 
