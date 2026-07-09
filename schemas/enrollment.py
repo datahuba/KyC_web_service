@@ -96,6 +96,7 @@ class EnrollmentResponse(BaseModel):
     matricula_exenta_fecha: Optional[datetime] = None  # ISSUE-M-EXENCION
     nota_minima_beca: Optional[float] = None  # ISSUE-P-RECALCULO-NOTA
     beca_respaldo_url: Optional[str] = None  # ISSUE-P-BECA-RESPALDO
+    formulario_inscripcion_url: Optional[str] = None  # Formulario de inscripción lleno
     # ISSUE-P-CONGELADO
     motivo_suspension: Optional[str] = None
     fecha_congelamiento: Optional[datetime] = None

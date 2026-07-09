@@ -163,6 +163,13 @@ class Enrollment(MongoBaseModel):
         description="URL del documento de respaldo (resolución académica o de directorio) de la beca aplicada. None si aún no se ha subido."
     )
 
+    # Formulario de inscripción lleno por el estudiante (PDF o imagen del
+    # documento oficial firmado). Requisito por programa. None si aún no se subió.
+    formulario_inscripcion_url: Optional[str] = Field(
+        default=None,
+        description="URL del formulario de inscripción oficial lleno/firmado por el estudiante. None si aún no se ha subido."
+    )
+
     # ========================================================================
     # VALIDADORES
     # ========================================================================

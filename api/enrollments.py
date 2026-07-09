@@ -621,6 +621,53 @@ async def subir_beca_respaldo(
 
 
 @router.post(
+    "/{id}/formulario-inscripcion",
+    response_model=EnrollmentResponse,
+    summary="Subir Formulario de Inscripción lleno"
+)
+async def subir_formulario_inscripcion(
+    *,
+    id: PydanticObjectId,
+    file: UploadFile = File(...),
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> Any:
+    """
+    Sube (o reemplaza) el formulario de inscripción oficial lleno/firmado del
+    estudiante para esta inscripción. El estudiante puede subir el suyo; el
+    personal (CPD/Admin/Superadmin) también puede subirlo por él. Acepta PDF o
+    imagen (foto del formulario firmado). No bloqueante.
+    """
+    enrollment = await Enrollment.get(id)
+    if not enrollment:
+        raise HTTPException(404, "Inscripción no encontrada")
+
+    # El estudiante solo puede subir el formulario de su propia inscripción.
+    if isinstance(current_user, Student) and enrollment.estudiante_id != current_user.id:
+        raise HTTPException(403, "No es tu inscripción")
+
+    try:
+        folder = f"enrollments/{id}/formulario_inscripcion"
+        public_id = "formulario"
+
+        image_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
+        if file.content_type in image_types:
+            url = await upload_image(file, folder, public_id)
+        elif file.content_type == "application/pdf":
+            url = await upload_pdf(file, folder, public_id)
+        else:
+            raise HTTPException(400, f"Formato no permitido: {file.content_type}. Sube el formulario como PDF o imagen.")
+
+        enrollment.formulario_inscripcion_url = url
+        enrollment.updated_at = datetime.utcnow()
+        await enrollment.save()
+        return await enrollment_service.enrich_enrollment_dates(enrollment)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Error: {str(e)}")
+
+
+@router.post(
     "/{id}/matricula-exenta",
     response_model=EnrollmentResponse,
     summary="Otorgar Matrícula Exenta (MAE)"
