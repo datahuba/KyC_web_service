@@ -28,6 +28,8 @@ from schemas.payment import (
 from services import payment_service
 from beanie import PydanticObjectId
 from beanie.operators import In
+from bson import ObjectId
+from fastapi.encoders import jsonable_encoder
 
 from api.dependencies import require_cobranza, require_staff, require_superadmin, get_current_user, filtro_cursos_por_rol
 from schemas.common import PaginatedResponse, PaginationMeta
@@ -616,14 +618,22 @@ async def get_reporte_caja_endpoint(
     total_pages = math.ceil(resultado["total_count"] / per_page) if resultado["total_count"] > 0 else 0
     enriched = await payment_service.enrich_payments_with_details_bulk(resultado["payments"])
 
-    return {
-        "data": enriched,
-        "resumen": resultado["resumen"],
-        "meta": PaginationMeta(
-            page=page, limit=per_page, totalItems=resultado["total_count"], totalPages=total_pages,
-            hasNextPage=(page < total_pages), hasPrevPage=(page > 1)
-        )
-    }
+    # Los pagos enriquecidos vienen de model_dump() y conservan campos PyObjectId
+    # (inscripcion_id, estudiante_id, curso_id, _id) como objetos ObjectId. Este
+    # endpoint devuelve un dict crudo (sin response_model que los coaccione, a
+    # diferencia de list_payments), por lo que hay que serializarlos a string
+    # explícitamente o FastAPI falla con PydanticSerializationError.
+    return jsonable_encoder(
+        {
+            "data": enriched,
+            "resumen": resultado["resumen"],
+            "meta": PaginationMeta(
+                page=page, limit=per_page, totalItems=resultado["total_count"], totalPages=total_pages,
+                hasNextPage=(page < total_pages), hasPrevPage=(page > 1)
+            )
+        },
+        custom_encoder={ObjectId: str}
+    )
 
 
 @router.get(
