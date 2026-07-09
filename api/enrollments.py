@@ -448,12 +448,20 @@ async def subir_requisito(
 
 @router.put("/{id}/requisitos/{index}/aprobar", response_model=RequisitoResponse)
 async def aprobar_requisito(
-    *, id: PydanticObjectId, index: int = Path(..., ge=0), current_user: User = Depends(require_cpd) # <-- CPD APRUEBA
+    *, id: PydanticObjectId, index: int = Path(..., ge=0),
+    current_user: User = Depends(require_encargado_curso)
+    # ISSUE-Q-DOCUMENTOS-KYC (2026-07-09): antes solo CPD podía aprobar/rechazar
+    # documentos. Ampliado a Encargado de Curso/Coordinador (restringido a sus
+    # cursos_asignados, ver validación abajo) para no sobrecargar solo a CPD --
+    # CPD/Admin/Superadmin conservan acceso total sin restricción de curso.
 ) -> Any:
     enrollment = await Enrollment.get(id)
     if not enrollment:
         raise HTTPException(404, "Enrollment no encontrado")
-    
+
+    if current_user.rol == UserRole.ENCARGADO_CURSO and enrollment.curso_id not in current_user.cursos_asignados:
+        raise HTTPException(403, "No tienes asignado el curso de esta inscripción")
+
     if index >= len(enrollment.requisitos):
         raise HTTPException(400, f"Índice fuera de rango")
     
@@ -471,12 +479,16 @@ async def aprobar_requisito(
 @router.put("/{id}/requisitos/{index}/rechazar", response_model=RequisitoResponse)
 async def rechazar_requisito(
     *, id: PydanticObjectId, index: int = Path(..., ge=0), rechazo: RequisitoRechazarRequest,
-    current_user: User = Depends(require_cpd) # <-- CPD RECHAZA
+    current_user: User = Depends(require_encargado_curso)
+    # ISSUE-Q-DOCUMENTOS-KYC (2026-07-09): mismo criterio que aprobar_requisito arriba.
 ) -> Any:
     enrollment = await Enrollment.get(id)
     if not enrollment:
         raise HTTPException(404, "Enrollment no encontrado")
-    
+
+    if current_user.rol == UserRole.ENCARGADO_CURSO and enrollment.curso_id not in current_user.cursos_asignados:
+        raise HTTPException(403, "No tienes asignado el curso de esta inscripción")
+
     if index >= len(enrollment.requisitos):
         raise HTTPException(400, f"Índice fuera de rango")
     

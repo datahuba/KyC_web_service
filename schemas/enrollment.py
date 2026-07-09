@@ -8,6 +8,7 @@ from typing import Optional, List
 from pydantic import BaseModel, Field
 from models.enums import EstadoInscripcion, TipoEstudiante
 from models.base import PyObjectId
+from schemas.requisito import RequisitoResponse
 
 # NUEVO SCHEMA PARA MÓDULOS DE INSCRIPCIÓN
 class ModuloEstadoSchema(BaseModel):
@@ -101,6 +102,14 @@ class EnrollmentResponse(BaseModel):
     tasa_congelamiento_pagada: Optional[bool] = False
     fecha_abandono: Optional[datetime] = None
     multa_reincorporacion_pendiente: Optional[bool] = False
+
+    # ISSUE-Q-DOCUMENTOS-KYC (2026-07-09, reportado por el usuario): el
+    # sistema de subida/aprobación de documentos (Requisito) ya existía en
+    # el backend desde antes (endpoints PUT /requisitos/{index},
+    # /aprobar, /rechazar), pero EnrollmentResponse nunca expuso este campo
+    # -- el frontend no tenía forma de mostrarlo ni de construir una UI
+    # sobre él, quedando la función completamente sin usar.
+    requisitos: List[RequisitoResponse] = Field(default_factory=list)
 
     model_config = {
         "populate_by_name": True,
