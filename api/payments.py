@@ -29,7 +29,7 @@ from services import payment_service
 from beanie import PydanticObjectId
 from beanie.operators import In
 
-from api.dependencies import require_cobranza, require_staff, get_current_user, filtro_cursos_por_rol
+from api.dependencies import require_cobranza, require_staff, require_superadmin, get_current_user, filtro_cursos_por_rol
 from schemas.common import PaginatedResponse, PaginationMeta
 import math
 
@@ -379,6 +379,39 @@ async def anular_pago(
             motivo=reversion.motivo
         )
         return await payment_service.enrich_payment_with_details(payment)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete(
+    "/{id}",
+    summary="Eliminar Pago (Borrado Definitivo)"
+)
+async def eliminar_pago(
+    *,
+    id: PydanticObjectId,
+    current_user: User = Depends(require_superadmin)
+) -> Any:
+    """
+    Elimina físicamente un pago de la base de datos. Operación destructiva y
+    financiera, restringida a SUPERADMIN (mismo criterio que eliminar usuarios
+    o cursos). Pensado para limpiar pagos de prueba o registros erróneos que no
+    deben computar en la contabilidad.
+
+    Tras el borrado se recalcula el saldo/estado de la inscripción desde los
+    pagos APROBADOS restantes, para que los totales económicos queden
+    consistentes.
+    """
+    payment = await payment_service.get_payment(id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+
+    try:
+        resultado = await payment_service.eliminar_pago(
+            payment_id=id,
+            admin_username=current_user.nombre_visible  # ISSUE-R-PERFIL-GENERICO
+        )
+        return resultado
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

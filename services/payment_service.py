@@ -585,6 +585,62 @@ async def anular_pago(
     return payment
 
 
+async def eliminar_pago(
+    payment_id: PydanticObjectId,
+    admin_username: str
+) -> dict:
+    """
+    Elimina FÍSICAMENTE un pago de la base de datos (borrado destructivo,
+    exclusivo de superadmin). Pensado para limpiar pagos de prueba/erróneos
+    que no deben computar en la contabilidad.
+
+    A diferencia de `anular_pago` (que preserva el registro con estado ANULADO),
+    esto borra el documento por completo y luego recalcula el saldo/estado de la
+    inscripción desde CERO a partir de los pagos APROBADOS restantes en la base
+    de datos, sin importar en qué estado estuviera el pago borrado. De esta forma
+    los totales económicos quedan consistentes tras la eliminación.
+    """
+    payment = await Payment.get(payment_id)
+    if not payment:
+        raise ValueError(f"Pago {payment_id} no encontrado")
+
+    # Capturar datos antes de borrar (para auditoría y recálculo)
+    enrollment_id = payment.inscripcion_id
+    estudiante_id = payment.estudiante_id
+    monto = payment.cantidad_pago
+    concepto = payment.concepto
+    estado_previo = payment.estado_pago.value if payment.estado_pago else "desconocido"
+
+    await payment.delete()
+
+    # Recalcular saldo de la inscripción desde los pagos aprobados que quedan.
+    # actualizar_saldo_enrollment recomputa desde cero (suma los pagos APROBADOS
+    # actuales en BD), por lo que basta con invocarlo tras el borrado.
+    if enrollment_id:
+        try:
+            await enrollment_service.actualizar_saldo_enrollment(
+                enrollment_id=enrollment_id,
+                monto_pago_aprobado=0.0
+            )
+        except Exception as e:
+            print(f"Error al recalcular saldo tras eliminar pago {payment_id}: {str(e)}")
+
+    await _registrar_auditoria_financiera(
+        accion="ELIMINAR PAGO (BORRADO DEFINITIVO)",
+        payment_id=payment_id,
+        estudiante_id=estudiante_id,
+        monto=monto,
+        admin_username=admin_username,
+        detalles=f"Borrado físico de pago (estado previo: {estado_previo}, concepto: {concepto})"
+    )
+
+    return {
+        "success": True,
+        "message": "Pago eliminado correctamente",
+        "payment_id": str(payment_id)
+    }
+
+
 def _construir_filtro_reporte_caja(
     fecha_desde_dt: datetime,
     fecha_hasta_dt: datetime,
