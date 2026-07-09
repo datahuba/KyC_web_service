@@ -200,12 +200,16 @@ async def login_user(login_data: LoginRequest, request: Request) -> Any:
     # era completamente viable contra este endpoint. Ver core/rate_limit.py.
     check_rate_limit(request, "login", max_intentos=10, ventana_segundos=15 * 60)
 
-    # Buscar usuario por username o email (el formulario del frontend acepta ambos)
+    # ISSUE-Q-LOGIN-MULTIPLE (2026-07-09): el personal (docentes principalmente)
+    # puede iniciar sesión indistintamente con su username, su email o su carnet
+    # (CI). Para administrativos con perfiles personalizados, username/email
+    # siguen funcionando igual; el carnet solo hace match si la cuenta lo tiene.
     identificador = login_data.username.strip()
     user = await User.find_one(
         Or(
             User.username == identificador,
-            User.email == identificador.lower()
+            User.email == identificador.lower(),
+            User.carnet == identificador
         )
     )
     
@@ -270,7 +274,7 @@ async def login_student(login_data: LoginRequest, request: Request) -> Any:
     **Acceso público** (no requiere autenticación)
     
     **Credenciales:**
-    - `username`: Número de registro del estudiante
+    - `username`: Registro, correo o carnet (CI) del estudiante
     - `password`: Contraseña (inicialmente = 'Uagrm.<CI>')
     
     **Retorna:** JWT Token de acceso
@@ -278,12 +282,15 @@ async def login_student(login_data: LoginRequest, request: Request) -> Any:
     # AUDITORÍA (ALTO #8 - seguridad): ver nota equivalente en login_user.
     check_rate_limit(request, "login-student", max_intentos=10, ventana_segundos=15 * 60)
 
-    # Buscar estudiante por registro o email (el formulario del frontend acepta ambos)
+    # ISSUE-Q-LOGIN-MULTIPLE (2026-07-09): el estudiante puede iniciar sesión
+    # indistintamente con su número de registro, su correo o su carnet (CI).
+    # La contraseña inicial por defecto es 'Uagrm.<CI>' (ya la puede cambiar).
     identificador = login_data.username.strip()
     student = await Student.find_one(
         Or(
             Student.registro == identificador,
-            Student.email == identificador.lower()
+            Student.email == identificador.lower(),
+            Student.carnet == identificador
         )
     )
     
