@@ -20,7 +20,7 @@ from typing import Optional, List
 import pymongo
 from pydantic import Field, EmailStr
 from .base import MongoBaseModel, PyObjectId
-from .enums import TipoEstudiante, Sexo, EstadoCivil, TipoSangre
+from .enums import Sexo, EstadoCivil, TipoSangre
 
 
 class Student(MongoBaseModel):
@@ -49,7 +49,6 @@ class Student(MongoBaseModel):
     
     4. INFORMACIÓN ACADÉMICA:
        - carrera: Carrera de pregrado
-       - es_estudiante_interno: ¿Es estudiante de esta universidad?
        - lista_cursos_ids: Cursos en los que está inscrito
     
     5. ESTADO:
@@ -58,16 +57,6 @@ class Student(MongoBaseModel):
     
     NOTA: Los documentos (CV, CI, títulos, etc.) ahora se manejan
     en Enrollment.requisitos según los requisitos definidos por cada curso.
-    
-    ¿Por qué es_estudiante_interno es importante?
-    --------------------------------------------
-    Este campo determina qué precio paga el estudiante:
-    - INTERNO: Precios preferenciales (estudiante de la U)
-    - EXTERNO: Precios estándar (público general)
-    
-    Ejemplo:
-        Estudiante interno: Paga 3000 Bs por diplomado
-        Estudiante externo: Paga 5000 Bs por el mismo diplomado
     
     ¿Por qué almacenar listas de cursos?
     ---------------------------------------------
@@ -101,7 +90,6 @@ class Student(MongoBaseModel):
     domicilio: Optional[str] = Field(None,description="Dirección física del estudiante (requerido para certificados)")
     fecha_nacimiento: Optional[datetime] = Field(None,description="Fecha de nacimiento (requerido para certificados y títulos)")
     foto_url: Optional[str] = Field(None,description="URL de la foto de perfil del estudiante")
-    es_estudiante_interno: Optional[TipoEstudiante] = Field(None,description=("Tipo de estudiante: INTERNO (de la universidad) o EXTERNO (público general). "))
 
     # ========================================================================
     # DATOS PERSONALES OFICIALES (Ficha UAGRM) — todos opcionales
@@ -182,7 +170,6 @@ class Student(MongoBaseModel):
                 "domicilio": "Av. Internacional #13, Santa Cruz, Bolivia",
                 "fecha_nacimiento": "2002-03-20T00:00:00",
                 "foto_url": "https://storage.example.com/photos/brandon.jpg",
-                "es_estudiante_interno": "interno",
                 "activo": True,
                 "lista_cursos_ids": [],
 

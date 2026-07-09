@@ -6,7 +6,7 @@ Schemas de Inscripción (Enrollment)
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, Field
-from models.enums import EstadoInscripcion, TipoEstudiante
+from models.enums import EstadoInscripcion
 from models.base import PyObjectId
 from schemas.requisito import RequisitoResponse
 
@@ -58,7 +58,6 @@ class EnrollmentResponse(BaseModel):
     curso_id: PyObjectId
     
     # Snapshot de precios y módulos
-    es_estudiante_interno: TipoEstudiante
     costo_total: float
     costo_matricula: float
     cantidad_cuotas: int

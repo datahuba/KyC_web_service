@@ -15,7 +15,7 @@ Schemas incluidos:
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, Field, EmailStr, field_validator
-from models.enums import TipoEstudiante, Sexo, EstadoCivil, TipoSangre
+from models.enums import Sexo, EstadoCivil, TipoSangre
 from models.base import PyObjectId
 
 
@@ -77,7 +77,6 @@ class StudentCreate(BaseModel):
     celular: Optional[str] = Field(None, description="Número de celular para notificaciones")
     domicilio: Optional[str] = Field(None, description="Dirección física del estudiante")
     fecha_nacimiento: Optional[datetime] = Field(None, description="Fecha de nacimiento")
-    es_estudiante_interno: Optional[TipoEstudiante] = Field(None, description="Tipo de estudiante: INTERNO o EXTERNO")
 
     # Datos oficiales UAGRM (opcionales)
     sexo: Optional[Sexo] = None
@@ -92,7 +91,7 @@ class StudentCreate(BaseModel):
     tipo_sangre: Optional[TipoSangre] = None
     titulo_bachiller: Optional[str] = None
 
-    @field_validator('sexo', 'estado_civil', 'tipo_sangre', 'es_estudiante_interno', mode='before')
+    @field_validator('sexo', 'estado_civil', 'tipo_sangre', mode='before')
     @classmethod
     def _empty_enum_a_none(cls, v):
         # Los <select> del frontend envían "" cuando no se elige nada; para enums
@@ -145,8 +144,7 @@ class StudentCreate(BaseModel):
                 "extension": "LP",
                 "celular": "70123456",
                 "domicilio": "Av. 6 de Agosto #1234, La Paz, Bolivia",
-                "fecha_nacimiento": "2000-05-15T00:00:00",
-                "es_estudiante_interno": "interno"
+                "fecha_nacimiento": "2000-05-15T00:00:00"
             }
         }
     }
@@ -169,7 +167,6 @@ class StudentResponse(BaseModel):
     domicilio: Optional[str] = None
     fecha_nacimiento: Optional[datetime] = None
     foto_url: Optional[str] = None
-    es_estudiante_interno: Optional[TipoEstudiante] = None
 
     # Datos oficiales UAGRM
     sexo: Optional[Sexo] = None
@@ -218,7 +215,6 @@ class StudentResponse(BaseModel):
                 "domicilio": "Av. Internacional #13, Santa Cruz, Bolivia",
                 "fecha_nacimiento": "2002-03-20T00:00:00",
                 "foto_url": "https://storage.example.com/photos/brandon.jpg",
-                "es_estudiante_interno": "interno",
                 "activo": True,
                 "lista_cursos_ids": [],
                 "created_at": "2024-03-20T10:00:00",
@@ -294,7 +290,6 @@ class StudentUpdateAdmin(BaseModel):
     celular: Optional[str] = None
     domicilio: Optional[str] = None
     fecha_nacimiento: Optional[datetime] = None
-    es_estudiante_interno: Optional[TipoEstudiante] = None
     activo: Optional[bool] = None
     lista_cursos_ids: Optional[List[PyObjectId]] = None
 
@@ -311,7 +306,7 @@ class StudentUpdateAdmin(BaseModel):
     tipo_sangre: Optional[TipoSangre] = None
     titulo_bachiller: Optional[str] = None
 
-    @field_validator('sexo', 'estado_civil', 'tipo_sangre', 'es_estudiante_interno', mode='before')
+    @field_validator('sexo', 'estado_civil', 'tipo_sangre', mode='before')
     @classmethod
     def _admin_empty_enum_a_none(cls, v):
         if v == '' or v is None:
@@ -350,7 +345,6 @@ class StudentUpdateAdmin(BaseModel):
                 "celular": "68765432",
                 "domicilio": "Calle Junín #789, Cochabamba, Bolivia",
                 "fecha_nacimiento": "1995-08-22T00:00:00",
-                "es_estudiante_interno": "externo",
                 "activo": True,
                 "lista_cursos_ids": ["507f1f77bcf86cd799439012"]
             }

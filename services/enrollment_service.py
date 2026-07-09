@@ -16,7 +16,7 @@ from datetime import datetime
 from models.enrollment import Enrollment, ModuloEstado, CargoAdicionalItemSnapshot
 from models.student import Student
 from models.course import Course
-from models.enums import TipoEstudiante, EstadoInscripcion
+from models.enums import EstadoInscripcion
 from schemas.enrollment import EnrollmentCreate
 from beanie import PydanticObjectId
 from models.discount import Discount
@@ -77,9 +77,7 @@ async def create_enrollment(
         )
     
     # 3. ISSUE-P-PRECIO-UNICO (2026-07-08): el precio del programa es el
-    # mismo para todos los estudiantes, sin importar procedencia/tipo. El
-    # campo Student.es_estudiante_interno se conserva solo como dato
-    # informativo (de dónde es el estudiante), ya no determina el precio.
+    # mismo para todos los estudiantes, sin importar procedencia/tipo.
     
     # 4. Obtener precios del curso (precio único)
     costo_total = course.get_costo_total()
@@ -177,7 +175,6 @@ async def create_enrollment(
     enrollment = Enrollment(
         estudiante_id=enrollment_in.estudiante_id,
         curso_id=enrollment_in.curso_id,
-        es_estudiante_interno=student.es_estudiante_interno,
         costo_total=costo_total,
         costo_matricula=costo_matricula,
         cantidad_cuotas=course.cantidad_cuotas,

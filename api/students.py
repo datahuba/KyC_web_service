@@ -4,7 +4,6 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Q
 from pydantic import BaseModel, Field
 from models.student import Student
 from models.user import User
-from models.enums import TipoEstudiante
 from schemas.student import StudentCreate, StudentResponse, StudentUpdateSelf, StudentUpdateAdmin, ChangePassword
 from services import student_service
 from beanie import PydanticObjectId
@@ -234,32 +233,6 @@ async def update_student_admin(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# ============================================================================
-# ISSUE H: Mutación rápida del tipo de estudiante
-# ============================================================================
-class ToggleTipoRequest(BaseModel):
-    tipo: TipoEstudiante
-
-@router.patch(
-    "/{id}/toggle-tipo", 
-    response_model=StudentResponse, 
-    summary="Cambio rápido de tipo de estudiante"
-)
-async def toggle_student_tipo(
-    *, 
-    id: PydanticObjectId, 
-    payload: ToggleTipoRequest,
-    current_user: User = Depends(require_cpd)
-) -> Any:
-    student = await student_service.get_student(id)
-    if not student:
-        raise HTTPException(status_code=404, detail="Estudiante no encontrado")
-        
-    student.es_estudiante_interno = payload.tipo
-    await student.save()
-    return student
-
-
 @router.delete(
     "/{id}",
     response_model=StudentResponse,
@@ -434,7 +407,6 @@ async def rechazar_titulo_estudiante(*, id: PydanticObjectId, motivo: str = Form
 @router.post("/import/excel", summary="Importar Estudiantes de forma Masiva desde Excel")
 async def import_students(
     file: UploadFile = File(...), 
-    tipo_estudiante: TipoEstudiante = Form(...), # Recibe Interno/Externo desde el frontend
     curso_id: Optional[PydanticObjectId] = Form(None), # Curso opcional para auto-inscribir a los estudiantes importados
     current_user: User = Depends(require_cpd)
 ) -> Any:
@@ -442,7 +414,7 @@ async def import_students(
         raise HTTPException(400, "Formato no permitido. Sube un archivo .xlsx, .xls o .csv")
     contents = await file.read()
     try:
-        return await student_service.import_students_from_excel(contents, tipo_estudiante, curso_id, file.filename)
+        return await student_service.import_students_from_excel(contents, curso_id, file.filename)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

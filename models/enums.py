@@ -99,14 +99,6 @@ class TipoTitulo(str, Enum):
     TITULO_DOCTORADO = "título de doctorado"
 
 
-class TipoEstudiante(str, Enum):
-    """
-    Tipo de estudiante según su relación con la universidad
-    """
-    INTERNO = "interno"
-    EXTERNO = "externo"
-
-
 class Sexo(str, Enum):
     """Sexo del estudiante (dato oficial UAGRM)"""
     MASCULINO = "masculino"

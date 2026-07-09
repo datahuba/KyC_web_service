@@ -26,7 +26,6 @@ from .enums import (
     TipoPago,
     EstadoPago,
     TipoTitulo,
-    TipoEstudiante,
     EstadoRequisito,  # Nuevo
     UserRole
 )
@@ -52,7 +51,6 @@ __all__ = [
     "TipoPago",
     "EstadoPago",
     "TipoTitulo",
-    "TipoEstudiante",
     "EstadoRequisito",  # Nuevo
     "UserRole",
     

@@ -14,7 +14,6 @@ from typing import Optional
 import pymongo
 from pydantic import Field, EmailStr
 from .base import MongoBaseModel, PyObjectId
-from .enums import TipoEstudiante
 
 
 class AccountRequest(MongoBaseModel):
@@ -23,10 +22,6 @@ class AccountRequest(MongoBaseModel):
     carnet: str = Field(..., min_length=4, max_length=20, description="Carnet de identidad")
     celular: Optional[str] = Field(None, description="Número de celular de contacto")
     registro: Optional[str] = Field(None, description="Registro académico (si lo tiene)")
-    es_estudiante_interno: TipoEstudiante = Field(
-        default=TipoEstudiante.EXTERNO,
-        description="Tipo de estudiante declarado por el solicitante"
-    )
     mensaje: Optional[str] = Field(None, description="Mensaje o programa de interés del solicitante")
 
     estado: str = Field(default="pendiente", description="pendiente | aprobado | rechazado")

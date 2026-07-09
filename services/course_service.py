@@ -215,8 +215,7 @@ async def get_course_students(course_id: PydanticObjectId) -> List[CourseEnrolle
             inscripcion={
                 "id": enrollment.id,
                 "fecha_inscripcion": enrollment.fecha_inscripcion,
-                "estado": enrollment.estado,
-                "tipo_estudiante": enrollment.es_estudiante_interno
+                "estado": enrollment.estado
             },
             financiero={
                 "total_a_pagar": enrollment.total_a_pagar,

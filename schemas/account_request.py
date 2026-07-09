@@ -7,7 +7,6 @@ from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, Field, EmailStr, field_validator
 from models.base import PyObjectId
-from models.enums import TipoEstudiante
 
 
 class AccountRequestCreate(BaseModel):
@@ -17,7 +16,6 @@ class AccountRequestCreate(BaseModel):
     carnet: str = Field(..., min_length=4, max_length=20)
     celular: Optional[str] = Field(None, max_length=20)
     registro: Optional[str] = Field(None, max_length=30)
-    es_estudiante_interno: TipoEstudiante = TipoEstudiante.EXTERNO
     mensaje: Optional[str] = Field(None, max_length=500)
 
     @field_validator('carnet')
@@ -54,7 +52,6 @@ class AccountRequestResponse(BaseModel):
     carnet: str
     celular: Optional[str] = None
     registro: Optional[str] = None
-    es_estudiante_interno: TipoEstudiante
     mensaje: Optional[str] = None
     estado: str
     motivo_rechazo: Optional[str] = None
