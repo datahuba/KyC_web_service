@@ -169,6 +169,7 @@ async def resend_verification(
     enviado = await send_email(current_user.email, "Confirma tu correo - Postgrado UAGRM", html)
 
     return {
+        "enviado": enviado,
         "message": "Te enviamos un enlace de verificación a tu correo." if enviado
                     else "No se pudo enviar el correo en este momento. Intenta de nuevo más tarde."
     }
