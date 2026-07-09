@@ -313,20 +313,22 @@ def require_extracto_bancario(
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> User:
     """
-    Requiere Cobranza, CPD, ADMIN o SUPERADMIN.
+    Requiere Cobranza, ADMIN o SUPERADMIN.
     (ISSUE-P-EXTRACTO): registro y cruce manual del extracto bancario.
+    CPD queda EXCLUIDO: el extracto bancario es información económica y CPD no
+    ve dinero (regla del usuario: "CPD nada de dinero salvo la matrícula").
     """
     if not isinstance(current_user, User):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Se requiere credenciales de Cobranza/CPD o superior"
+            detail="Se requiere credenciales de Cobranza o Administración"
         )
 
-    allowed = [UserRole.COBRANZA, UserRole.CPD, UserRole.ADMIN, UserRole.SUPERADMIN]
+    allowed = [UserRole.COBRANZA, UserRole.ADMIN, UserRole.SUPERADMIN]
     if current_user.rol not in allowed:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Acceso restringido a Cobranza/CPD o Administración"
+            detail="Acceso restringido a Cobranza o Administración (información económica)"
         )
 
     return current_user

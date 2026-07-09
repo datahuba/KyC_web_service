@@ -527,7 +527,10 @@ async def get_reporte_caja_endpoint(
     página solicitada + totales agregados de TODO el rango filtrado (no solo
     la página actual) para el resumen visual encima de la tabla.
     """
-    if current_user.rol not in ["superadmin", "admin", "cpd", "cobranza", "mae"]:
+    # CPD excluido: los reportes de caja son económicos (regla del usuario:
+    # "económico solo cobranza y el coordinador financiero"; CPD solo audita la
+    # matrícula desde Gestión de Pagos, no ve reportes de caja).
+    if current_user.rol not in ["superadmin", "admin", "cobranza", "mae"]:
         raise HTTPException(status_code=403, detail="No autorizado para ver reportes de caja")
 
     _, _, fecha_desde_dt, fecha_hasta_dt = _parse_rango_fechas(fecha_desde, fecha_hasta)
@@ -584,7 +587,7 @@ async def generar_reporte_excel_pagos(
     from io import BytesIO
     from models.enrollment import Enrollment
     
-    if current_user.rol not in ["superadmin", "admin", "cpd", "cobranza", "mae"]:
+    if current_user.rol not in ["superadmin", "admin", "cobranza", "mae"]:
         raise HTTPException(status_code=403, detail="No autorizado para generar reportes")
 
     fecha_desde, fecha_hasta, fecha_desde_dt, fecha_hasta_dt = _parse_rango_fechas(fecha_desde, fecha_hasta)
