@@ -30,7 +30,7 @@ async def get_course(id: PydanticObjectId) -> Optional[Course]:
     """Obtiene un curso por su ID"""
     return await Course.get(id)
 
-from models.enums import TipoCurso, Modalidad
+from models.enums import TipoCurso, Modalidad, EstadoRequisito
 from beanie.operators import Or
 
 async def get_courses(
@@ -105,12 +105,63 @@ async def update_course(
     # Seguridad de negocio: impedir asociar descuentos inactivos
     if "descuento_id" in update_data:
         await _validate_active_discount(update_data.get("descuento_id"))
-        
+
+    # ISSUE-Q-DOCUMENTOS-KYC (2026-07-09): detectar si se están cambiando los
+    # requisitos/documentos del curso para propagarlos a las inscripciones ya
+    # existentes (los requisitos se copian al inscribirse, así que sin esto los
+    # estudiantes ya inscritos nunca verían los documentos definidos después).
+    requisitos_actualizados = "requisitos" in update_data
+
     for field, value in update_data.items():
         setattr(course, field, value)
         
     await course.save()
+
+    if requisitos_actualizados:
+        await _sincronizar_requisitos_inscripciones(course)
+
     return course
+
+
+async def _sincronizar_requisitos_inscripciones(course: Course) -> None:
+    """
+    Propaga la plantilla de requisitos del curso a las inscripciones existentes.
+
+    - AGREGA a cada inscripción los requisitos del curso que aún no tenga
+      (comparando por descripción), con estado "pendiente".
+    - PRESERVA los requisitos ya subidos/aprobados/rechazados por el estudiante
+      (nunca pisa un documento existente ni su estado).
+    - QUITA de la inscripción los requisitos que el curso ya no exige, SOLO si
+      el estudiante todavía no subió nada para ellos (estado "pendiente"); si ya
+      había subido algo, se conserva para no perder su documento.
+    """
+    from models.enums import EstadoInscripcion
+
+    descripciones_curso = [r.descripcion for r in course.requisitos]
+    enrollments = await Enrollment.find(
+        Enrollment.curso_id == course.id,
+        Enrollment.estado != EstadoInscripcion.CANCELADO
+    ).to_list()
+
+    for enr in enrollments:
+        existentes = {r.descripcion: r for r in enr.requisitos}
+        nuevos_requisitos = []
+
+        # Conservar los que siguen exigidos + los que el estudiante ya trabajó
+        for req in enr.requisitos:
+            if req.descripcion in descripciones_curso:
+                nuevos_requisitos.append(req)
+            elif req.estado != EstadoRequisito.PENDIENTE:
+                # El curso ya no lo exige, pero el estudiante ya subió algo: se conserva.
+                nuevos_requisitos.append(req)
+
+        # Agregar los nuevos requisitos del curso que la inscripción no tenía
+        for template in course.requisitos:
+            if template.descripcion not in existentes:
+                nuevos_requisitos.append(template.to_requisito())
+
+        enr.requisitos = nuevos_requisitos
+        await enr.save()
 
 async def delete_course(id: PydanticObjectId) -> Optional[Course]:
     """Elimina un curso"""
