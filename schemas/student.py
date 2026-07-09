@@ -226,6 +226,27 @@ class StudentUpdateSelf(BaseModel):
     domicilio: Optional[str] = None
     telefono: Optional[str] = None
 
+    # Reunión postgrado 2026-07-09: el estudiante ahora puede completar/editar
+    # sus propios datos oficiales UAGRM desde su perfil (antes solo CPD), para
+    # aliviar la carga de CPD. Todos opcionales.
+    sexo: Optional[Sexo] = None
+    estado_civil: Optional[EstadoCivil] = None
+    tipo_sangre: Optional[TipoSangre] = None
+    pais: Optional[str] = None
+    departamento: Optional[str] = None
+    provincia: Optional[str] = None
+    nacionalidad: Optional[str] = None
+    modalidad_ingreso: Optional[str] = None
+    periodo: Optional[str] = None
+    titulo_bachiller: Optional[str] = None
+
+    @field_validator('sexo', 'estado_civil', 'tipo_sangre', mode='before')
+    @classmethod
+    def _self_empty_enum_a_none(cls, v):
+        if v == '' or v is None:
+            return None
+        return v
+
     @field_validator('celular', 'telefono')
     @classmethod
     def _self_telefono_numerico(cls, v):
