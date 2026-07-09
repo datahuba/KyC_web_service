@@ -43,15 +43,27 @@ app = FastAPI(
 # Reduce drásticamente el tamaño de los payloads JSON grandes de la API
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-# Set all CORS enabled origins
-if settings.DEBUG:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+# CORS. En producción la app es same-origin (nginx enruta /api/ bajo el mismo
+# host), por lo que normalmente no haría falta. Pero durante/después de la
+# migración de dominio (datahuba.com -> postgrado.datahuba.com) puede haber
+# llamadas cross-origin entre ambos, así que se habilitan explícitamente los
+# orígenes conocidos. En DEBUG (local) se permite todo.
+_cors_origins = [
+    "https://datahuba.com",
+    "https://www.datahuba.com",
+    "https://postgrado.datahuba.com",
+]
+_frontend_origin = (settings.FRONTEND_URL or "").rstrip("/")
+if _frontend_origin and _frontend_origin not in _cors_origins:
+    _cors_origins.append(_frontend_origin)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"] if settings.DEBUG else _cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.on_event("startup")
 async def start_db():
