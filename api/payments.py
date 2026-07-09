@@ -541,6 +541,30 @@ def _parse_rango_fechas(fecha_desde: Optional[str], fecha_hasta: Optional[str]):
 
 
 @router.get(
+    "/dashboard/resumen-economico",
+    summary="Resumen Económico del Dashboard (Cobranza / Coordinador Financiero)"
+)
+async def get_resumen_economico_endpoint(
+    *,
+    current_user: User = Depends(require_staff)
+) -> Any:
+    """
+    ISSUE-P-DASHBOARD-COBRANZA: tarjetas de resumen económico del dashboard.
+    Incluye el ingreso por matrícula como dato contable (aunque Cobranza no
+    apruebe matrículas, sí debe verlas recaudadas porque genera los informes
+    económicos). Mismo conjunto de roles económicos que los reportes de caja.
+    """
+    if current_user.rol not in ["superadmin", "admin", "cobranza", "mae"]:
+        raise HTTPException(status_code=403, detail="No autorizado para ver el resumen económico")
+
+    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve su(s) curso(s).
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
+    return await payment_service.get_resumen_economico(cursos_permitidos=cursos_permitidos)
+
+
+@router.get(
     "/reportes/caja",
     summary="Reporte de Caja por Fechas (Tabla Interactiva)"
 )

@@ -641,6 +641,75 @@ async def eliminar_pago(
     }
 
 
+async def get_resumen_economico(
+    cursos_permitidos: Optional[List[PydanticObjectId]] = None
+) -> dict:
+    """
+    ISSUE-P-DASHBOARD-COBRANZA: resumen económico agregado para el dashboard de
+    Cobranza / coordinador financiero.
+
+    A diferencia de la vista de pagos (que a Cobranza le oculta las matrículas),
+    este resumen SÍ incluye el ingreso por matrícula como dato contable, porque
+    Cobranza genera los informes económicos y necesita ver todo lo recaudado
+    (regla confirmada en reunión: "cobranza lo ve porque generamos los informes
+    económicos"). Es de solo lectura y agregado; no expone pagos individuales de
+    matrícula ni permite operarlos.
+
+    Devuelve:
+      - ingreso_matricula: suma de pagos APROBADOS con concepto Matrícula.
+      - ingreso_colegiatura: suma de pagos APROBADOS de módulos/cuotas (no matrícula).
+      - total_ingresos: ingreso_matricula + ingreso_colegiatura.
+      - total_esperado: suma de total_a_pagar de todas las inscripciones del alcance.
+      - por_cobrar: suma de saldo_pendiente (lo que falta recaudar).
+      - cobros_pendientes: cantidad de PERSONAS/inscripciones con saldo pendiente (> 0).
+      - total_inscritos: cantidad de inscripciones en el alcance.
+
+    Respeta la segmentación por curso (Cobranza con cursos_asignados solo ve su
+    alcance) vía `cursos_permitidos`.
+    """
+    match_pagos: dict = {"estado_pago": EstadoPago.APROBADO}
+    match_enroll: dict = {}
+    if cursos_permitidos is not None:
+        match_pagos["curso_id"] = {"$in": cursos_permitidos}
+        match_enroll["curso_id"] = {"$in": cursos_permitidos}
+
+    pagos_task = Payment.find(match_pagos).to_list()
+    enrollments_task = Enrollment.find(match_enroll).to_list()
+    pagos, enrollments = await asyncio.gather(pagos_task, enrollments_task)
+
+    ingreso_matricula = 0.0
+    ingreso_colegiatura = 0.0
+    for p in pagos:
+        concepto = (p.concepto or "").lower().strip()
+        es_matricula = "matricula" in concepto or "matrícula" in concepto
+        if es_matricula:
+            ingreso_matricula += p.cantidad_pago or 0.0
+        else:
+            ingreso_colegiatura += p.cantidad_pago or 0.0
+
+    total_ingresos = ingreso_matricula + ingreso_colegiatura
+
+    total_esperado = 0.0
+    por_cobrar = 0.0
+    cobros_pendientes = 0
+    for e in enrollments:
+        total_esperado += e.total_a_pagar or 0.0
+        saldo = e.saldo_pendiente or 0.0
+        por_cobrar += saldo
+        if saldo > 0.01:
+            cobros_pendientes += 1
+
+    return {
+        "ingreso_matricula": round(ingreso_matricula, 2),
+        "ingreso_colegiatura": round(ingreso_colegiatura, 2),
+        "total_ingresos": round(total_ingresos, 2),
+        "total_esperado": round(total_esperado, 2),
+        "por_cobrar": round(por_cobrar, 2),
+        "cobros_pendientes": cobros_pendientes,
+        "total_inscritos": len(enrollments),
+    }
+
+
 def _construir_filtro_reporte_caja(
     fecha_desde_dt: datetime,
     fecha_hasta_dt: datetime,
