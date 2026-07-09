@@ -73,7 +73,17 @@ async def create_passive_request(
         respaldo_url=data.respaldo_url,
         estado="pendiente"
     )
-    await solicitud.insert()
+    try:
+        await solicitud.insert()
+    except Exception as e:
+        # AUDITORÍA (MEDIO #10): el check "existente" de arriba no es atómico
+        # (find + insert por separado); dos requests casi simultáneas podían
+        # pasar ambas ese check. El índice único parcial del modelo es la
+        # protección real; aquí solo se traduce el DuplicateKeyError de Mongo
+        # a un mensaje de negocio consistente con el check manual de arriba.
+        if "duplicate key" in str(e).lower() or "E11000" in str(e):
+            raise ValueError("Ya existe una solicitud de pasivo pendiente para esta inscripción")
+        raise
 
     # Notificar a todo el personal CPD/Admin/Superadmin activo (mismo patrón que AccountRequest)
     try:

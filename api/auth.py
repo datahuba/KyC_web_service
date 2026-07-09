@@ -7,24 +7,27 @@ Login y gestión de tokens.
 
 from datetime import datetime
 from typing import Any
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, Request
 from beanie import PydanticObjectId
 
 from core.security import (
     verify_password,
     create_access_token,
     create_password_reset_token,
+    create_email_verification_token,
     decode_access_token,
     get_password_hash,
 )
 from core.config import settings
-from core.email_utils import send_email, build_password_reset_email
+from core.email_utils import send_email, build_password_reset_email, build_email_verification_email
+from core.rate_limit import check_rate_limit
 from schemas.auth import (
     LoginRequest,
     TokenResponse,
     CurrentUserResponse,
     ForgotPasswordRequest,
     ResetPasswordRequest,
+    VerifyEmailRequest,
 )
 from beanie.operators import Or
 from models.user import User
@@ -36,11 +39,15 @@ router = APIRouter()
 
 
 @router.post("/forgot-password", summary="Solicitar restablecimiento de contraseña")
-async def forgot_password(data: ForgotPasswordRequest) -> Any:
+async def forgot_password(data: ForgotPasswordRequest, request: Request) -> Any:
     """
     Envía (de forma automática) un enlace de restablecimiento al correo si existe
     una cuenta (User o Student) con ese email. Respuesta genérica por seguridad.
     """
+    # AUDITORÍA (ALTO): sin límite, un atacante podía disparar envíos de
+    # correo masivos/spam a cualquier email con solo probar direcciones.
+    check_rate_limit(request, "forgot-password", max_intentos=5, ventana_segundos=15 * 60)
+
     email = data.email.strip().lower()
 
     user = await User.find_one(User.email == email)
@@ -89,6 +96,84 @@ async def reset_password(data: ResetPasswordRequest) -> Any:
     return {"message": "Contraseña actualizada correctamente. Ya puedes iniciar sesión."}
 
 
+@router.post("/verify-email", summary="Confirmar correo electrónico")
+async def verify_email(data: VerifyEmailRequest) -> Any:
+    """
+    ISSUE-A-VERIFICACION: valida el token del correo y marca la cuenta
+    (User o Student) como email_verificado=True. NO bloquea el acceso al
+    sistema si no se verifica -- es informativo/de confianza, no un gate.
+    """
+    payload = decode_access_token(data.token)
+    if not payload or payload.get("purpose") != "email_verification":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El enlace es inválido o ha expirado. Solicita uno nuevo desde tu perfil."
+        )
+
+    user_id = payload.get("sub")
+    user_type = payload.get("user_type")
+    email_en_token = payload.get("email")
+    if not user_id or not user_type or not email_en_token:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Enlace inválido.")
+
+    if user_type == "user":
+        target = await User.get(PydanticObjectId(user_id))
+    else:
+        target = await Student.get(PydanticObjectId(user_id))
+
+    if not target:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cuenta no encontrada.")
+
+    # Si el correo cambió después de generar el enlace, el enlace viejo ya no aplica.
+    if (target.email or "").strip().lower() != email_en_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Este enlace corresponde a un correo que ya no está vigente en tu cuenta. Solicita uno nuevo."
+        )
+
+    if not target.email_verificado:
+        target.email_verificado = True
+        target.fecha_verificacion_email = datetime.utcnow()
+        await target.save()
+
+    return {"message": "Correo verificado correctamente."}
+
+
+@router.post(
+    "/resend-verification",
+    summary="Reenviar correo de verificación",
+    responses={401: {"description": "No autenticado"}}
+)
+async def resend_verification(
+    request: Request,
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> Any:
+    """
+    ISSUE-A-VERIFICACION: el usuario autenticado (personal o estudiante) pide
+    un nuevo correo de verificación para su email actual. Protegido con
+    rate limit para no permitir espamear el buzón de un tercero.
+    """
+    check_rate_limit(request, "resend-verification", max_intentos=3, ventana_segundos=15 * 60)
+
+    if not current_user.email:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Tu cuenta no tiene un correo registrado.")
+
+    if current_user.email_verificado:
+        return {"message": "Tu correo ya está verificado."}
+
+    user_type = "user" if isinstance(current_user, User) else "student"
+    token = create_email_verification_token(str(current_user.id), user_type, current_user.email)
+    verify_link = f"{settings.FRONTEND_URL.rstrip('/')}/auth/verify-email?token={token}"
+    nombre = getattr(current_user, "nombre", None) or getattr(current_user, "username", None) or "usuario"
+    html = build_email_verification_email(nombre, verify_link, settings.EMAIL_VERIFICATION_EXPIRE_MINUTES // 60)
+    enviado = await send_email(current_user.email, "Confirma tu correo - Postgrado UAGRM", html)
+
+    return {
+        "message": "Te enviamos un enlace de verificación a tu correo." if enviado
+                    else "No se pudo enviar el correo en este momento. Intenta de nuevo más tarde."
+    }
+
+
 @router.post(
     "/login",
     response_model=TokenResponse,
@@ -99,7 +184,7 @@ async def reset_password(data: ResetPasswordRequest) -> Any:
         403: {"description": "Usuario inactivo"}
     }
 )
-async def login_user(login_data: LoginRequest) -> Any:
+async def login_user(login_data: LoginRequest, request: Request) -> Any:
     """
     Login para administradores
     
@@ -111,8 +196,18 @@ async def login_user(login_data: LoginRequest) -> Any:
     
     **Retorna:** JWT Token de acceso
     """
-    # Buscar usuario por username
-    user = await User.find_one(User.username == login_data.username)
+    # AUDITORÍA (ALTO #8 - seguridad): sin límite, fuerza bruta de contraseñas
+    # era completamente viable contra este endpoint. Ver core/rate_limit.py.
+    check_rate_limit(request, "login", max_intentos=10, ventana_segundos=15 * 60)
+
+    # Buscar usuario por username o email (el formulario del frontend acepta ambos)
+    identificador = login_data.username.strip()
+    user = await User.find_one(
+        Or(
+            User.username == identificador,
+            User.email == identificador.lower()
+        )
+    )
     
     if not user:
         raise HTTPException(
@@ -168,7 +263,7 @@ async def login_user(login_data: LoginRequest) -> Any:
         403: {"description": "Estudiante inactivo"}
     }
 )
-async def login_student(login_data: LoginRequest) -> Any:
+async def login_student(login_data: LoginRequest, request: Request) -> Any:
     """
     Login para estudiantes
     
@@ -176,12 +271,21 @@ async def login_student(login_data: LoginRequest) -> Any:
     
     **Credenciales:**
     - `username`: Número de registro del estudiante
-    - `password`: Contraseña (inicialmente = carnet)
+    - `password`: Contraseña (inicialmente = 'Uagrm.<CI>')
     
     **Retorna:** JWT Token de acceso
     """
-    # Buscar estudiante por registro
-    student = await Student.find_one(Student.registro == login_data.username)
+    # AUDITORÍA (ALTO #8 - seguridad): ver nota equivalente en login_user.
+    check_rate_limit(request, "login-student", max_intentos=10, ventana_segundos=15 * 60)
+
+    # Buscar estudiante por registro o email (el formulario del frontend acepta ambos)
+    identificador = login_data.username.strip()
+    student = await Student.find_one(
+        Or(
+            Student.registro == identificador,
+            Student.email == identificador.lower()
+        )
+    )
     
     if not student:
         raise HTTPException(
@@ -252,7 +356,10 @@ async def get_me(
             activo=current_user.activo,
             ultimo_acceso=current_user.ultimo_acceso,
             nombre=current_user.username,  # Fallback de nombre para el personal administrativo
-            registro=None
+            registro=None,
+            nombre_funcional=current_user.nombre_funcional,
+            cursos_asignados=current_user.cursos_asignados,  # ISSUE-P-SEGMENTACION
+            email_verificado=current_user.email_verificado  # ISSUE-A-VERIFICACION
         )
     else:  # Student
         return CurrentUserResponse(
@@ -265,6 +372,7 @@ async def get_me(
             ultimo_acceso=None,
             nombre=current_user.nombre,  # Inyección del nombre real desde la ficha del estudiante
             registro=current_user.registro,  # Inyección del código de registro oficial
-            terminos_aceptados=current_user.terminos_aceptados  # ISSUE-Q-PRE
+            terminos_aceptados=current_user.terminos_aceptados,  # ISSUE-Q-PRE
+            email_verificado=current_user.email_verificado  # ISSUE-A-VERIFICACION
         )
     

@@ -89,8 +89,12 @@ async def create_payment_config(
             tipo_cuenta=tipo_cuenta,
             qr_url=qr_url,
             notas=notas,
-            creado_por=current_user.username,
-            actualizado_por=current_user.username,
+            # ISSUE-R-PERFIL-GENERICO: usar nombre_visible (nombre_funcional si
+            # existe, ej. "Cajero Ventanilla 1", o username como fallback) en
+            # vez de siempre el username, para que perfiles rotativos (Cobranza)
+            # queden identificados por función y no por la persona actual.
+            creado_por=current_user.nombre_visible,
+            actualizado_por=current_user.nombre_visible,
             is_active=True
         )
         
@@ -196,8 +200,8 @@ async def update_payment_config(
         if notas is not None:
             config.notas = notas
         
-        # Actualizar auditoría
-        config.actualizado_por = current_user.username
+        # Actualizar auditoría (ISSUE-R-PERFIL-GENERICO: nombre_visible)
+        config.actualizado_por = current_user.nombre_visible
         await config.save()
         
         return config

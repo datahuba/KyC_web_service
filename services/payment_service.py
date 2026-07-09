@@ -17,6 +17,7 @@ from models.enums import EstadoPago
 from schemas.payment import PaymentCreate
 from beanie import PydanticObjectId
 from beanie.operators import In, Or
+from beanie.exceptions import RevisionIdWasChanged
 from services import enrollment_service
 
 # ISSUE-P-REVERSION: ventana en la que el banco puede revertir una transferencia ya aprobada
@@ -215,6 +216,19 @@ async def create_payment(
     cuota_final = payment_in.numero_cuota if payment_in.numero_cuota else next_payment["numero_cuota"]
     monto_real = payment_in.monto_comprobante if payment_in.monto_comprobante else payment_in.cantidad_pago
 
+    # AUDITORÍA (ALTO #4): sin este control, un pago (aún PENDIENTE, antes de
+    # que cobranza lo apruebe) podía exceder por completo el saldo pendiente
+    # real de la inscripción. actualizar_saldo_enrollment clampa
+    # saldo_pendiente a 0 al aprobar, pero total_pagado sigue creciendo sin
+    # límite -- "Pagado > Total" quedaba permanente sin ningún mecanismo de
+    # crédito/devolución. Se permite un pequeño margen (1 Bs) para redondeos
+    # legítimos del estudiante.
+    if monto_real > enrollment.saldo_pendiente + 1.0:
+        raise ValueError(
+            f"El monto reportado (Bs. {monto_real}) supera el saldo pendiente de la inscripción "
+            f"(Bs. {enrollment.saldo_pendiente}). Verifica el monto antes de registrar el pago."
+        )
+
     payment = Payment(
         inscripcion_id=payment_in.inscripcion_id,
         estudiante_id=enrollment.estudiante_id,
@@ -239,7 +253,16 @@ async def create_payment(
     await payment.insert()
     
     # [NOTIFICACIONES - ISSUE-U-BUZON]
-    # Notificar a todo el personal de Cobranzas y Administración sobre el pago pendiente
+    # BUG CORREGIDO (reportado por el usuario: pagos/inscripciones no llegaban
+    # a las notificaciones correctas): esto SIEMPRE notificaba solo a
+    # COBRANZA, sin importar el concepto. Pero el propio sistema bloquea a
+    # Cobranza de aprobar pagos con concepto "Matrícula" (solo CPD puede,
+    # ver aprobar_pago en api/payments.py) -- un pago de Matrícula pendiente
+    # nunca le llegaba a quien realmente debía aprobarlo (CPD), y Cobranza
+    # recibía una notificación de un pago que ni siquiera podía gestionar.
+    # Ahora se notifica al rol correcto según el concepto, con el mismo
+    # criterio (regex "matr[ií]cula") usado en el resto de endpoints de
+    # pagos para mantener consistencia.
     try:
         from models.user import User
         from models.enums import UserRole
@@ -247,15 +270,27 @@ async def create_payment(
         
         student_obj = await Student.get(student_id)
         student_name = student_obj.nombre if student_obj and student_obj.nombre else "Estudiante registrado"
-        
-        cobradores = await User.find(
-            User.rol == UserRole.COBRANZA,
-            User.activo == True
+
+        concepto_lower = (concepto_final or "").lower().strip()
+        is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
+        rol_revisor = UserRole.CPD if is_matricula else UserRole.COBRANZA
+
+        from beanie.operators import Or
+        revisores = await User.find(
+            User.activo == True,
+            Or(
+                User.rol == rol_revisor,
+                # Admin/Superadmin pueden aprobar cualquier pago sin importar
+                # el concepto (ver aprobar_pago en api/payments.py), así que
+                # también deben enterarse siempre, no solo el rol específico.
+                User.rol == UserRole.ADMIN,
+                User.rol == UserRole.SUPERADMIN
+            )
         ).to_list()
         
-        for cob in cobradores:
+        for revisor in revisores:
             await create_notification(
-                destinatario_id=cob.id,
+                destinatario_id=revisor.id,
                 tipo_destinatario="user",
                 titulo="Nuevo Pago Pendiente",
                 mensaje=f"El estudiante {student_name} ({student_obj.registro if student_obj else ''}) ha subido un comprobante de Bs. {monto_real} por el concepto '{concepto_final}'.",
@@ -292,9 +327,14 @@ async def get_all_payments(
     q: Optional[str] = None,
     estado: Optional[str] = None,
     curso_id: Optional[PydanticObjectId] = None,
-    estudiante_id: Optional[PydanticObjectId] = None
+    estudiante_id: Optional[PydanticObjectId] = None,
+    cursos_permitidos: Optional[List[PydanticObjectId]] = None
 ) -> tuple[List[Payment], int]:
-    
+    """
+    cursos_permitidos (ISSUE-P-SEGMENTACION): si se provee (no None), restringe
+    los resultados únicamente a pagos de esos cursos. Reutiliza el mismo patrón
+    de segmentación que ENCARGADO_CURSO en enrollment_service.get_all_enrollments.
+    """
     query_dict = {}
     
     if estado and estado != "Todos los estados":
@@ -307,6 +347,9 @@ async def get_all_payments(
         enrollments = await Enrollment.find(Enrollment.curso_id == curso_id).to_list()
         enrollment_ids = [e.id for e in enrollments]
         query_dict["inscripcion_id"] = {"$in": enrollment_ids}
+
+    if cursos_permitidos is not None:
+        query_dict["curso_id"] = {"$in": cursos_permitidos}
         
     if q:
         regex_pattern = {"$regex": q, "$options": "i"}
@@ -337,7 +380,15 @@ async def get_all_payments(
     return payments, total_count
 
 
-async def get_payments_pendientes() -> List[Payment]:
+async def get_payments_pendientes(
+    cursos_permitidos: Optional[List[PydanticObjectId]] = None
+) -> List[Payment]:
+    """cursos_permitidos (ISSUE-P-SEGMENTACION): ver nota en get_all_payments."""
+    if cursos_permitidos is not None:
+        return await Payment.find(
+            Payment.estado_pago == EstadoPago.PENDIENTE,
+            In(Payment.curso_id, cursos_permitidos)
+        ).to_list()
     return await Payment.find(Payment.estado_pago == EstadoPago.PENDIENTE).to_list()
 
 
@@ -355,7 +406,16 @@ async def aprobar_pago(
         )
     
     payment.aprobar_pago(admin_username)
-    await payment.save()
+    try:
+        await payment.save()
+    except RevisionIdWasChanged:
+        # AUDITORÍA (CRÍTICO #2): otra request (aprobar/rechazar) ya modificó
+        # este pago entre la lectura y este guardado. Se rechaza limpio en
+        # vez de sobrescribir a ciegas (evita duplicar/inflar el saldo).
+        raise ValueError(
+            "Este pago ya fue modificado por otra acción (posible aprobación/rechazo simultáneo). "
+            "Actualiza la página e intenta de nuevo."
+        )
     
     await enrollment_service.actualizar_saldo_enrollment(
         enrollment_id=payment.inscripcion_id,
@@ -406,7 +466,14 @@ async def rechazar_pago(
         )
     
     payment.rechazar_pago(admin_username, motivo)
-    await payment.save()
+    try:
+        await payment.save()
+    except RevisionIdWasChanged:
+        # AUDITORÍA (CRÍTICO #2): ver nota equivalente en aprobar_pago.
+        raise ValueError(
+            "Este pago ya fue modificado por otra acción (posible aprobación/rechazo simultáneo). "
+            "Actualiza la página e intenta de nuevo."
+        )
 
     await _registrar_auditoria_financiera(
         accion="RECHAZAR PAGO",
@@ -456,7 +523,13 @@ async def anular_pago(
         )
     
     payment.anular_pago(admin_username, motivo)
-    await payment.save()
+    try:
+        await payment.save()
+    except RevisionIdWasChanged:
+        # AUDITORÍA (CRÍTICO #2): ver nota equivalente en aprobar_pago.
+        raise ValueError(
+            "Este pago ya fue modificado por otra acción simultánea. Actualiza la página e intenta de nuevo."
+        )
 
     await enrollment_service.actualizar_saldo_enrollment(
         enrollment_id=payment.inscripcion_id,
@@ -490,6 +563,93 @@ async def anular_pago(
         print(f"Error al enviar notificación de pago anulado: {str(e)}")
 
     return payment
+
+
+def _construir_filtro_reporte_caja(
+    fecha_desde_dt: datetime,
+    fecha_hasta_dt: datetime,
+    curso_id: Optional[PydanticObjectId] = None,
+    estado: Optional[str] = None,
+    cursos_permitidos: Optional[List[PydanticObjectId]] = None,
+) -> dict:
+    """
+    ISSUE-P-REPORTE: filtro compartido entre la tabla interactiva y el export
+    a Excel, para que ambos muestren siempre los mismos datos.
+
+    Filtra por `fecha_comprobante` (fecha REAL de la transacción aportada por
+    el usuario) O `fecha_subida` como respaldo si el pago no tiene
+    `fecha_comprobante` registrada (defensivo; el flujo real del frontend
+    siempre la envía, pero un pago creado por otra vía sin ese campo no debe
+    desaparecer silenciosamente del reporte) -- regla de negocio explícita:
+    "la contabilidad financiera se rige por la fecha real de la transacción,
+    no por la fecha de aprobación/verificación en el panel"
+    (steering/structure.md). El endpoint de Excel anterior filtraba solo por
+    fecha_subida; se corrige aquí para ambos casos (tabla y export).
+    """
+    criteria: dict = {
+        "$or": [
+            {"fecha_comprobante": {"$gte": fecha_desde_dt, "$lte": fecha_hasta_dt}},
+            {"fecha_comprobante": None, "fecha_subida": {"$gte": fecha_desde_dt, "$lte": fecha_hasta_dt}},
+        ]
+    }
+    if curso_id:
+        criteria["curso_id"] = curso_id
+    if estado and estado != "Todos los estados":
+        criteria["estado_pago"] = estado
+    if cursos_permitidos is not None:
+        # Si ya hay un curso_id específico Y además hay segmentación, deben
+        # combinarse (AND), no pisarse uno al otro.
+        if "curso_id" in criteria:
+            if criteria["curso_id"] not in cursos_permitidos:
+                # Curso solicitado fuera de los permitidos: forzar 0 resultados
+                # en vez de devolver datos de otro curso.
+                criteria["curso_id"] = {"$in": []}
+        else:
+            criteria["curso_id"] = {"$in": cursos_permitidos}
+    return criteria
+
+
+async def get_reporte_caja(
+    fecha_desde_dt: datetime,
+    fecha_hasta_dt: datetime,
+    page: int = 1,
+    per_page: int = 20,
+    curso_id: Optional[PydanticObjectId] = None,
+    estado: Optional[str] = None,
+    concepto_regex: Optional[dict] = None,
+    cursos_permitidos: Optional[List[PydanticObjectId]] = None,
+) -> dict:
+    """
+    ISSUE-P-REPORTE: tabla interactiva de ingresos por rango de fechas (fecha
+    real del pago), curso y estado, con totales agregados para el resumen
+    visual (no solo la lista paginada).
+    """
+    criteria = _construir_filtro_reporte_caja(
+        fecha_desde_dt, fecha_hasta_dt, curso_id=curso_id, estado=estado, cursos_permitidos=cursos_permitidos
+    )
+    if concepto_regex:
+        criteria.update(concepto_regex)
+
+    total_count = await Payment.find(criteria).count()
+    skip = (page - 1) * per_page
+    payments = await Payment.find(criteria).sort("-fecha_comprobante").skip(skip).limit(per_page).to_list()
+
+    # Totales agregados sobre TODO el rango filtrado (no solo la página actual)
+    todos_los_pagos_del_rango = await Payment.find(criteria).to_list()
+    total_aprobado = sum(p.cantidad_pago for p in todos_los_pagos_del_rango if p.estado_pago == EstadoPago.APROBADO)
+    total_pendiente = sum(p.cantidad_pago for p in todos_los_pagos_del_rango if p.estado_pago == EstadoPago.PENDIENTE)
+    total_anulado = sum(p.cantidad_pago for p in todos_los_pagos_del_rango if p.estado_pago == EstadoPago.ANULADO)
+
+    return {
+        "payments": payments,
+        "total_count": total_count,
+        "resumen": {
+            "cantidad_pagos": len(todos_los_pagos_del_rango),
+            "total_aprobado": round(total_aprobado, 2),
+            "total_pendiente": round(total_pendiente, 2),
+            "total_anulado": round(total_anulado, 2),
+        }
+    }
 
 
 async def get_resumen_pagos_enrollment(enrollment_id: PydanticObjectId) -> dict:
@@ -536,6 +696,15 @@ async def create_caja_directo_payment(
 
     concepto_final = concepto if concepto else next_payment["concepto"]
     cuota_final = numero_cuota if numero_cuota else next_payment["numero_cuota"]
+
+    # AUDITORÍA (ALTO #4): mismo control de sobrepago que create_payment. El
+    # cobro en Caja se crea directamente APROBADO, así que aquí el riesgo es
+    # mayor (no hay paso de revisión posterior que lo detecte).
+    if cantidad_pago > enrollment.saldo_pendiente + 1.0:
+        raise ValueError(
+            f"El monto a cobrar (Bs. {cantidad_pago}) supera el saldo pendiente de la inscripción "
+            f"(Bs. {enrollment.saldo_pendiente}). Verifica el monto antes de registrar el cobro."
+        )
 
     # Crear pago ya APROBADO naciendo en Caja
     payment = Payment(

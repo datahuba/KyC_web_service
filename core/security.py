@@ -78,6 +78,19 @@ def create_password_reset_token(user_id: str, user_type: str) -> str:
     )
 
 
+def create_email_verification_token(user_id: str, user_type: str, email: str) -> str:
+    """
+    ISSUE-A-VERIFICACION: token de un solo propósito para confirmar un correo.
+    Incluye el email en el payload (no solo el user_id) para que, si el usuario
+    cambia de correo antes de hacer clic en un enlace viejo, ese enlace viejo
+    quede invalidado automáticamente al no coincidir con el email actual.
+    """
+    return create_access_token(
+        {"sub": user_id, "user_type": user_type, "purpose": "email_verification", "email": email.strip().lower()},
+        expires_delta=timedelta(minutes=settings.EMAIL_VERIFICATION_EXPIRE_MINUTES)
+    )
+
+
 def decode_access_token(token: str) -> Optional[dict]:
     """
     Decodificar y validar un token JWT

@@ -13,7 +13,7 @@ Permisos:
 
 from typing import List, Optional
 from datetime import datetime
-from models.enrollment import Enrollment, ModuloEstado
+from models.enrollment import Enrollment, ModuloEstado, CargoAdicionalItemSnapshot
 from models.student import Student
 from models.course import Course
 from models.enums import TipoEstudiante, EstadoInscripcion
@@ -22,19 +22,49 @@ from beanie import PydanticObjectId
 from models.discount import Discount
 from beanie.operators import In, Or
 
-async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str) -> Enrollment:
+async def create_enrollment(
+    enrollment_in: EnrollmentCreate,
+    admin_username: str,
+    student: Optional[Student] = None,
+    course: Optional[Course] = None,
+    skip_link_updates: bool = False
+) -> Enrollment:
     """
     Crear una nueva inscripción (solo admins)
+
+    OPTIMIZACIÓN DE IMPORTACIÓN MASIVA (2026-07-09, ISSUE-Q-IMPORT-TIMEOUT):
+    `student`/`course` permiten pasar objetos ya obtenidos en memoria para
+    evitar los round-trips `Student.get()`/`Course.get()` cuando el llamador
+    ya los tiene (ej. import_students_from_excel, donde el mismo `course` se
+    reutiliza para decenas de estudiantes en una sola importación).
+
+    `skip_link_updates=True` omite los `course.save()`/`student.save()` que
+    agregan la referencia cruzada (course.inscritos / student.lista_cursos_ids)
+    -- estos dos documentos NO tienen optimistic locking (`use_revision`), por
+    lo que mutarlos y guardarlos de forma concurrente (ej. en un
+    `asyncio.gather` sobre varios estudiantes) puede perder escrituras
+    (last-writer-wins). El llamador que use este flag es responsable de
+    actualizar esas referencias por su cuenta, idealmente en un solo batch
+    después de que todas las inscripciones individuales ya se crearon.
     """
-    # 1. Obtener estudiante y curso
-    student = await Student.get(enrollment_in.estudiante_id)
-    if not student:
-        raise ValueError(f"Estudiante {enrollment_in.estudiante_id} no encontrado")
-    
-    course = await Course.get(enrollment_in.curso_id)
-    if not course:
-        raise ValueError(f"Curso {enrollment_in.curso_id} no encontrado")
-    
+    # 1. Obtener estudiante y curso (si no se proveyeron ya en memoria)
+    if student is None:
+        student = await Student.get(enrollment_in.estudiante_id)
+        if not student:
+            raise ValueError(f"Estudiante {enrollment_in.estudiante_id} no encontrado")
+
+    if course is None:
+        course = await Course.get(enrollment_in.curso_id)
+        if not course:
+            raise ValueError(f"Curso {enrollment_in.curso_id} no encontrado")
+
+    # AUDITORÍA (MEDIO #7): create_enrollment_request (solicitud del propio
+    # estudiante) sí valida curso.activo, pero esta vía directa (CPD/Encargado
+    # de Curso) no lo hacía -- dos rutas de entrada con validación asimétrica,
+    # permitiendo inscribir gente en cursos ya desactivados/cerrados.
+    if not course.activo:
+        raise ValueError("Este curso no está activo y no acepta nuevas inscripciones")
+
     # 2. Validar que no esté ya inscrito
     existing = await Enrollment.find_one(
         Enrollment.estudiante_id == enrollment_in.estudiante_id,
@@ -46,12 +76,14 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
             f"El estudiante ya está inscrito en este curso (Inscripción ID: {existing.id})"
         )
     
-    # 3. Determinar tipo de estudiante (usar el del Student)
-    es_interno = student.es_estudiante_interno == TipoEstudiante.INTERNO
+    # 3. ISSUE-P-PRECIO-UNICO (2026-07-08): el precio del programa es el
+    # mismo para todos los estudiantes, sin importar procedencia/tipo. El
+    # campo Student.es_estudiante_interno se conserva solo como dato
+    # informativo (de dónde es el estudiante), ya no determina el precio.
     
-    # 4. Obtener precios del curso
-    costo_total = course.get_costo_total(es_interno) 
-    costo_matricula = course.get_matricula(es_interno) 
+    # 4. Obtener precios del curso (precio único)
+    costo_total = course.get_costo_total()
+    costo_matricula = course.get_matricula()
     
     # 5. Aplicar descuento del curso 
     descuento_curso = 0.0
@@ -80,9 +112,14 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
         descuento_personal = enrollment_in.descuento_personalizado
         
     colegiatura_final = total_con_descuento_curso - (total_con_descuento_curso * descuento_personal / 100)
+
+    # ISSUE-P-CARGO-MULTIITEM: suma de todos los ítems de cargo adicional/
+    # complementario al programa (ej. varios talleres incluidos). NINGÚN
+    # ítem recibe descuentos de curso/estudiante -- se cobran íntegros.
+    cargo_adicional = course.get_cargo_adicional_total()
     
-    # MATEMÁTICA FINANCIERA CORREGIDA:
-    total_final = colegiatura_final + costo_matricula
+    # MATEMÁTICA FINANCIERA:
+    total_final = colegiatura_final + costo_matricula + cargo_adicional
 
     # ISSUE-P-RECALCULO-NOTA: snapshot de la nota mínima exigida por el descuento personal
     # (solo si viene de un Discount vinculado con condición académica; descuento_personalizado libre no aplica)
@@ -150,6 +187,14 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
         descuento_curso_aplicado=descuento_curso,
         descuento_estudiante_id=descuento_estudiante_id,
         descuento_personalizado=descuento_personal,
+
+        # ISSUE-P-CARGO-MULTIITEM: snapshot de la lista de ítems de cargo
+        # adicional al momento de inscribirse (si el curso los tenía
+        # definidos en ese momento).
+        cargo_adicional_items=[
+            CargoAdicionalItemSnapshot(nombre=item.nombre, costo=item.costo)
+            for item in course.cargo_adicional_items
+        ],
         
         total_a_pagar=round(total_final, 2),
         saldo_pendiente=round(total_final, 2),
@@ -161,15 +206,16 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
     
     await enrollment.insert()
     
-    # 10. Agregar estudiante a la lista
-    if enrollment_in.estudiante_id not in course.inscritos:
-        course.inscritos.append(enrollment_in.estudiante_id)
-        await course.save()
-    
-    # 11. Agregar curso al estudiante
-    if enrollment_in.curso_id not in student.lista_cursos_ids:
-        student.lista_cursos_ids.append(enrollment_in.curso_id)
-        await student.save()
+    # 10. Agregar estudiante a la lista / 11. Agregar curso al estudiante
+    # (omitido si skip_link_updates=True -- ver docstring de esta función)
+    if not skip_link_updates:
+        if enrollment_in.estudiante_id not in course.inscritos:
+            course.inscritos.append(enrollment_in.estudiante_id)
+            await course.save()
+
+        if enrollment_in.curso_id not in student.lista_cursos_ids:
+            student.lista_cursos_ids.append(enrollment_in.curso_id)
+            await student.save()
     
     return enrollment
 
@@ -202,12 +248,19 @@ async def get_all_enrollments(
     estado: Optional[EstadoInscripcion] = None,
     curso_id: Optional[PydanticObjectId] = None,
     estudiante_id: Optional[PydanticObjectId] = None,
-    cursos_permitidos: Optional[List[PydanticObjectId]] = None
+    cursos_permitidos: Optional[List[PydanticObjectId]] = None,
+    con_descuento: Optional[bool] = None,
+    descuento_id: Optional[PydanticObjectId] = None
 ) -> tuple[List[Enrollment], int]:
     """
     cursos_permitidos (ISSUE-R-ROLES): si se provee (no None), restringe los resultados
     únicamente a inscripciones de esos cursos. Se usa para segmentar el rol ENCARGADO_CURSO
     (y en el futuro COBRANZA, ISSUE-P-SEGMENTACION) a sus cursos asignados.
+
+    con_descuento/descuento_id (fix 2026-07-09, reportado por el usuario: "no pude
+    seleccionar los que están con descuento y cuál descuento"): permiten filtrar
+    la tabla de inscripciones por si tienen algún descuento personal aplicado
+    (True) o no (False), y opcionalmente por un Discount específico.
     """
     query = Enrollment.find()
     
@@ -219,6 +272,20 @@ async def get_all_enrollments(
         query = query.find(Enrollment.estudiante_id == estudiante_id)
     if cursos_permitidos is not None:
         query = query.find(In(Enrollment.curso_id, cursos_permitidos))
+    if descuento_id:
+        query = query.find(Enrollment.descuento_estudiante_id == descuento_id)
+    elif con_descuento is True:
+        query = query.find(
+            Or(
+                Enrollment.descuento_estudiante_id != None,
+                Enrollment.descuento_personalizado > 0
+            )
+        )
+    elif con_descuento is False:
+        query = query.find(
+            Enrollment.descuento_estudiante_id == None,
+            Or(Enrollment.descuento_personalizado == None, Enrollment.descuento_personalizado <= 0)
+        )
         
     if q:
         regex_pattern = {"$regex": q, "$options": "i"}
@@ -239,25 +306,109 @@ async def get_all_enrollments(
 
 async def update_enrollment_descuento(
     enrollment_id: PydanticObjectId,
-    descuento_personalizado: float,
-    admin_username: str
+    descuento_personalizado: Optional[float],
+    admin_username: str,
+    descuento_id: Optional[PydanticObjectId] = None
 ) -> Enrollment:
+    """
+    AUDITORÍA (CRÍTICO #3): antes solo recalculaba total_a_pagar/saldo_pendiente
+    a nivel global, sin tocar el costo de cada módulo individual ni disparar
+    actualizar_saldo_enrollment -- el kardex por módulo (usado para el
+    prorrateo en cascada) quedaba desincronizado del nuevo total. Ahora se
+    redistribuye el costo por módulo con la misma proporción que
+    create_enrollment, y se llama a la cascada real al final para que
+    monto_pagado/estado por módulo y el estado de la inscripción queden
+    consistentes con los pagos históricos ya aprobados.
+
+    BUG ENCONTRADO (2026-07-09, reportado por el usuario: "asigné la beca
+    pero no veo el recálculo"): `EnrollmentUpdate.descuento_id` existía en el
+    schema desde siempre, pero esta función SOLO leía `descuento_personalizado`
+    (el porcentaje libre) -- si el CPD seleccionaba un `Discount` real del
+    combo "Descuento Personal (Beca)", ese `descuento_id` se ignoraba en
+    silencio y el porcentaje aplicado quedaba en 0 (o en el valor libre
+    anterior), sin recalcular nada. Ahora, si se provee `descuento_id`, se
+    resuelve el `Discount` real (igual que en `create_enrollment`) y se usa
+    su porcentaje; `descuento_personalizado` sigue funcionando como
+    porcentaje libre si no se selecciona un `Discount` concreto.
+    """
     enrollment = await Enrollment.get(enrollment_id)
     if not enrollment:
         raise ValueError(f"Inscripción {enrollment_id} no encontrada")
-    
+
+    descuento_estudiante_id = enrollment.descuento_estudiante_id
+    nota_minima_snapshot = enrollment.nota_minima_beca
+
+    if descuento_id is not None:
+        discount_sel = await Discount.get(descuento_id)
+        if not discount_sel:
+            raise ValueError(f"Descuento {descuento_id} no encontrado")
+        if not discount_sel.activo:
+            raise ValueError(f"El descuento '{discount_sel.nombre}' no está activo")
+        descuento_personalizado = discount_sel.porcentaje
+        descuento_estudiante_id = discount_sel.id
+        nota_minima_snapshot = discount_sel.nota_minima_requerida
+    elif descuento_personalizado is not None:
+        # Porcentaje libre (sin vincular a un Discount concreto): se limpia
+        # la referencia a un Discount anterior, si había, para no dejar un
+        # descuento_estudiante_id apuntando a un porcentaje que ya no aplica.
+        descuento_estudiante_id = None
+        nota_minima_snapshot = None
+    else:
+        descuento_personalizado = enrollment.descuento_personalizado or 0.0
+
     total_con_descuento_curso = enrollment.costo_total - (enrollment.costo_total * enrollment.descuento_curso_aplicado / 100)
     colegiatura_final = total_con_descuento_curso - (total_con_descuento_curso * descuento_personalizado / 100)
-    total_final = colegiatura_final + enrollment.costo_matricula
-    nuevo_saldo = total_final - enrollment.total_pagado
-    
+    # ISSUE-P-CARGO-MULTIITEM: el cargo adicional (snapshot de ítems de esta
+    # inscripción) se mantiene fuera del recálculo por descuento -- ningún
+    # ítem recibe descuentos de curso/estudiante, se preserva íntegro.
+    total_final = colegiatura_final + enrollment.costo_matricula + enrollment.get_cargo_adicional_total()
+
+    # Redistribuir el costo de cada módulo con la misma proporción que tenía
+    # el curso original (mismo patrón que create_enrollment), preservando
+    # monto_pagado/nota/estado_academico de cada ModuloEstado. También se
+    # recalcula costo_sin_beca_personal (ISSUE-P-RECALCULO-NOTA) usando la
+    # misma proporción, para que la pérdida de beca por nota siga funcionando
+    # correctamente después de reasignar el descuento desde este endpoint.
+    if enrollment.modulos:
+        suma_costo_modulos_actual = sum(m.costo for m in enrollment.modulos)
+        total_asignado = 0.0
+        total_asignado_sin_beca = 0.0
+        for i, mod in enumerate(enrollment.modulos):
+            es_ultimo = i == len(enrollment.modulos) - 1
+            if suma_costo_modulos_actual > 0:
+                proporcion = mod.costo / suma_costo_modulos_actual
+            else:
+                proporcion = 1 / len(enrollment.modulos)
+
+            if es_ultimo:
+                mod.costo = max(0.0, round(colegiatura_final - total_asignado, 2))
+            else:
+                mod.costo = round(proporcion * colegiatura_final, 2)
+                total_asignado += mod.costo
+
+            if nota_minima_snapshot is not None:
+                if es_ultimo:
+                    mod.costo_sin_beca_personal = max(0.0, round(total_con_descuento_curso - total_asignado_sin_beca, 2))
+                else:
+                    mod.costo_sin_beca_personal = round(proporcion * total_con_descuento_curso, 2)
+                    total_asignado_sin_beca += mod.costo_sin_beca_personal
+            else:
+                mod.costo_sin_beca_personal = None
+
     enrollment.descuento_personalizado = descuento_personalizado
+    enrollment.descuento_estudiante_id = descuento_estudiante_id
+    enrollment.nota_minima_beca = nota_minima_snapshot
     enrollment.total_a_pagar = round(total_final, 2)
-    enrollment.saldo_pendiente = round(max(0.0, nuevo_saldo), 2)
+    # Valor provisional para no violar el validador de saldo_pendiente antes
+    # del primer save(); actualizar_saldo_enrollment recompone el definitivo
+    # justo debajo a partir de los pagos históricos reales.
+    enrollment.saldo_pendiente = round(max(0.0, total_final - enrollment.total_pagado), 2)
     enrollment.updated_at = datetime.utcnow()
     
     await enrollment.save()
-    return enrollment
+
+    await actualizar_saldo_enrollment(enrollment_id)
+    return await Enrollment.get(enrollment_id)
 
 
 async def cambiar_estado_enrollment(
@@ -265,10 +416,34 @@ async def cambiar_estado_enrollment(
     nuevo_estado: EstadoInscripcion,
     admin_username: str
 ) -> Enrollment:
+    """
+    AUDITORÍA (CRÍTICO #5): este endpoint genérico (PATCH /enrollments/{id})
+    permitía fijar estado=SUSPENDIDO directamente, sin pasar por
+    PassiveRequest ni congelado_service -- sin motivo_suspension, sin
+    notificar al estudiante, sin cobrar la tasa de congelamiento. También
+    permitía "sacar" una inscripción de SUSPENDIDO sin limpiar
+    motivo_suspension/fecha_congelamiento/multa_reincorporacion_pendiente,
+    dejando esos campos inconsistentes con el nuevo estado. Ambos casos
+    ahora se bloquean explícitamente; deben usarse los endpoints dedicados
+    (/passive-requests/, /enrollments/{id}/congelar,
+    /enrollments/{id}/reactivar-congelado).
+    """
     enrollment = await Enrollment.get(enrollment_id)
     if not enrollment:
         raise ValueError(f"Inscripción {enrollment_id} no encontrada")
-    
+
+    if nuevo_estado == EstadoInscripcion.SUSPENDIDO:
+        raise ValueError(
+            "No se puede suspender una inscripción directamente. Usa el flujo de "
+            "Solicitud de Pasivo o el de Congelamiento, que registran motivo y notifican al estudiante."
+        )
+
+    if enrollment.estado == EstadoInscripcion.SUSPENDIDO:
+        raise ValueError(
+            "Esta inscripción está suspendida (pasivo/congelado/abandono). "
+            "Usa el endpoint de reactivación correspondiente en vez de cambiar el estado directamente."
+        )
+
     enrollment.estado = nuevo_estado
     enrollment.updated_at = datetime.utcnow()
     
@@ -281,24 +456,34 @@ async def cambiar_estado_enrollment(
 # ========================================================================
 async def actualizar_saldo_enrollment(
     enrollment_id: PydanticObjectId,
-    monto_pago_aprobado: float = 0.0 # Se mantiene la firma por compatibilidad, pero ya no se usa ciegamente
+    monto_pago_aprobado: float = 0.0, # Se mantiene la firma por compatibilidad, pero ya no se usa ciegamente
+    enrollment: Optional[Enrollment] = None,
+    pagos_aprobados: Optional[list] = None
 ):
     """
     Reconstruye el saldo de la inscripción sumando todos los pagos históricos aprobados.
     Distribuye los fondos en cascada (Waterfall) reparando cualquier inconsistencia de base de datos.
+
+    OPTIMIZACIÓN DE IMPORTACIÓN MASIVA (2026-07-09, ISSUE-Q-IMPORT-TIMEOUT):
+    `enrollment`/`pagos_aprobados` permiten pasar el documento y los pagos ya
+    obtenidos en memoria, evitando el `Enrollment.get()` + `Payment.find()`
+    redundantes cuando el llamador (ej. import_students_from_excel) acaba de
+    crear ambos en el mismo flujo.
     """
     from models.payment import Payment
     from models.enums import EstadoPago
 
-    enrollment = await Enrollment.get(enrollment_id)
-    if not enrollment:
-        raise ValueError(f"Inscripción {enrollment_id} no encontrada")
-    
+    if enrollment is None:
+        enrollment = await Enrollment.get(enrollment_id)
+        if not enrollment:
+            raise ValueError(f"Inscripción {enrollment_id} no encontrada")
+
     # 1. Recolectar la verdad absoluta: ¿Cuánto dinero REALMENTE tiene aprobado este alumno?
-    pagos_aprobados = await Payment.find(
-        Payment.inscripcion_id == enrollment_id,
-        Payment.estado_pago == EstadoPago.APROBADO
-    ).to_list()
+    if pagos_aprobados is None:
+        pagos_aprobados = await Payment.find(
+            Payment.inscripcion_id == enrollment_id,
+            Payment.estado_pago == EstadoPago.APROBADO
+        ).to_list()
 
     dinero_historico_total = sum(p.cantidad_pago for p in pagos_aprobados)
     tanque_de_agua = round(dinero_historico_total, 2)
@@ -530,6 +715,7 @@ async def validar_nota_borrador(
         raise ValueError("Este módulo no tiene un borrador pendiente de validación")
 
     nota_a_oficializar = modulo.nota_borrador
+    nombre_modulo = modulo.nombre
 
     enrollment_actualizado = await actualizar_nota_modulo(
         enrollment_id=enrollment_id,
@@ -542,6 +728,52 @@ async def validar_nota_borrador(
     enrollment_actualizado.modulos[modulo_index].estado_validacion_nota = "validada"
     enrollment_actualizado.modulos[modulo_index].nota_borrador = None
     await enrollment_actualizado.save()
+
+    # ISSUE-Q-CORREO-NOTA (2026-07-08, reunión de postgrado contaduría): notificar
+    # al estudiante por correo cuando CPD valida su nota. No bloqueante: si el
+    # estudiante no tiene email o el envío falla, no revierte la validación.
+    try:
+        from models.student import Student
+        from models.course import Course
+        from core.email_utils import send_email, build_nota_validada_email
+        from core.config import settings
+        from services.notification_service import create_notification
+
+        student = await Student.get(enrollment_actualizado.estudiante_id)
+        course = await Course.get(enrollment_actualizado.curso_id)
+
+        if student:
+            try:
+                await create_notification(
+                    destinatario_id=student.id,
+                    tipo_destinatario="student",
+                    titulo="Calificación Validada",
+                    mensaje=f"Tu nota del módulo '{nombre_modulo}' ya fue validada oficialmente por CPD.",
+                    tipo_alerta="success",
+                    ruta="/app/enrollments",
+                    referencia_tipo="enrollment",
+                    referencia_id=enrollment_actualizado.id
+                )
+            except Exception as e:
+                print(f"Error notificando validación de nota al estudiante: {str(e)}")
+
+            if student.email and course:
+                portal_link = f"{settings.FRONTEND_URL.rstrip('/')}/app/enrollments"
+                html = build_nota_validada_email(
+                    nombre=student.nombre or student.registro,
+                    curso_nombre=course.nombre_programa,
+                    modulo_nombre=nombre_modulo,
+                    nota=nota_a_oficializar,
+                    portal_link=portal_link
+                )
+                await send_email(
+                    student.email,
+                    f"Nota validada: {nombre_modulo} · Postgrado UAGRM",
+                    html
+                )
+    except Exception as e:
+        print(f"Error enviando correo de nota validada: {str(e)}")
+
     return enrollment_actualizado
 
 

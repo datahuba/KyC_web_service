@@ -72,6 +72,7 @@ class StudentCreate(BaseModel):
     # Campos opcionales estándar
     nombre: Optional[str] = Field(None, min_length=1, max_length=200, description="Nombre completo del estudiante")
     email: Optional[EmailStr] = Field(None, description="Correo electrónico")
+    complemento_carnet: Optional[str] = Field(None, max_length=10, description="Complemento del CI (ej. '1D', '1J'), distinto de la extensión/lugar de expedición.")
     extension: Optional[str] = Field(None, description="Extension del carnet de identidad")
     celular: Optional[str] = Field(None, description="Número de celular para notificaciones")
     domicilio: Optional[str] = Field(None, description="Dirección física del estudiante")
@@ -150,6 +151,7 @@ class StudentResponse(BaseModel):
     nombre: Optional[str] = None
     email: Optional[EmailStr] = None
     carnet: Optional[str] = None
+    complemento_carnet: Optional[str] = None
     extension: Optional[str] = None
     celular: Optional[str] = None
     domicilio: Optional[str] = None
@@ -254,6 +256,7 @@ class StudentUpdateAdmin(BaseModel):
     nombre: Optional[str] = Field(None, min_length=1, max_length=200)
     email: Optional[EmailStr] = None
     carnet: Optional[str] = None
+    complemento_carnet: Optional[str] = None
     extension: Optional[str] = None
     celular: Optional[str] = None
     domicilio: Optional[str] = None

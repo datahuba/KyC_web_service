@@ -42,7 +42,7 @@ async def create_entry(
     current_user: User = Depends(require_extracto_bancario)
 ) -> Any:
     try:
-        return await bank_statement_service.create_entry(data, current_user.username)
+        return await bank_statement_service.create_entry(data, current_user.nombre_visible)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

@@ -50,6 +50,15 @@ class ModuloEstado(BaseModel):
     )
 
 
+# ========================================================================
+# SUB-MODELO: SNAPSHOT DE UN ÍTEM DE CARGO ADICIONAL (ISSUE-P-CARGO-MULTIITEM)
+# ========================================================================
+class CargoAdicionalItemSnapshot(BaseModel):
+    """Copia (snapshot) de un ítem de Course.cargo_adicional_items al momento de inscribirse."""
+    nombre: str = Field(..., description="Concepto del ítem (ej. 'Taller de Excel Avanzado')")
+    costo: float = Field(..., ge=0, description="Costo de este ítem al momento de inscribirse")
+
+
 class Enrollment(MongoBaseModel):
     """
     Modelo de Inscripción - Vincula estudiante con curso
@@ -72,6 +81,15 @@ class Enrollment(MongoBaseModel):
     costo_matricula: float = Field(..., ge=0, description="Costo de matrícula")
     amount_cuotas: Optional[int] = None # Campo deprecado, mantenido para compatibilidad
     cantidad_cuotas: int = Field(..., ge=1, description="Cantidad de cuotas para pagar")
+
+    # ISSUE-P-CARGO-MULTIITEM (2026-07-08): snapshot de la LISTA de ítems de
+    # cargo adicional/complementario al programa (ej. varios talleres
+    # incluidos), tomada del Course al momento de inscribirse. Ningún ítem
+    # recibe descuentos; la suma se agrega íntegra a total_a_pagar.
+    cargo_adicional_items: List[CargoAdicionalItemSnapshot] = Field(
+        default_factory=list,
+        description="Snapshot de los ítems de cargo adicional del curso al momento de inscribirse. Lista vacía = sin cargo adicional."
+    )
     
     modulos: List[ModuloEstado] = Field(
         default_factory=list,
@@ -167,6 +185,10 @@ class Enrollment(MongoBaseModel):
         if self.cantidad_cuotas == 0:
             return 0.0
         return (self.total_a_pagar - self.costo_matricula) / self.cantidad_cuotas
+
+    def get_cargo_adicional_total(self) -> float:
+        """Suma de todos los ítems del snapshot de cargo adicional (ISSUE-P-CARGO-MULTIITEM)."""
+        return round(sum(item.costo for item in self.cargo_adicional_items), 2)
     
     def actualizar_saldo(self, monto_pago_aprobado: float):
         self.total_pagado += monto_pago_aprobado
@@ -217,6 +239,12 @@ class Enrollment(MongoBaseModel):
     
     class Settings:
         name = "enrollments"
+        # AUDITORÍA: optimistic locking. Enrollment es el recurso más
+        # concurrido del sistema (pagos, notas, becas, pasivo/congelado
+        # pueden mutarlo casi simultáneamente); sin esto cualquier par de
+        # operaciones "leer-mutar-guardar" solapadas se pisan entre sí
+        # (last-writer-wins) perdiendo la escritura más reciente en silencio.
+        use_revision = True
         indexes = [
             # Índices de referencia cruzada acelerada para kyardex
             "estudiante_id",

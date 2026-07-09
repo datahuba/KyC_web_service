@@ -47,10 +47,35 @@ async def update_discount(
 
 
 async def delete_discount(id: PydanticObjectId) -> Discount:
-    """Eliminar descuento"""
+    """
+    Eliminar descuento.
+
+    AUDITORÍA (MEDIO #8): antes no limpiaba ninguna referencia -- si el
+    descuento estaba en uso, Enrollment.descuento_curso_id/descuento_estudiante_id
+    y Course.descuento_id quedaban apuntando a un ObjectId huérfano tras el
+    delete. No se puede reconstruir el precio real ya cobrado (los totales de
+    Enrollment ya están congelados como snapshot), así que solo se limpia la
+    REFERENCIA para que dejen de apuntar a un documento inexistente; los
+    montos financieros históricos no se tocan.
+    """
+    from models.enrollment import Enrollment
+    from models.course import Course
+
     discount = await Discount.get(id)
-    if discount:
-        await discount.delete()
+    if not discount:
+        return discount
+
+    await Enrollment.find(Enrollment.descuento_curso_id == id).update(
+        {"$set": {"descuento_curso_id": None}}
+    )
+    await Enrollment.find(Enrollment.descuento_estudiante_id == id).update(
+        {"$set": {"descuento_estudiante_id": None}}
+    )
+    await Course.find(Course.descuento_id == id).update(
+        {"$set": {"descuento_id": None}}
+    )
+
+    await discount.delete()
     return discount
 
 

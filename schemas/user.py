@@ -13,7 +13,7 @@ Schemas incluidos:
 
 from datetime import datetime
 from typing import Optional, List
-from pydantic import BaseModel, Field, EmailStr, field_validator
+from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator
 from models.enums import UserRole
 from models.base import PyObjectId
 
@@ -32,8 +32,15 @@ class UserCreate(BaseModel):
     """
     username: str = Field(..., min_length=3, description="Nombre de usuario único")
     email: EmailStr = Field(..., description="Correo electrónico único")
-    password: str = Field(..., min_length=5, description="Contraseña (será hasheada)")
+    # GAP-1 (audio 2026-07-08): password ahora es opcional al crear. Si se omite
+    # y se proveyó `carnet`, se autogenera como 'Uagrm.<CI>' (convención UAGRM
+    # confirmada por el usuario para docentes/personal nuevo). Si no hay carnet
+    # ni password, se rechaza explícitamente (ver validador abajo).
+    password: Optional[str] = Field(None, min_length=5, description="Contraseña (será hasheada). Opcional si se provee 'carnet': se autogenera como 'Uagrm.<CI>'.")
     rol: UserRole = Field(default=UserRole.ADMIN, description="Rol de usuario")
+
+    # GAP-1 (audio 2026-07-08): CI del personal, usado para la contraseña por defecto.
+    carnet: Optional[str] = Field(None, max_length=20, description="Carnet de Identidad (CI). Si se provee y no hay password, la contraseña inicial será 'Uagrm.<CI>'.")
 
     # ISSUE-R-ROLES
     nombre_funcional: Optional[str] = Field(
@@ -52,6 +59,18 @@ class UserCreate(BaseModel):
         if rol in _ROLES_REQUIEREN_NOMBRE_FUNCIONAL and not v:
             raise ValueError("nombre_funcional es obligatorio para los roles Encargado de Curso, Coordinador y Cobranza")
         return v
+
+    @model_validator(mode="after")
+    def validar_password_o_carnet(self):
+        # GAP-1: si no hay password explícita, se exige carnet para poder
+        # autogenerar 'Uagrm.<CI>' en create_user(). Sin ninguno de los dos,
+        # no hay forma de que la cuenta tenga una contraseña válida.
+        # Se usa model_validator (no field_validator) porque 'carnet' se
+        # declara después de 'password' y por lo tanto no estaría disponible
+        # todavía en info.data dentro de un validador de campo individual.
+        if not self.password and not self.carnet:
+            raise ValueError("Debes proveer 'password' o 'carnet' (la contraseña se autogenera como 'Uagrm.<CI>').")
+        return self
 
     model_config = {
         "json_schema_extra": {
@@ -80,6 +99,7 @@ class UserResponse(BaseModel):
     updated_at: datetime
     nombre_funcional: Optional[str] = None
     cursos_asignados: List[PyObjectId] = Field(default_factory=list)
+    carnet: Optional[str] = None  # GAP-1
     
     
     model_config = {
@@ -113,6 +133,7 @@ class UserUpdate(BaseModel):
     activo: Optional[bool] = None
     nombre_funcional: Optional[str] = Field(None, max_length=150, validate_default=True)
     cursos_asignados: Optional[List[PyObjectId]] = None
+    carnet: Optional[str] = Field(None, max_length=20)  # GAP-1
 
     @field_validator("nombre_funcional")
     @classmethod

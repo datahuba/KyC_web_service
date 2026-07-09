@@ -146,6 +146,19 @@ class Discount(MongoBaseModel):
         le=100,
         description="Nota mínima que el estudiante debe mantener por módulo para conservar este descuento. None = sin condición académica."
     )
+
+    # ========================================================================
+    # RESPALDO DOCUMENTAL (ISSUE-P-DESCUENTO-RESOLUCION, 2026-07-08)
+    # ========================================================================
+    # La reunión de postgrado contaduría confirmó que todo descuento debe
+    # llevar un documento de resolución adjunto (PDF/imagen) como respaldo
+    # institucional. Mismo patrón que Enrollment.beca_respaldo_url
+    # (ISSUE-P-BECA-RESPALDO): NO bloqueante -- se puede crear el descuento
+    # primero y subir/reemplazar el respaldo en cualquier momento posterior.
+    resolucion_url: Optional[str] = Field(
+        None,
+        description="URL del documento de resolución que respalda este descuento. None si aún no se ha subido."
+    )
     
     # ========================================================================
     # VALIDADORES

@@ -14,7 +14,7 @@ Schemas incluidos:
 
 from datetime import datetime
 from typing import Optional, List
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, field_validator
 from models.enums import TipoCurso, Modalidad, EstadoInscripcion, TipoEstudiante
 from models.base import PyObjectId
 from schemas.requisito import RequisitoTemplateCreate
@@ -24,6 +24,12 @@ class ModuloCreate(BaseModel):
     costo: float
     # ISSUE R: PERMITIR QUE EL BACKEND RECIBA Y VALIDE EL DOCENTE_ID
     docente_id: Optional[PyObjectId] = Field(None, description="ID del docente asignado al módulo")
+
+
+class CargoAdicionalItemCreate(BaseModel):
+    """ISSUE-P-CARGO-MULTIITEM: un ítem individual de cargo adicional (nombre + costo)."""
+    nombre: str = Field(..., min_length=1, max_length=200)
+    costo: float = Field(..., ge=0)
 
 
 class CourseCreate(BaseModel):
@@ -38,14 +44,15 @@ class CourseCreate(BaseModel):
     tipo_curso: TipoCurso
     modalidad: Modalidad
     
-    # Precios internos
-    costo_total_interno: float = Field(..., gt=0)
-    matricula_interno: float = Field(..., ge=0)
-    
-    # Precios externos (opcionales; si no se envían, se asumen en 0)
-    costo_total_externo: float = Field(0, ge=0)
-    matricula_externo: float = Field(0, ge=0)
-    
+    # Precio único del programa (ISSUE-P-PRECIO-UNICO, 2026-07-08): mismo
+    # costo para todos los estudiantes, sin distinción de procedencia.
+    costo_total_interno: float = Field(..., gt=0, description="Costo total (colegiatura) del programa")
+    matricula_interno: float = Field(..., ge=0, description="Matrícula institucional del programa")
+
+    # ISSUE-P-CARGO-MULTIITEM: lista de ítems de cargo adicional/complementario
+    # al programa (ej. varios talleres, cada uno con su propio costo).
+    cargo_adicional_items: Optional[List[CargoAdicionalItemCreate]] = Field(default_factory=list)
+
     # Estructura de pago y módulos
     cantidad_cuotas: int = Field(..., ge=1)
     modulos: Optional[List[ModuloCreate]] = Field(
@@ -77,8 +84,9 @@ class CourseCreate(BaseModel):
                 "modalidad": "hibrido",
                 "costo_total_interno": 3500.0,
                 "matricula_interno": 600.0,
-                "costo_total_externo": 4500.0,
-                "matricula_externo": 700.0,
+                "cargo_adicional_items": [
+                    {"nombre": "Taller de Excel Avanzado", "costo": 100.0}
+                ],
                 "cantidad_cuotas": 5,
                 "modulos": [{"nombre": "Módulo 1", "costo": 580, "docente_id": "664cbb0a22a3e6181fcd3155"}],
                 "descuento_id": "507f1f77bcf86cd799439077",
@@ -107,9 +115,8 @@ class CourseResponse(BaseModel):
     
     costo_total_interno: float
     matricula_interno: float
-    
-    costo_total_externo: float
-    matricula_externo: float
+
+    cargo_adicional_items: List[CargoAdicionalItemCreate] = Field(default_factory=list)
     
     cantidad_cuotas: int
     modulos: List[ModuloCreate] = Field(default_factory=list)
@@ -146,8 +153,9 @@ class CourseResponse(BaseModel):
                 "modalidad": "hibrido",
                 "costo_total_interno": 3500.0,
                 "matricula_interno": 600.0,
-                "costo_total_externo": 4500.0,
-                "matricula_externo": 700.0,
+                "cargo_adicional_items": [
+                    {"nombre": "Taller de Excel Avanzado", "costo": 100.0}
+                ],
                 "cantidad_cuotas": 5,
                 "modulos": [{"nombre": "Módulo 1", "costo": 580}],
                 "descuento_id": "507f1f77bcf86cd799439077",
@@ -177,9 +185,8 @@ class CourseUpdate(BaseModel):
     
     costo_total_interno: Optional[float] = Field(None, gt=0)
     matricula_interno: Optional[float] = Field(None, ge=0)
-    
-    costo_total_externo: Optional[float] = Field(None, ge=0)
-    matricula_externo: Optional[float] = Field(None, ge=0)
+
+    cargo_adicional_items: Optional[List[CargoAdicionalItemCreate]] = None
     
     cantidad_cuotas: Optional[int] = Field(None, ge=1)
     modulos: Optional[List[ModuloCreate]] = None

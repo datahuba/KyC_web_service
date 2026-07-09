@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 from models.base import PyObjectId
 
@@ -15,6 +15,11 @@ class ForgotPasswordRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     token: str = Field(..., description="Token recibido en el correo")
     new_password: str = Field(..., min_length=5, description="Nueva contraseña (mínimo 5 caracteres)")
+
+
+class VerifyEmailRequest(BaseModel):
+    """ISSUE-A-VERIFICACION: confirma el correo con el token recibido."""
+    token: str = Field(..., description="Token recibido en el correo de verificación")
 
 class TokenResponse(BaseModel):
     access_token: str
@@ -39,6 +44,17 @@ class CurrentUserResponse(BaseModel):
     # ISSUE-Q-PRE: si el estudiante ya aceptó el reglamento de Postgrado.
     # Siempre True para personal administrativo/docente (no aplica a ellos).
     terminos_aceptados: bool = True
+
+    # ISSUE-P-SEGMENTACION: expone la segmentación de cursos del propio usuario
+    # para que el frontend pueda ocultar cursos no asignados en selectores
+    # (ej. filtro de curso en /app/payments para Cobranza/Encargado de Curso).
+    # Lista vacía = sin restricción (acceso total, comportamiento por defecto).
+    nombre_funcional: Optional[str] = None
+    cursos_asignados: List[PyObjectId] = Field(default_factory=list)
+
+    # ISSUE-A-VERIFICACION: no bloqueante, solo informativo para mostrar un
+    # banner sugiriendo verificar el correo (no impide el uso del sistema).
+    email_verificado: bool = False
 
     model_config = {
         "populate_by_name": True,

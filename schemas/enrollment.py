@@ -8,6 +8,7 @@ from typing import Optional, List
 from pydantic import BaseModel, Field
 from models.enums import EstadoInscripcion, TipoEstudiante
 from models.base import PyObjectId
+from schemas.requisito import RequisitoResponse
 
 # NUEVO SCHEMA PARA MÓDULOS DE INSCRIPCIÓN
 class ModuloEstadoSchema(BaseModel):
@@ -27,6 +28,12 @@ class ModuloEstadoSchema(BaseModel):
 class ModuloNotaUpdate(BaseModel):
     """Schema para actualizar la calificación de un submódulo (docente -> borrador; CPD/Admin -> oficial directa)"""
     nota: float = Field(..., ge=0, le=100, description="Calificación del módulo (0-100)")
+
+
+class CargoAdicionalItemSchema(BaseModel):
+    """ISSUE-P-CARGO-MULTIITEM: snapshot de un ítem de cargo adicional en la respuesta de la inscripción."""
+    nombre: str
+    costo: float
 
 class EnrollmentCreate(BaseModel):
     """Schema para crear una nueva inscripción"""
@@ -56,6 +63,9 @@ class EnrollmentResponse(BaseModel):
     costo_matricula: float
     cantidad_cuotas: int
     modulos: List[ModuloEstadoSchema] = Field(default_factory=list)
+
+    # ISSUE-P-CARGO-MULTIITEM: snapshot de la lista de ítems de cargo adicional
+    cargo_adicional_items: List[CargoAdicionalItemSchema] = Field(default_factory=list)
     
     # Descuentos
     descuento_curso_id: Optional[PyObjectId] = None
@@ -93,6 +103,14 @@ class EnrollmentResponse(BaseModel):
     fecha_abandono: Optional[datetime] = None
     multa_reincorporacion_pendiente: Optional[bool] = False
 
+    # ISSUE-Q-DOCUMENTOS-KYC (2026-07-09, reportado por el usuario): el
+    # sistema de subida/aprobación de documentos (Requisito) ya existía en
+    # el backend desde antes (endpoints PUT /requisitos/{index},
+    # /aprobar, /rechazar), pero EnrollmentResponse nunca expuso este campo
+    # -- el frontend no tenía forma de mostrarlo ni de construir una UI
+    # sobre él, quedando la función completamente sin usar.
+    requisitos: List[RequisitoResponse] = Field(default_factory=list)
+
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True,
@@ -104,7 +122,12 @@ class EnrollmentUpdate(BaseModel):
     descuento_id: Optional[PyObjectId] = None
     descuento_personalizado: Optional[float] = Field(None, ge=0, le=100)
     estado: Optional[EstadoInscripcion] = None
-    nota_final: Optional[float] = Field(None, ge=0, le=100)
+    # AUDITORÍA (BAJO #18): nota_final se eliminó de este schema. Es un campo
+    # 100% CALCULADO (promedio de las notas de módulos, ver
+    # actualizar_nota_modulo en enrollment_service.py) -- el endpoint nunca
+    # lo procesaba aunque el schema lo aceptara, dando la falsa impresión de
+    # que se podía editar directamente. Para cambiar la nota de un módulo,
+    # usar PATCH /enrollments/{id}/modulos/{index}/nota.
 
 class EnrollmentWithDetails(EnrollmentResponse):
     """Schema para mostrar inscripción con detalles de Student y Course"""

@@ -25,6 +25,7 @@ from models.notification import Notification
 from models.account_request import AccountRequest
 from models.passive_request import PassiveRequest
 from models.bank_statement_entry import BankStatementEntry
+from models.enrollment_request import EnrollmentRequest
 
 
 async def _sanitize_legacy_database(db):
@@ -177,6 +178,7 @@ async def init_db():
             AccountRequest,
             PassiveRequest,
             BankStatementEntry,
+            EnrollmentRequest,
             Course,
             Enrollment,
             Payment,

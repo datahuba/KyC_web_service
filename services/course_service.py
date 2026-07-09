@@ -88,12 +88,6 @@ async def create_course(course_in: CourseCreate) -> Course:
     # Seguridad de negocio: impedir asociar descuentos inactivos
     await _validate_active_discount(payload.get("descuento_id"))
 
-    # Normalización defensiva: costos externos opcionales se persisten en 0
-    if payload.get("costo_total_externo") is None:
-        payload["costo_total_externo"] = 0
-    if payload.get("matricula_externo") is None:
-        payload["matricula_externo"] = 0
-
     course = Course(**payload)
     await course.create()
     return course

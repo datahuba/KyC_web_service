@@ -47,7 +47,21 @@ class PassiveRequest(MongoBaseModel):
 
     class Settings:
         name = "passive_requests"
+        # AUDITORÍA (MEDIO): use_revision protege contra pisadas de la MISMA
+        # solicitud (aprobar/rechazar simultáneo), igual que en Payment.
+        use_revision = True
         indexes = [
             [("estado", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)],
             "enrollment_id",
+            # AUDITORÍA (MEDIO #10): índice único PARCIAL (solo mientras
+            # estado='pendiente') -- evita que dos solicitudes casi
+            # simultáneas para la misma inscripción pasen ambas el check
+            # "existente" (find-then-insert no atómico). No bloquea el
+            # historial normal de solicitudes pasadas ya aprobadas/rechazadas.
+            pymongo.IndexModel(
+                [("enrollment_id", pymongo.ASCENDING)],
+                unique=True,
+                partialFilterExpression={"estado": "pendiente"},
+                name="uniq_pendiente_por_enrollment"
+            ),
         ]

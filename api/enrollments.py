@@ -64,7 +64,7 @@ async def create_enrollment(
     try:
         enrollment = await enrollment_service.create_enrollment(
             enrollment_in=enrollment_in,
-            admin_username=current_user.username
+            admin_username=current_user.nombre_visible  # ISSUE-R-PERFIL-GENERICO
         )
         enriched_enrollment = await enrollment_service.enrich_enrollment_dates(enrollment)
         return enriched_enrollment
@@ -85,6 +85,8 @@ async def list_enrollments(
     estado: Optional[EstadoInscripcion] = Query(None, description="Filtrar por estado"),
     curso_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por Curso ID"),
     estudiante_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por Estudiante ID"),
+    con_descuento: Optional[bool] = Query(None, description="Filtrar solo inscripciones con (True) o sin (False) descuento personal aplicado"),
+    descuento_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por un Discount específico"),
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
     """Listar inscripciones con paginación y filtros avanzados"""
@@ -96,7 +98,8 @@ async def list_enrollments(
         enrollments, total_count = await enrollment_service.get_all_enrollments(
             page=page, per_page=per_page, q=q, estado=estado,
             curso_id=curso_id, estudiante_id=estudiante_id,
-            cursos_permitidos=cursos_permitidos
+            cursos_permitidos=cursos_permitidos,
+            con_descuento=con_descuento, descuento_id=descuento_id
         )
     elif isinstance(current_user, Student):
         all_enrollments = await enrollment_service.get_enrollments_by_student(
@@ -165,21 +168,26 @@ async def update_enrollment(
 ) -> Any:
     """Actualizar inscripción existente"""
     try:
-        if enrollment_in.descuento_personalizado is not None:
+        # BUG (2026-07-09, reportado por el usuario): antes solo se
+        # recalculaba si venía `descuento_personalizado`, ignorando
+        # `descuento_id` por completo -- asignar una beca real (Discount)
+        # desde el formulario nunca disparaba el recálculo.
+        if enrollment_in.descuento_personalizado is not None or enrollment_in.descuento_id is not None:
             enrollment = await enrollment_service.update_enrollment_descuento(
                 enrollment_id=id,
                 descuento_personalizado=enrollment_in.descuento_personalizado,
-                admin_username=current_user.username
+                admin_username=current_user.nombre_visible,  # ISSUE-R-PERFIL-GENERICO
+                descuento_id=enrollment_in.descuento_id
             )
         
         if enrollment_in.estado is not None:
             enrollment = await enrollment_service.cambiar_estado_enrollment(
                 enrollment_id=id,
                 nuevo_estado=enrollment_in.estado,
-                admin_username=current_user.username
+                admin_username=current_user.nombre_visible  # ISSUE-R-PERFIL-GENERICO
             )
         
-        if enrollment_in.descuento_personalizado is None and enrollment_in.estado is None:
+        if enrollment_in.descuento_personalizado is None and enrollment_in.descuento_id is None and enrollment_in.estado is None:
             enrollment = await enrollment_service.get_enrollment(id)
             if not enrollment:
                 raise HTTPException(status_code=404, detail="Inscripción no encontrada")
@@ -314,7 +322,9 @@ async def update_modulo_nota(
                 detail=f"Índice del módulo ({index}) inválido. El estudiante solo tiene {len(enrollment.modulos)} módulos registrados."
             )
             
-        username = current_user.username if hasattr(current_user, 'username') else "docente_autorizado"
+        # ISSUE-R-PERFIL-GENERICO: nombre_visible en vez de username (CPD/Docente
+        # normalmente no tienen nombre_funcional, así que cae al mismo username).
+        username = current_user.nombre_visible if hasattr(current_user, 'nombre_visible') else "docente_autorizado"
 
         if current_user.rol == UserRole.DOCENTE:
             updated_enrollment = await enrollment_service.subir_nota_borrador(
@@ -345,7 +355,7 @@ async def validar_modulo_nota(
 ) -> Any:
     """ISSUE-Q-NOTA-BORRADOR: convierte el borrador del docente en nota oficial."""
     try:
-        updated = await enrollment_service.validar_nota_borrador(id, index, current_user.username)
+        updated = await enrollment_service.validar_nota_borrador(id, index, current_user.nombre_visible)
         return await enrollment_service.enrich_enrollment_dates(updated)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -438,12 +448,20 @@ async def subir_requisito(
 
 @router.put("/{id}/requisitos/{index}/aprobar", response_model=RequisitoResponse)
 async def aprobar_requisito(
-    *, id: PydanticObjectId, index: int = Path(..., ge=0), current_user: User = Depends(require_cpd) # <-- CPD APRUEBA
+    *, id: PydanticObjectId, index: int = Path(..., ge=0),
+    current_user: User = Depends(require_encargado_curso)
+    # ISSUE-Q-DOCUMENTOS-KYC (2026-07-09): antes solo CPD podía aprobar/rechazar
+    # documentos. Ampliado a Encargado de Curso/Coordinador (restringido a sus
+    # cursos_asignados, ver validación abajo) para no sobrecargar solo a CPD --
+    # CPD/Admin/Superadmin conservan acceso total sin restricción de curso.
 ) -> Any:
     enrollment = await Enrollment.get(id)
     if not enrollment:
         raise HTTPException(404, "Enrollment no encontrado")
-    
+
+    if current_user.rol == UserRole.ENCARGADO_CURSO and enrollment.curso_id not in current_user.cursos_asignados:
+        raise HTTPException(403, "No tienes asignado el curso de esta inscripción")
+
     if index >= len(enrollment.requisitos):
         raise HTTPException(400, f"Índice fuera de rango")
     
@@ -453,7 +471,7 @@ async def aprobar_requisito(
     if requisito.estado not in [EstadoRequisito.EN_PROCESO, EstadoRequisito.RECHAZADO]:
         raise HTTPException(400, "Estado incorrecto")
     
-    enrollment.requisitos[index].aprobar(current_user.username)
+    enrollment.requisitos[index].aprobar(current_user.nombre_visible)  # ISSUE-R-PERFIL-GENERICO
     await enrollment.save()
     return enrollment.requisitos[index]
 
@@ -461,12 +479,16 @@ async def aprobar_requisito(
 @router.put("/{id}/requisitos/{index}/rechazar", response_model=RequisitoResponse)
 async def rechazar_requisito(
     *, id: PydanticObjectId, index: int = Path(..., ge=0), rechazo: RequisitoRechazarRequest,
-    current_user: User = Depends(require_cpd) # <-- CPD RECHAZA
+    current_user: User = Depends(require_encargado_curso)
+    # ISSUE-Q-DOCUMENTOS-KYC (2026-07-09): mismo criterio que aprobar_requisito arriba.
 ) -> Any:
     enrollment = await Enrollment.get(id)
     if not enrollment:
         raise HTTPException(404, "Enrollment no encontrado")
-    
+
+    if current_user.rol == UserRole.ENCARGADO_CURSO and enrollment.curso_id not in current_user.cursos_asignados:
+        raise HTTPException(403, "No tienes asignado el curso de esta inscripción")
+
     if index >= len(enrollment.requisitos):
         raise HTTPException(400, f"Índice fuera de rango")
     
@@ -476,7 +498,7 @@ async def rechazar_requisito(
     if requisito.estado != EstadoRequisito.EN_PROCESO:
         raise HTTPException(400, "Estado incorrecto")
     
-    enrollment.requisitos[index].rechazar(current_user.username, rechazo.motivo)
+    enrollment.requisitos[index].rechazar(current_user.nombre_visible, rechazo.motivo)  # ISSUE-R-PERFIL-GENERICO
     await enrollment.save()
     return enrollment.requisitos[index]
 
@@ -541,7 +563,7 @@ async def otorgar_matricula_exenta_endpoint(
     """
     try:
         enrollment = await enrollment_service.otorgar_matricula_exenta(
-            enrollment_id=id, otorgado_por=current_user.username
+            enrollment_id=id, otorgado_por=current_user.nombre_visible  # ISSUE-R-PERFIL-GENERICO
         )
         return await enrollment_service.enrich_enrollment_dates(enrollment)
     except ValueError as e:
@@ -584,6 +606,16 @@ async def revocar_matricula_exenta_endpoint(
 async def congelar_enrollment_endpoint(
     *,
     id: PydanticObjectId,
+    tasa_pagada: bool = Query(
+        False,
+        description=(
+            "Si la tasa de congelamiento ya fue cobrada. Por defecto False: "
+            "el congelamiento NO asume que el estudiante ya pagó (AUDITORÍA #6, "
+            "antes se marcaba tasa_congelamiento_pagada=True sin ningún Payment "
+            "real asociado). Cobranza debe registrar el cobro real y CPD puede "
+            "pasar tasa_pagada=true solo si ese cobro ya ocurrió."
+        )
+    ),
     current_user: User = Depends(require_cpd)  # <-- CPD, ADMIN, SUPERADMIN
 ) -> Any:
     """
@@ -595,7 +627,7 @@ async def congelar_enrollment_endpoint(
     from services import congelado_service
     try:
         enrollment = await congelado_service.congelar_inscripcion(
-            enrollment_id=id, registrado_por=current_user.username
+            enrollment_id=id, registrado_por=current_user.nombre_visible, tasa_pagada=tasa_pagada  # ISSUE-R-PERFIL-GENERICO
         )
         return await enrollment_service.enrich_enrollment_dates(enrollment)
     except ValueError as e:
@@ -621,7 +653,7 @@ async def reactivar_congelado_endpoint(
     from services import congelado_service
     try:
         enrollment = await congelado_service.reactivar_desde_congelado_o_abandono(
-            enrollment_id=id, admin_username=current_user.username
+            enrollment_id=id, admin_username=current_user.nombre_visible  # ISSUE-R-PERFIL-GENERICO
         )
         return await enrollment_service.enrich_enrollment_dates(enrollment)
     except ValueError as e:

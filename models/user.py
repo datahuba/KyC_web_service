@@ -29,6 +29,16 @@ class User(MongoBaseModel):
     activo: bool = Field(default=True, description="Si el usuario puede acceder al sistema")
     ultimo_acceso: Optional[datetime] = Field(None, description="Fecha del último login exitoso")
 
+    # GAP-1 (audio 2026-07-08): Carnet de Identidad del personal (docentes/staff).
+    # Si se completa al crear el usuario y no se especifica contraseña, se genera
+    # automáticamente como 'Uagrm.<CI>' (convención institucional confirmada por
+    # el usuario). Opcional y sin índice único: no reemplaza al username.
+    carnet: Optional[str] = Field(
+        None,
+        max_length=20,
+        description="Carnet de Identidad (CI) del personal. Si se completa y no se especifica contraseña al crear, se genera automáticamente como 'Uagrm.<CI>'."
+    )
+
     # ISSUE-R-ROLES / ISSUE-R-PERFIL-GENERICO: nombre por función/programa (no por
     # persona) para roles rotativos. Obligatorio para ENCARGADO_CURSO, COORDINADOR
     # y COBRANZA (perfiles institucionales que rotan de responsable con frecuencia).
@@ -43,7 +53,35 @@ class User(MongoBaseModel):
         default_factory=list,
         description="IDs de cursos asignados a este usuario. Relevante si rol es ENCARGADO_CURSO o COBRANZA."
     )
-    
+
+    # ISSUE-A-VERIFICACION: Verificación de Correo Electrónico (NO bloqueante)
+    email_verificado: bool = Field(default=False, description="Si el usuario confirmó que su correo es válido y accesible. No bloquea el acceso al sistema.")
+    fecha_verificacion_email: Optional[datetime] = Field(default=None, description="Fecha (UTC) en que se verificó el correo actual. Se reinicia a None si el correo cambia.")
+
+    # ========================================================================
+    # ISSUE-R-PERFIL-GENERICO (2026-07-08, reunión de postgrado contaduría)
+    # ========================================================================
+    @property
+    def nombre_visible(self) -> str:
+        """
+        Identidad institucional a mostrar/registrar en auditoría, notificaciones
+        y cualquier lugar donde se atribuya una acción a "quien la hizo".
+
+        Los perfiles administrativos rotativos (Cobranza, Encargado de Curso,
+        Coordinador) deben identificarse por FUNCIÓN/PROGRAMA (ej. "Cajero
+        Ventanilla 1", "Encargado Maestría Gerencia Tributaria"), no por el
+        nombre de la persona que ocupa el cargo hoy -- así el historial de
+        acciones (pagos aprobados, notas validadas, solicitudes revisadas,
+        etc.) sigue siendo coherente aunque la persona real detrás del cargo
+        cambie con el tiempo, sin necesidad de migrar datos entre cuentas.
+
+        Devuelve `nombre_funcional` si está definido, o `username` como
+        fallback (roles sin nombre_funcional -- admin/superadmin/mae/cpd/
+        docente -- siguen identificándose por su username, comportamiento
+        sin cambios para ellos).
+        """
+        return self.nombre_funcional or self.username
+
     class Settings:
         name = "users"
         indexes = [

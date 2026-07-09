@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     # URL pública del frontend (para construir enlaces en correos)
     FRONTEND_URL: str = Field(default="http://localhost:5173", env="FRONTEND_URL")
     PASSWORD_RESET_EXPIRE_MINUTES: int = Field(default=30, env="PASSWORD_RESET_EXPIRE_MINUTES")
+    # ISSUE-A-VERIFICACION: más largo que el reset de password porque no es
+    # sensible (solo confirma que el correo es accesible, no cambia credenciales).
+    EMAIL_VERIFICATION_EXPIRE_MINUTES: int = Field(default=1440, env="EMAIL_VERIFICATION_EXPIRE_MINUTES")  # 24h
 
     # ISSUE-P-CONGELADO: montos y plazos configurables sin tocar código
     TASA_CONGELAMIENTO_BS: float = Field(default=150.0, env="TASA_CONGELAMIENTO_BS")

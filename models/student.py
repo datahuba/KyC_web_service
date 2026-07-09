@@ -89,7 +89,13 @@ class Student(MongoBaseModel):
     password: str = Field(...,description="Contraseña hasheada con bcrypt (NUNCA almacenar en texto plano)")
     nombre: Optional[str] = Field(None,min_length=1,max_length=200,description="Nombre completo del estudiante")
     email: Optional[EmailStr] = Field(None,description="Correo electrónico (validado automáticamente por Pydantic)")
-    carnet: Optional[str] = Field(None,description="Carnet de identidad")
+    carnet: Optional[str] = Field(None,description="Carnet de identidad (solo los números, sin complemento)")
+    # ISSUE-Q-COMPLEMENTO-CI (2026-07-08): el "complemento" del CI (ej. '1D',
+    # '1J', '1O' en carnets como '2726683-1J') es un dato DISTINTO de
+    # `extension` (que es el lugar de expedición del carnet, ej. 'SC'/'LPZ').
+    # Antes se perdía al limpiar el carnet para las validaciones de unicidad;
+    # ahora se guarda aparte para no perder el dato oficial completo del CI.
+    complemento_carnet: Optional[str] = Field(None, max_length=10, description="Complemento del carnet de identidad (ej. '1D', '1J'), distinto de la extensión/lugar de expedición.")
     extension: Optional[str] = Field(None,description="Extension del carnet de identidad")
     celular: Optional[str] = Field(None,description="Número de celular para notificaciones")
     domicilio: Optional[str] = Field(None,description="Dirección física del estudiante (requerido para certificados)")
@@ -124,6 +130,12 @@ class Student(MongoBaseModel):
     # ========================================================================
     terminos_aceptados: bool = Field(default=False, description="Si el estudiante ya aceptó el reglamento de Postgrado. Se exige en el primer login.")
     fecha_aceptacion_terminos: Optional[datetime] = Field(default=None, description="Fecha (UTC) en la que el estudiante aceptó los términos por primera vez.")
+
+    # ========================================================================
+    # ISSUE-A-VERIFICACION: Verificación de Correo Electrónico (NO bloqueante)
+    # ========================================================================
+    email_verificado: bool = Field(default=False, description="Si el estudiante confirmó que su correo es válido y accesible. No bloquea el acceso al sistema.")
+    fecha_verificacion_email: Optional[datetime] = Field(default=None, description="Fecha (UTC) en que se verificó el correo actual. Se reinicia a None si el correo cambia.")
 
     # ========================================================================
     # DOCUMENTACIÓN (Cargados desde el Panel de Admin)

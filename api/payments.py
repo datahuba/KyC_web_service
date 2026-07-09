@@ -29,7 +29,7 @@ from services import payment_service
 from beanie import PydanticObjectId
 from beanie.operators import In
 
-from api.dependencies import require_cobranza, require_staff, get_current_user
+from api.dependencies import require_cobranza, require_staff, get_current_user, filtro_cursos_por_rol
 from schemas.common import PaginatedResponse, PaginationMeta
 import math
 
@@ -150,13 +150,25 @@ async def list_payments(
 ) -> Any:
     
     if isinstance(current_user, User):
+        # AUDITORÍA (CRÍTICO #1): sin este guard, cualquier rol autenticado
+        # (docente, encargado_curso, coordinador) caía en ningún filtro y veía
+        # TODOS los pagos/comprobantes del sistema. Solo el personal financiero
+        # y de gestión académica tiene algún tipo de acceso a esta vista.
+        if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
+            raise HTTPException(status_code=403, detail="No autorizado para ver pagos")
+
+        # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve pagos de esos cursos.
+        filtro_rol = filtro_cursos_por_rol(current_user)
+        cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
         payments, total_count = await payment_service.get_all_payments(
             page=page,
             per_page=per_page,
             q=q,
             estado=estado,
             curso_id=curso_id,
-            estudiante_id=estudiante_id
+            estudiante_id=estudiante_id,
+            cursos_permitidos=cursos_permitidos
         )
         
         # Filtrado de RBAC (CPD vs Cobranza)
@@ -228,6 +240,15 @@ async def get_payment(
             )
             
     if isinstance(current_user, User):
+        # AUDITORÍA (CRÍTICO #1): mismo guard general que en list_payments.
+        if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
+            raise HTTPException(status_code=403, detail="No autorizado para ver este pago")
+
+        # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados no puede ver pagos de otros cursos.
+        filtro_rol = filtro_cursos_por_rol(current_user)
+        if filtro_rol and payment.curso_id not in filtro_rol["curso_id"]["$in"]:
+            raise HTTPException(status_code=403, detail="No tienes asignado el curso de este pago")
+
         concepto_lower = (payment.concepto or "").lower().strip()
         is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
         
@@ -255,6 +276,11 @@ async def aprobar_pago(
     payment = await payment_service.get_payment(id)
     if not payment:
         raise HTTPException(status_code=404, detail="Pago no encontrado")
+
+    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados no puede aprobar pagos de otros cursos.
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    if filtro_rol and payment.curso_id not in filtro_rol["curso_id"]["$in"]:
+        raise HTTPException(status_code=403, detail="No tienes asignado el curso de este pago")
         
     concepto_lower = (payment.concepto or "").lower().strip()
     is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
@@ -267,7 +293,9 @@ async def aprobar_pago(
     try:
         payment = await payment_service.aprobar_pago(
             payment_id=id,
-            admin_username=current_user.username
+            # ISSUE-R-PERFIL-GENERICO: nombre_visible en vez de username, para
+            # que Cobranza (rol rotativo) quede identificado por función.
+            admin_username=current_user.nombre_visible
         )
         return await payment_service.enrich_payment_with_details(payment)
     except ValueError as e:
@@ -291,6 +319,11 @@ async def rechazar_pago(
     payment = await payment_service.get_payment(id)
     if not payment:
         raise HTTPException(status_code=404, detail="Pago no encontrado")
+
+    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados no puede rechazar pagos de otros cursos.
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    if filtro_rol and payment.curso_id not in filtro_rol["curso_id"]["$in"]:
+        raise HTTPException(status_code=403, detail="No tienes asignado el curso de este pago")
         
     concepto_lower = (payment.concepto or "").lower().strip()
     is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
@@ -303,7 +336,7 @@ async def rechazar_pago(
     try:
         payment = await payment_service.rechazar_pago(
             payment_id=id,
-            admin_username=current_user.username,
+            admin_username=current_user.nombre_visible,  # ISSUE-R-PERFIL-GENERICO
             motivo=rejection.motivo
         )
         return await payment_service.enrich_payment_with_details(payment)
@@ -331,11 +364,18 @@ async def anular_pago(
             status_code=status.HTTP_403_FORBIDDEN, 
             detail="Solo el personal financiero (Cobranzas/Administrador) puede realizar reversiones de caja."
         )
+
+    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados no puede anular pagos de otros cursos.
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    if filtro_rol:
+        target_payment = await payment_service.get_payment(id)
+        if not target_payment or target_payment.curso_id not in filtro_rol["curso_id"]["$in"]:
+            raise HTTPException(status_code=403, detail="No tienes asignado el curso de este pago")
         
     try:
         payment = await payment_service.anular_pago(
             payment_id=id,
-            admin_username=current_user.username,
+            admin_username=current_user.nombre_visible,  # ISSUE-R-PERFIL-GENERICO
             motivo=reversion.motivo
         )
         return await payment_service.enrich_payment_with_details(payment)
@@ -359,7 +399,15 @@ async def get_payments_by_enrollment(
             
     if isinstance(current_user, User):
         if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
-            raise HTTPException(status_code=403, detail="No autorizado")
+            raise HTTPException(status_code=403, detail="No autorizado para ver los pagos de esta inscripción")
+
+        # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve inscripciones de esos cursos.
+        filtro_rol = filtro_cursos_por_rol(current_user)
+        if filtro_rol:
+            from services import enrollment_service
+            target_enrollment = await enrollment_service.get_enrollment(enrollment_id)
+            if not target_enrollment or target_enrollment.curso_id not in filtro_rol["curso_id"]["$in"]:
+                raise HTTPException(status_code=403, detail="No tienes asignado el curso de esta inscripción")
     
     payments = await payment_service.get_payments_by_enrollment(enrollment_id)
     
@@ -391,11 +439,24 @@ async def get_resumen_pagos(
         if enrollment.estudiante_id != current_user.id:
             raise HTTPException(status_code=403, detail="No tienes permiso")
             
-    if isinstance(current_user, User) and current_user.rol == "cpd":
-        raise HTTPException(
-            status_code=403,
-            detail="El rol CPD tiene estrictamente prohibido visualizar flujos de caja y estados financieros"
-        )
+    if isinstance(current_user, User):
+        # AUDITORÍA (CRÍTICO #1): mismo guard general, además de la restricción específica de CPD.
+        if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
+            raise HTTPException(status_code=403, detail="No autorizado para ver el resumen de pagos")
+
+        if current_user.rol == "cpd":
+            raise HTTPException(
+                status_code=403,
+                detail="El rol CPD tiene estrictamente prohibido visualizar flujos de caja y estados financieros"
+            )
+
+        # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve inscripciones de esos cursos.
+        filtro_rol = filtro_cursos_por_rol(current_user)
+        if filtro_rol:
+            from services import enrollment_service
+            target_enrollment = await enrollment_service.get_enrollment(enrollment_id)
+            if not target_enrollment or target_enrollment.curso_id not in filtro_rol["curso_id"]["$in"]:
+                raise HTTPException(status_code=403, detail="No tienes asignado el curso de esta inscripción")
     
     resumen = await payment_service.get_resumen_pagos_enrollment(enrollment_id)
     return resumen
@@ -408,8 +469,12 @@ async def get_payments_pendientes(
 ) -> Any:
     if current_user.rol not in ["superadmin", "admin", "cpd", "cobranza"]:
         raise HTTPException(status_code=403, detail="No autorizado para listar pagos pendientes")
-        
-    payments = await payment_service.get_payments_pendientes()
+
+    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve pendientes de esos cursos.
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
+    payments = await payment_service.get_payments_pendientes(cursos_permitidos=cursos_permitidos)
     
     filtered_payments = []
     for p in payments:
@@ -428,6 +493,79 @@ async def get_payments_pendientes(
     return await payment_service.enrich_payments_with_details_bulk(filtered_payments)
 
 
+def _parse_rango_fechas(fecha_desde: Optional[str], fecha_hasta: Optional[str]):
+    from datetime import datetime, date
+    if not fecha_desde:
+        fecha_desde = date.today().isoformat()
+    if not fecha_hasta:
+        fecha_hasta = fecha_desde
+    try:
+        fecha_desde_dt = datetime.fromisoformat(fecha_desde)
+        fecha_hasta_dt = datetime.fromisoformat(fecha_hasta).replace(hour=23, minute=59, second=59)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Formato de fecha inválido. Usar YYYY-MM-DD")
+    return fecha_desde, fecha_hasta, fecha_desde_dt, fecha_hasta_dt
+
+
+@router.get(
+    "/reportes/caja",
+    summary="Reporte de Caja por Fechas (Tabla Interactiva)"
+)
+async def get_reporte_caja_endpoint(
+    *,
+    fecha_desde: Optional[str] = Query(None, description="Fecha inicio (YYYY-MM-DD)"),
+    fecha_hasta: Optional[str] = Query(None, description="Fecha fin (YYYY-MM-DD)"),
+    curso_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por curso"),
+    estado: Optional[str] = Query(None, description="Filtrar por estado del pago"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=200),
+    current_user: User = Depends(require_staff)
+) -> Any:
+    """
+    ISSUE-P-REPORTE: tabla interactiva de ingresos filtrable por rango de
+    fechas (fecha real del pago), curso y edición de programa. Devuelve la
+    página solicitada + totales agregados de TODO el rango filtrado (no solo
+    la página actual) para el resumen visual encima de la tabla.
+    """
+    if current_user.rol not in ["superadmin", "admin", "cpd", "cobranza", "mae"]:
+        raise HTTPException(status_code=403, detail="No autorizado para ver reportes de caja")
+
+    _, _, fecha_desde_dt, fecha_hasta_dt = _parse_rango_fechas(fecha_desde, fecha_hasta)
+
+    concepto_regex = None
+    if current_user.rol == "cpd":
+        concepto_regex = {"concepto": {"$regex": r"^matr[ií]cula$", "$options": "i"}}
+    elif current_user.rol == "cobranza":
+        concepto_regex = {"concepto": {"$not": {"$regex": r"^matr[ií]cula$", "$options": "i"}}}
+
+    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve su(s) curso(s).
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
+    resultado = await payment_service.get_reporte_caja(
+        fecha_desde_dt=fecha_desde_dt,
+        fecha_hasta_dt=fecha_hasta_dt,
+        page=page,
+        per_page=per_page,
+        curso_id=curso_id,
+        estado=estado,
+        concepto_regex=concepto_regex,
+        cursos_permitidos=cursos_permitidos
+    )
+
+    total_pages = math.ceil(resultado["total_count"] / per_page) if resultado["total_count"] > 0 else 0
+    enriched = await payment_service.enrich_payments_with_details_bulk(resultado["payments"])
+
+    return {
+        "data": enriched,
+        "resumen": resultado["resumen"],
+        "meta": PaginationMeta(
+            page=page, limit=per_page, totalItems=resultado["total_count"], totalPages=total_pages,
+            hasNextPage=(page < total_pages), hasPrevPage=(page > 1)
+        )
+    }
+
+
 @router.get(
     "/reportes/excel",
     summary="Generar Reporte Excel de Pagos"
@@ -436,9 +574,10 @@ async def generar_reporte_excel_pagos(
     *,
     fecha_desde: Optional[str] = Query(None, description="Fecha inicio (YYYY-MM-DD)"),
     fecha_hasta: Optional[str] = Query(None, description="Fecha fin (YYYY-MM-DD)"),
+    curso_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por curso"),
+    estado: Optional[str] = Query(None, description="Filtrar por estado del pago"),
     current_user: User = Depends(require_staff)
 ):
-    from datetime import datetime, date
     from fastapi.responses import StreamingResponse
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment, PatternFill
@@ -447,48 +586,46 @@ async def generar_reporte_excel_pagos(
     
     if current_user.rol not in ["superadmin", "admin", "cpd", "cobranza", "mae"]:
         raise HTTPException(status_code=403, detail="No autorizado para generar reportes")
-        
-    if not fecha_desde:
-        fecha_desde = date.today().isoformat()
-    if not fecha_hasta:
-        fecha_hasta = fecha_desde
-    
-    try:
-        fecha_desde_dt = datetime.fromisoformat(fecha_desde)
-        fecha_hasta_dt = datetime.fromisoformat(fecha_hasta).replace(hour=23, minute=59, second=59)
-    except:
-        raise HTTPException(status_code=400, detail="Formato de fecha inválido. Usar YYYY-MM-DD")
-        
-    criteria = {
-        "fecha_subida": {
-            "$gte": fecha_desde_dt,
-            "$lte": fecha_hasta_dt
-        }
-    }
-    
+
+    fecha_desde, fecha_hasta, fecha_desde_dt, fecha_hasta_dt = _parse_rango_fechas(fecha_desde, fecha_hasta)
+
+    concepto_regex = None
     if current_user.rol == "cpd":
-        criteria["concepto"] = {"$regex": r"^matr[ií]cula$", "$options": "i"}
+        concepto_regex = {"concepto": {"$regex": r"^matr[ií]cula$", "$options": "i"}}
     elif current_user.rol == "cobranza":
-        criteria["concepto"] = {"$not": {"$regex": r"^matr[ií]cula$", "$options": "i"}}
+        concepto_regex = {"concepto": {"$not": {"$regex": r"^matr[ií]cula$", "$options": "i"}}}
+
+    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo exporta pagos de esos cursos.
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
+    criteria = payment_service._construir_filtro_reporte_caja(
+        fecha_desde_dt, fecha_hasta_dt, curso_id=curso_id, estado=estado, cursos_permitidos=cursos_permitidos
+    )
+    if concepto_regex:
+        criteria.update(concepto_regex)
     
-    payments = await Payment.find(criteria).sort("-fecha_subida").to_list()
+    payments = await Payment.find(criteria).sort("-fecha_comprobante").to_list()
     
     student_ids = list({p.estudiante_id for p in payments if p.estudiante_id})
     enrollment_ids = list({p.inscripcion_id for p in payments if p.inscripcion_id})
+    curso_ids = list({p.curso_id for p in payments if p.curso_id})
     
     students_task = Student.find(In(Student.id, student_ids)).to_list()
     enrollments_task = Enrollment.find(In(Enrollment.id, enrollment_ids)).to_list()
+    courses_task = Course.find(In(Course.id, curso_ids)).to_list()
     
-    students, enrollments = await asyncio.gather(students_task, enrollments_task)
+    students, enrollments, courses = await asyncio.gather(students_task, enrollments_task, courses_task)
     
     students_map = {s.id: s for s in students}
     enrollments_map = {e.id: e for e in enrollments}
+    courses_map = {c.id: c for c in courses}
     
     wb = Workbook()
     ws = wb.active
-    ws.title = "Reporte de Pagos"
+    ws.title = "Reporte de Caja"
     
-    headers = ["Nombre del Estudiante", "Método", "Fecha", "Moneda", "Monto", "Concepto", "Total Cuotas", "Nº Transacción", "Estado", "Motivo Reversión"]
+    headers = ["Nombre del Estudiante", "Curso", "Método", "Fecha Comprobante", "Fecha Registro", "Moneda", "Monto", "Concepto", "Total Cuotas", "Nº Transacción", "Estado", "Motivo Reversión"]
     ws.append(headers)
     
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -501,22 +638,28 @@ async def generar_reporte_excel_pagos(
     
     ws.auto_filter.ref = ws.dimensions
     
+    from core.timezone_utils import to_bolivia_time
     for payment in payments:
         student = students_map.get(payment.estudiante_id)
         nombre_estudiante = student.nombre if student and student.nombre else "Sin nombre"
+
+        course = courses_map.get(payment.curso_id)
+        nombre_curso = course.nombre_programa if course else "Sin curso"
         
         total_cuotas = 0
         enrollment = enrollments_map.get(payment.inscripcion_id)
         if enrollment:
             total_cuotas = enrollment.cantidad_cuotas
         
-        from core.timezone_utils import to_bolivia_time
-        fecha_bolivia = to_bolivia_time(payment.fecha_subida)
+        fecha_comprobante_bolivia = to_bolivia_time(payment.fecha_comprobante) if payment.fecha_comprobante else "Sin registrar"
+        fecha_registro_bolivia = to_bolivia_time(payment.fecha_subida)
 
         row = [
             nombre_estudiante,
+            nombre_curso,
             payment.metodo_pago,
-            fecha_bolivia,
+            fecha_comprobante_bolivia,
+            fecha_registro_bolivia,
             "Bs",
             payment.cantidad_pago,
             payment.concepto or "",
@@ -527,7 +670,7 @@ async def generar_reporte_excel_pagos(
         ]
         ws.append(row)
     
-    column_widths = [30, 15, 20, 10, 15, 20, 15, 25, 15, 30]
+    column_widths = [30, 30, 15, 20, 20, 10, 15, 20, 15, 25, 15, 30]
     for i, width in enumerate(column_widths, 1):
         ws.column_dimensions[chr(64 + i)].width = width
     
@@ -535,7 +678,7 @@ async def generar_reporte_excel_pagos(
     wb.save(excel_file)
     excel_file.seek(0)
     
-    filename = f"reporte_pagos_{fecha_desde}_{fecha_hasta}.xlsx"
+    filename = f"reporte_caja_{fecha_desde}_{fecha_hasta}.xlsx"
     
     return StreamingResponse(
         excel_file,
@@ -568,12 +711,21 @@ async def registrar_cobro_caja_directo(
     Registrar un cobro físico directo en Caja para cualquier estudiante.
     Se crea directamente como APROBADO sin requerir la intervención o credenciales del estudiante.
     """
+    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados no puede cobrar en caja
+    # para inscripciones fuera de sus cursos.
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    if filtro_rol:
+        from services import enrollment_service
+        target_enrollment = await enrollment_service.get_enrollment(payload.inscripcion_id)
+        if not target_enrollment or target_enrollment.curso_id not in filtro_rol["curso_id"]["$in"]:
+            raise HTTPException(status_code=403, detail="No tienes asignado el curso de esta inscripción")
+
     try:
         payment = await payment_service.create_caja_directo_payment(
             estudiante_id=payload.estudiante_id,
             inscripcion_id=payload.inscripcion_id,
             cantidad_pago=payload.cantidad_pago,
-            admin_username=current_user.username,
+            admin_username=current_user.nombre_visible,  # ISSUE-R-PERFIL-GENERICO
             concepto=payload.concepto,
             numero_cuota=payload.numero_cuota,
             remitente=payload.remitente,
