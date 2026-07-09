@@ -556,7 +556,10 @@ async def get_resumen_economico_endpoint(
     apruebe matrículas, sí debe verlas recaudadas porque genera los informes
     económicos). Mismo conjunto de roles económicos que los reportes de caja.
     """
-    if current_user.rol not in ["superadmin", "admin", "cobranza", "mae"]:
+    # 'coordinador' incluido para el coordinador financiero. El rol genérico no
+    # distingue financiero/académico/investigación aún (ISSUE-R-PERFIL-GENERICO);
+    # cuando se modele el subtipo, restringir este acceso solo al financiero.
+    if current_user.rol not in ["superadmin", "admin", "cobranza", "mae", "coordinador"]:
         raise HTTPException(status_code=403, detail="No autorizado para ver el resumen económico")
 
     # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve su(s) curso(s).
