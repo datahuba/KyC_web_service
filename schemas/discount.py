@@ -89,6 +89,12 @@ class DiscountResponse(BaseModel):
     updated_at: datetime
     nota_minima_requerida: Optional[float] = None
     resolucion_url: Optional[str] = None  # ISSUE-P-DESCUENTO-RESOLUCION
+    # BUG (2026-07-09, reportado por el usuario: "no pude seleccionar los
+    # estudiantes para asignar becas"): el modelo Discount SÍ tiene
+    # lista_estudiantes, pero este schema de respuesta nunca la exponía --
+    # el frontend siempre recibía undefined/vacío y mostraba "0 estudiantes"
+    # sin importar cuántos tuviera realmente el descuento.
+    lista_estudiantes: List[PyObjectId] = Field(default_factory=list)
     
     model_config = {
         "populate_by_name": True,
