@@ -85,9 +85,13 @@ class User(MongoBaseModel):
     class Settings:
         name = "users"
         indexes = [
-            # Índices únicos estrictos a nivel BD para evitar duplicados en login administrativo
+            # username es el credencial de login ÚNICO de cada perfil administrativo.
             pymongo.IndexModel([("username", pymongo.ASCENDING)], unique=True),
-            pymongo.IndexModel([("email", pymongo.ASCENDING)], unique=True)
+            # email NO es único a propósito: una misma persona puede tener varios
+            # perfiles funcionales (ej. Cobranza de un programa + Encargado del
+            # mismo programa) con el MISMO correo de contacto. El login se hace
+            # por username. El índice se mantiene (no único) solo para búsquedas.
+            pymongo.IndexModel([("email", pymongo.ASCENDING)], unique=False)
         ]
 
     class Config:

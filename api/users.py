@@ -94,11 +94,13 @@ async def create_user(
     existing_user = await user_service.get_user_by_username(user_in.username)
     if existing_user:
         raise HTTPException(status_code=400, detail="Username ya existe")
-    
-    existing_email = await user_service.get_user_by_email(user_in.email)
-    if existing_email:
-        raise HTTPException(status_code=400, detail="Email ya existe")
-    
+
+    # NOTA: el email NO se valida como único a propósito. Una misma persona puede
+    # tener varios perfiles funcionales (ej. Cobranza + Encargado del mismo
+    # programa) con el mismo correo de contacto; cada perfil se distingue e
+    # inicia sesión por su `username` único. (Antes se rechazaba con "Email ya
+    # existe" — se removió para permitir perfiles por función que comparten correo.)
+
     user = await user_service.create_user(user_in=user_in)
     return user
 
