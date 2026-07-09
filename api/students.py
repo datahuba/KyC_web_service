@@ -322,42 +322,51 @@ async def upload_student_photo(
     return student
 
 
+async def _subir_documento_estudiante(file: UploadFile, folder: str, public_id: str) -> str:
+    """Sube un documento del estudiante (CV/Carnet/Afiliación) aceptando PDF o
+    imagen (JPG/PNG/WEBP), ya que muchos suben fotos del documento. Devuelve la URL."""
+    from core.cloudinary_utils import upload_pdf, upload_image
+    image_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
+    if file.content_type in image_types:
+        return await upload_image(file, folder, public_id)
+    elif file.content_type == "application/pdf":
+        return await upload_pdf(file, folder, public_id)
+    raise HTTPException(400, f"Formato no permitido: {file.content_type}. Sube el documento como PDF o imagen (JPG/PNG).")
+
+
 @router.post("/{id}/upload/cv", response_model=StudentResponse)
 async def upload_student_cv(*, id: PydanticObjectId, file: UploadFile, current_user: Union[User, Student] = Depends(get_current_user)) -> Any:
-    from core.cloudinary_utils import upload_pdf
     student = await student_service.get_student(id=id)
     if not student: raise HTTPException(404, "Estudiante no encontrado")
     if isinstance(current_user, Student) and current_user.id != id: raise HTTPException(403, "No tienes permiso")
     
     folder = f"students/{id}/cv"
     public_id = f"cv_{id}"
-    student.cv_url = await upload_pdf(file, folder, public_id)
+    student.cv_url = await _subir_documento_estudiante(file, folder, public_id)
     await student.save()
     return student
 
 @router.post("/{id}/upload/carnet", response_model=StudentResponse)
 async def upload_student_carnet(*, id: PydanticObjectId, file: UploadFile, current_user: Union[User, Student] = Depends(get_current_user)) -> Any:
-    from core.cloudinary_utils import upload_pdf
     student = await student_service.get_student(id=id)
     if not student: raise HTTPException(404, "Estudiante no encontrado")
     if isinstance(current_user, Student) and current_user.id != id: raise HTTPException(403, "No tienes permiso")
     
     folder = f"students/{id}/carnet"
     public_id = f"carnet_{id}"
-    student.carnet_url = await upload_pdf(file, folder, public_id)
+    student.carnet_url = await _subir_documento_estudiante(file, folder, public_id)
     await student.save()
     return student
 
 @router.post("/{id}/upload/afiliacion", response_model=StudentResponse)
 async def upload_student_afiliacion(*, id: PydanticObjectId, file: UploadFile, current_user: Union[User, Student] = Depends(get_current_user)) -> Any:
-    from core.cloudinary_utils import upload_pdf
     student = await student_service.get_student(id=id)
     if not student: raise HTTPException(404, "Estudiante no encontrado")
     if isinstance(current_user, Student) and current_user.id != id: raise HTTPException(403, "No tienes permiso")
     
     folder = f"students/{id}/afiliacion"
     public_id = f"afiliacion_{id}"
-    student.afiliacion_url = await upload_pdf(file, folder, public_id)
+    student.afiliacion_url = await _subir_documento_estudiante(file, folder, public_id)
     await student.save()
     return student
 

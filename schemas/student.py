@@ -101,6 +101,18 @@ class StudentCreate(BaseModel):
             return None
         return v
 
+    @field_validator('password', mode='before')
+    @classmethod
+    def _password_vacio_a_none(cls, v):
+        # El frontend envía "" cuando el campo de contraseña queda vacío. Sin este
+        # validador, Pydantic evaluaba "" contra min_length=5 y rechazaba la
+        # creación con "string should have at least 5 characters", aunque el
+        # carnet estuviera presente para generar la contraseña por defecto.
+        # Se normaliza "" -> None para que el servicio genere 'Uagrm.<carnet>'.
+        if v is None or (isinstance(v, str) and v.strip() == ""):
+            return None
+        return v
+
     @field_validator('carnet')
     @classmethod
     def _carnet_numerico(cls, v):
