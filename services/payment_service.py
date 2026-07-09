@@ -447,7 +447,27 @@ async def aprobar_pago(
         )
     except Exception as e:
         print(f"Error al enviar notificación de pago aprobado: {str(e)}")
-    
+
+    # Correo real al estudiante confirmando la aprobación (no bloqueante: si
+    # falla el envío o el estudiante no tiene email, el pago ya quedó aprobado).
+    try:
+        from models.student import Student as _Student
+        from core.email_utils import send_email, build_pago_aprobado_email
+        from core.config import settings
+
+        _est = await _Student.get(payment.estudiante_id)
+        if _est and _est.email:
+            portal_link = f"{settings.FRONTEND_URL.rstrip('/')}/app/payments"
+            html = build_pago_aprobado_email(
+                nombre=_est.nombre or _est.registro,
+                concepto=payment.concepto,
+                monto=payment.cantidad_pago,
+                portal_link=portal_link
+            )
+            await send_email(_est.email, "Pago Aprobado · Postgrado UAGRM", html)
+    except Exception as e:
+        print(f"Error al enviar correo de pago aprobado: {str(e)}")
+
     return payment
 
 
