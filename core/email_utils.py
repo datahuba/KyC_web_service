@@ -178,6 +178,32 @@ def build_recordatorio_pago_email(nombre: str, mensaje: str, portal_link: str) -
     """
 
 
+def build_comunicado_email(nombre: str, asunto: str, mensaje: str, programa: str, portal_link: str) -> str:
+    """Plantilla HTML de un comunicado del Encargado de Programa/CPD a los estudiantes."""
+    return f"""
+    <div style="font-family: Arial, Helvetica, sans-serif; max-width: 520px; margin: 0 auto; color: #1f2937;">
+      <div style="background: #8a1f2f; padding: 20px; text-align: center; border-radius: 12px 12px 0 0;">
+        <h1 style="color: #ffffff; margin: 0; font-size: 18px;">Escuela de Postgrado · UAGRM</h1>
+        <p style="color: #f3d2d7; margin: 4px 0 0; font-size: 13px;">Contaduría Pública</p>
+      </div>
+      <div style="border: 1px solid #e5e7eb; border-top: none; padding: 24px; border-radius: 0 0 12px 12px;">
+        <p style="margin: 0 0 4px; font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: .5px;">Programa: {programa}</p>
+        <h2 style="margin: 0 0 16px; font-size: 17px; color: #8a1f2f;">{asunto}</h2>
+        <p style="font-size: 15px;">Hola <strong>{nombre}</strong>,</p>
+        <div style="background: #f9fafb; border-left: 4px solid #8a1f2f; border-radius: 8px; padding: 16px; margin: 16px 0;">
+          <p style="margin: 0; font-size: 14px; line-height: 1.6; white-space: pre-line;">{mensaje}</p>
+        </div>
+        <div style="text-align: center; margin: 24px 0;">
+          <a href="{portal_link}" style="background: #8a1f2f; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: bold; font-size: 14px; display: inline-block;">
+            Ingresar al Portal
+          </a>
+        </div>
+        <p style="font-size: 12px; color: #9ca3af;">Este es un comunicado institucional de la Unidad de Postgrado.</p>
+      </div>
+    </div>
+    """
+
+
 def build_enrollment_approved_email(nombre: str, curso_nombre: str, total_a_pagar: float, matricula: float, portal_link: str) -> str:
     """Plantilla HTML del correo de aprobación de inscripción (ISSUE-R-SOLICITUD-INSCRIPCION)."""
     return f"""

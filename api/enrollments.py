@@ -411,18 +411,29 @@ async def listar_requisitos(
 @router.put("/{id}/requisitos/{index}", response_model=RequisitoResponse)
 async def subir_requisito(
     *, id: PydanticObjectId, index: int = Path(..., ge=0), file: UploadFile = File(...),
-    current_user: Student = Depends(get_current_user)
+    current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
-    if not isinstance(current_user, Student):
-        raise HTTPException(403, "Solo estudiantes")
-    
     enrollment = await Enrollment.get(id)
     if not enrollment:
         raise HTTPException(404, "Enrollment no encontrado")
-    
-    if enrollment.estudiante_id != current_user.id:
-        raise HTTPException(403, "No es tu enrollment")
-    
+
+    # Autorización: el estudiante dueño, o el personal habilitado. CPD/Admin/
+    # Superadmin sin restricción; Encargado de Curso/Coordinador pueden subir
+    # documentos por el estudiante (el Encargado solo en sus programas asignados).
+    # Cobranza/Docente/MAE NO suben requisitos.
+    if isinstance(current_user, Student):
+        if enrollment.estudiante_id != current_user.id:
+            raise HTTPException(403, "No es tu inscripción")
+    else:
+        roles_permitidos = {
+            UserRole.CPD, UserRole.ADMIN, UserRole.SUPERADMIN,
+            UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR
+        }
+        if current_user.rol not in roles_permitidos:
+            raise HTTPException(403, "No tienes permiso para subir documentos")
+        if current_user.rol == UserRole.ENCARGADO_CURSO and enrollment.curso_id not in current_user.cursos_asignados:
+            raise HTTPException(403, "No tienes asignado el programa de esta inscripción")
+
     if index >= len(enrollment.requisitos):
         raise HTTPException(400, f"Índice {index} fuera de rango")
     
@@ -451,7 +462,11 @@ async def subir_requisito(
             from beanie.operators import Or as _Or, In as _In
 
             nombre_doc = enrollment.requisitos[index].descripcion
-            nombre_est = current_user.nombre or current_user.registro
+            if isinstance(current_user, Student):
+                nombre_est = current_user.nombre or current_user.registro
+            else:
+                _est = await Student.get(enrollment.estudiante_id)
+                nombre_est = (_est.nombre or _est.registro) if _est else "Un estudiante"
 
             revisores = await User.find(
                 User.activo == True,

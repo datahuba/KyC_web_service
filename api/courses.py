@@ -1,16 +1,107 @@
 from typing import List, Any, Union
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from beanie.operators import In
 from models.course import Course
 from models.user import User
 from models.student import Student
+from models.enrollment import Enrollment
+from models.enums import UserRole
 from schemas.course import CourseCreate, CourseResponse, CourseUpdate, CourseEnrolledStudent
 from services import course_service
 from beanie import PydanticObjectId
 
 # Nuevas dependencias de seguridad del ISSUE L
-from api.dependencies import require_superadmin, require_cpd, require_staff, get_current_user
+from api.dependencies import require_superadmin, require_cpd, require_staff, get_current_user, require_encargado_curso
 
 router = APIRouter()
+
+
+class ComunicadoRequest(BaseModel):
+    """Comunicado por correo del Encargado de Programa/CPD a los estudiantes de un programa."""
+    asunto: str = Field(..., min_length=1, max_length=200)
+    mensaje: str = Field(..., min_length=1, max_length=5000)
+
+
+@router.post("/{id}/comunicado", summary="Enviar comunicado por correo a los estudiantes del programa")
+async def enviar_comunicado_programa(
+    *,
+    id: PydanticObjectId,
+    payload: ComunicadoRequest,
+    current_user: User = Depends(require_encargado_curso)  # ENCARGADO_CURSO/COORDINADOR/CPD/ADMIN/SUPERADMIN
+) -> Any:
+    """
+    Envía un comunicado (asunto + mensaje) a TODOS los estudiantes inscritos en
+    el programa: notificación in-app (siempre) + correo real si tienen email y
+    SMTP está configurado. El Encargado de Curso solo puede enviarlo a sus
+    programas asignados. Envíos concurrentes (semáforo) para no hacer timeout
+    con muchos estudiantes.
+    """
+    course = await Course.get(id)
+    if not course:
+        raise HTTPException(status_code=404, detail="Programa no encontrado")
+
+    if current_user.rol == UserRole.ENCARGADO_CURSO and id not in current_user.cursos_asignados:
+        raise HTTPException(status_code=403, detail="No tienes asignado este programa")
+
+    enrollments = await Enrollment.find(Enrollment.curso_id == id).to_list()
+    student_ids = list({e.estudiante_id for e in enrollments})
+    if not student_ids:
+        return {"success": True, "total_estudiantes": 0, "correos_enviados": 0,
+                "detail": "El programa no tiene estudiantes inscritos."}
+
+    students = await Student.find(In(Student.id, student_ids)).to_list()
+
+    from services.notification_service import create_notification
+    from core.email_utils import send_email, build_comunicado_email
+    from core.config import settings
+
+    portal_link = f"{settings.FRONTEND_URL.rstrip('/')}/app/dashboard"
+    nombre_programa = course.nombre_programa
+    asunto = payload.asunto.strip()
+    mensaje = payload.mensaje.strip()
+
+    sem = asyncio.Semaphore(8)
+    correos_enviados = 0
+
+    async def _procesar(st: Student):
+        nonlocal correos_enviados
+        async with sem:
+            try:
+                await create_notification(
+                    destinatario_id=st.id,
+                    tipo_destinatario="student",
+                    titulo=asunto,
+                    mensaje=mensaje,
+                    tipo_alerta="info",
+                    ruta="/app/dashboard"
+                )
+            except Exception as e:
+                print(f"Error notificando comunicado a {st.id}: {str(e)}")
+            if st.email:
+                try:
+                    html = build_comunicado_email(
+                        nombre=st.nombre or st.registro,
+                        asunto=asunto,
+                        mensaje=mensaje,
+                        programa=nombre_programa,
+                        portal_link=portal_link
+                    )
+                    ok = await send_email(st.email, f"{asunto} · {nombre_programa}", html)
+                    if ok:
+                        correos_enviados += 1
+                except Exception as e:
+                    print(f"Error enviando comunicado por correo a {st.email}: {str(e)}")
+
+    await asyncio.gather(*[_procesar(st) for st in students])
+
+    return {
+        "success": True,
+        "total_estudiantes": len(students),
+        "correos_enviados": correos_enviados,
+        "detail": f"Comunicado enviado a {len(students)} estudiante(s)."
+    }
 
 from schemas.common import PaginatedResponse, PaginationMeta
 from fastapi import Query
