@@ -22,18 +22,41 @@ from beanie import PydanticObjectId
 from models.discount import Discount
 from beanie.operators import In, Or
 
-async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str) -> Enrollment:
+async def create_enrollment(
+    enrollment_in: EnrollmentCreate,
+    admin_username: str,
+    student: Optional[Student] = None,
+    course: Optional[Course] = None,
+    skip_link_updates: bool = False
+) -> Enrollment:
     """
     Crear una nueva inscripción (solo admins)
+
+    OPTIMIZACIÓN DE IMPORTACIÓN MASIVA (2026-07-09, ISSUE-Q-IMPORT-TIMEOUT):
+    `student`/`course` permiten pasar objetos ya obtenidos en memoria para
+    evitar los round-trips `Student.get()`/`Course.get()` cuando el llamador
+    ya los tiene (ej. import_students_from_excel, donde el mismo `course` se
+    reutiliza para decenas de estudiantes en una sola importación).
+
+    `skip_link_updates=True` omite los `course.save()`/`student.save()` que
+    agregan la referencia cruzada (course.inscritos / student.lista_cursos_ids)
+    -- estos dos documentos NO tienen optimistic locking (`use_revision`), por
+    lo que mutarlos y guardarlos de forma concurrente (ej. en un
+    `asyncio.gather` sobre varios estudiantes) puede perder escrituras
+    (last-writer-wins). El llamador que use este flag es responsable de
+    actualizar esas referencias por su cuenta, idealmente en un solo batch
+    después de que todas las inscripciones individuales ya se crearon.
     """
-    # 1. Obtener estudiante y curso
-    student = await Student.get(enrollment_in.estudiante_id)
-    if not student:
-        raise ValueError(f"Estudiante {enrollment_in.estudiante_id} no encontrado")
-    
-    course = await Course.get(enrollment_in.curso_id)
-    if not course:
-        raise ValueError(f"Curso {enrollment_in.curso_id} no encontrado")
+    # 1. Obtener estudiante y curso (si no se proveyeron ya en memoria)
+    if student is None:
+        student = await Student.get(enrollment_in.estudiante_id)
+        if not student:
+            raise ValueError(f"Estudiante {enrollment_in.estudiante_id} no encontrado")
+
+    if course is None:
+        course = await Course.get(enrollment_in.curso_id)
+        if not course:
+            raise ValueError(f"Curso {enrollment_in.curso_id} no encontrado")
 
     # AUDITORÍA (MEDIO #7): create_enrollment_request (solicitud del propio
     # estudiante) sí valida curso.activo, pero esta vía directa (CPD/Encargado
@@ -183,15 +206,16 @@ async def create_enrollment(enrollment_in: EnrollmentCreate, admin_username: str
     
     await enrollment.insert()
     
-    # 10. Agregar estudiante a la lista
-    if enrollment_in.estudiante_id not in course.inscritos:
-        course.inscritos.append(enrollment_in.estudiante_id)
-        await course.save()
-    
-    # 11. Agregar curso al estudiante
-    if enrollment_in.curso_id not in student.lista_cursos_ids:
-        student.lista_cursos_ids.append(enrollment_in.curso_id)
-        await student.save()
+    # 10. Agregar estudiante a la lista / 11. Agregar curso al estudiante
+    # (omitido si skip_link_updates=True -- ver docstring de esta función)
+    if not skip_link_updates:
+        if enrollment_in.estudiante_id not in course.inscritos:
+            course.inscritos.append(enrollment_in.estudiante_id)
+            await course.save()
+
+        if enrollment_in.curso_id not in student.lista_cursos_ids:
+            student.lista_cursos_ids.append(enrollment_in.curso_id)
+            await student.save()
     
     return enrollment
 
@@ -432,24 +456,34 @@ async def cambiar_estado_enrollment(
 # ========================================================================
 async def actualizar_saldo_enrollment(
     enrollment_id: PydanticObjectId,
-    monto_pago_aprobado: float = 0.0 # Se mantiene la firma por compatibilidad, pero ya no se usa ciegamente
+    monto_pago_aprobado: float = 0.0, # Se mantiene la firma por compatibilidad, pero ya no se usa ciegamente
+    enrollment: Optional[Enrollment] = None,
+    pagos_aprobados: Optional[list] = None
 ):
     """
     Reconstruye el saldo de la inscripción sumando todos los pagos históricos aprobados.
     Distribuye los fondos en cascada (Waterfall) reparando cualquier inconsistencia de base de datos.
+
+    OPTIMIZACIÓN DE IMPORTACIÓN MASIVA (2026-07-09, ISSUE-Q-IMPORT-TIMEOUT):
+    `enrollment`/`pagos_aprobados` permiten pasar el documento y los pagos ya
+    obtenidos en memoria, evitando el `Enrollment.get()` + `Payment.find()`
+    redundantes cuando el llamador (ej. import_students_from_excel) acaba de
+    crear ambos en el mismo flujo.
     """
     from models.payment import Payment
     from models.enums import EstadoPago
 
-    enrollment = await Enrollment.get(enrollment_id)
-    if not enrollment:
-        raise ValueError(f"Inscripción {enrollment_id} no encontrada")
-    
+    if enrollment is None:
+        enrollment = await Enrollment.get(enrollment_id)
+        if not enrollment:
+            raise ValueError(f"Inscripción {enrollment_id} no encontrada")
+
     # 1. Recolectar la verdad absoluta: ¿Cuánto dinero REALMENTE tiene aprobado este alumno?
-    pagos_aprobados = await Payment.find(
-        Payment.inscripcion_id == enrollment_id,
-        Payment.estado_pago == EstadoPago.APROBADO
-    ).to_list()
+    if pagos_aprobados is None:
+        pagos_aprobados = await Payment.find(
+            Payment.inscripcion_id == enrollment_id,
+            Payment.estado_pago == EstadoPago.APROBADO
+        ).to_list()
 
     dinero_historico_total = sum(p.cantidad_pago for p in pagos_aprobados)
     tanque_de_agua = round(dinero_historico_total, 2)

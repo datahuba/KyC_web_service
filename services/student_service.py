@@ -15,7 +15,7 @@ from models.student import Student
 from models.enums import EstadoTitulo, TipoEstudiante
 from schemas.student import StudentCreate, StudentUpdateSelf, StudentUpdateAdmin
 from beanie import PydanticObjectId
-from beanie.operators import Or, RegEx
+from beanie.operators import Or, RegEx, In
 
 
 async def get_students(
@@ -806,6 +806,7 @@ async def import_students_from_excel(
     hay_columnas_financieras = bool(col_matricula or columnas_modulos or col_matricula_comprobante)
 
     if curso_id and inserted_ids:
+        import asyncio
         from datetime import datetime
         from models.course import Course
         from models.payment import Payment
@@ -825,90 +826,153 @@ async def import_students_from_excel(
                 f"Los {success_count} estudiantes se crearon correctamente pero no fueron inscritos."
             )
         else:
-            # Emparejar cada id insertado con su objeto y sus datos financieros (mismo orden que insert_many)
-            for student_id, student_obj, fin in zip(inserted_ids, students_to_insert, financials_to_insert):
+            # ============================================================
+            # OPTIMIZACIÓN DE RENDIMIENTO (2026-07-09, ISSUE-Q-IMPORT-TIMEOUT)
+            # ============================================================
+            # DIAGNÓSTICO: cada estudiante en el bucle anterior (secuencial)
+            # ejecutaba ~7-8 round-trips de red a MongoDB Atlas
+            # (Student.get, Course.get, Enrollment.find_one, enrollment.insert,
+            # course.save, student.save, Payment.insert_many,
+            # Payment.find+enrollment.save de actualizar_saldo_enrollment),
+            # uno detrás de otro. Con 53 estudiantes reales se midió ~2s por
+            # estudiante (~106s totales), superando el timeout de 120s del
+            # cliente aunque el servidor terminara la importación con éxito.
+            #
+            # FIX: los estudiantes recién insertados en este lote son
+            # independientes entre sí (no hay una inscripción previa que
+            # pueda chocar, ya se validó unicidad de carnet/registro/email
+            # arriba), así que se procesan en paralelo controlado
+            # (semáforo) en vez de secuencialmente. `course`/`student` ya
+            # están en memoria (no hace falta volver a pedirlos por
+            # estudiante) y las actualizaciones de `course.inscritos`
+            # (que NO tiene optimistic locking) se acumulan en un set y se
+            # guardan en un solo `course.save()` al final, evitando la
+            # condición de carrera de mutar/guardar el mismo `Course`
+            # desde tareas concurrentes.
+            CONCURRENCIA_MAXIMA = 8
+            semaphore = asyncio.Semaphore(CONCURRENCIA_MAXIMA)
+            resultados_lock = asyncio.Lock()
+
+            async def _inscribir_estudiante_importado(student_id, student_obj, fin: dict) -> None:
+                nonlocal enrolled_count, migrated_payments_count, matricula_vouchers_count
                 pagos = fin["pagos"]
                 matricula_url = fin["matricula_comprobante_url"]
-                try:
-                    enrollment = await enrollment_service.create_enrollment(
-                        enrollment_in=EnrollmentCreate(
-                            estudiante_id=student_id,
-                            curso_id=curso_id
-                        ),
-                        admin_username="import_masivo"
-                    )
-                    enrolled_count += 1
-
-                    payment_objs = []
-
-                    # a) Montos numéricos = dinero histórico confirmado -> pagos APROBADOS
-                    for (concepto, monto) in pagos:
-                        payment_objs.append(Payment(
-                            inscripcion_id=enrollment.id,
-                            estudiante_id=student_id,
-                            curso_id=curso_id,
-                            metodo_pago="Migración",
-                            concepto=concepto,
-                            cantidad_pago=monto,
-                            numero_cuota=None,
-                            numero_transaccion=None,
-                            comprobante_url=None,
-                            remitente=None,
-                            banco="Migración Excel",
-                            monto_comprobante=monto,
-                            fecha_comprobante=None,
-                            cuenta_destino="Importación Masiva",
-                            estado_pago=EstadoPago.APROBADO,
-                            fecha_verificacion=datetime.utcnow(),
-                            verificado_por="import_masivo",
-                        ))
-
-                    # b) Link de comprobante de matrícula = voucher subido sin conciliar -> pago PENDIENTE
-                    #    (solo si no vino ya un monto numérico de matrícula y el curso tiene matrícula > 0)
-                    tiene_matricula_numerica = any(concepto == "Matrícula" for (concepto, _) in pagos)
-                    registro_voucher = (
-                        matricula_url
-                        and not tiene_matricula_numerica
-                        and enrollment.costo_matricula > 0
-                    )
-                    if registro_voucher:
-                        payment_objs.append(Payment(
-                            inscripcion_id=enrollment.id,
-                            estudiante_id=student_id,
-                            curso_id=curso_id,
-                            metodo_pago="Transferencia",
-                            concepto="Matrícula",
-                            cantidad_pago=enrollment.costo_matricula,
-                            numero_cuota=None,
-                            numero_transaccion=None,
-                            comprobante_url=matricula_url,
-                            remitente=None,
-                            banco=None,
-                            monto_comprobante=enrollment.costo_matricula,
-                            fecha_comprobante=None,
-                            cuenta_destino=None,
-                            estado_pago=EstadoPago.PENDIENTE,
-                        ))
-
-                    if payment_objs:
-                        await Payment.insert_many(payment_objs)
-                        # El motor oficial reconstruye matrícula, módulos, totales y estado con los APROBADOS
-                        await enrollment_service.actualizar_saldo_enrollment(
-                            enrollment_id=enrollment.id,
-                            monto_pago_aprobado=0.0
+                async with semaphore:
+                    try:
+                        enrollment = await enrollment_service.create_enrollment(
+                            enrollment_in=EnrollmentCreate(
+                                estudiante_id=student_id,
+                                curso_id=curso_id
+                            ),
+                            admin_username="import_masivo",
+                            student=student_obj,
+                            course=course,
+                            skip_link_updates=True  # batcheado al final, ver abajo
                         )
-                        if pagos:
-                            migrated_payments_count += 1
+
+                        payment_objs = []
+
+                        # a) Montos numéricos = dinero histórico confirmado -> pagos APROBADOS
+                        for (concepto, monto) in pagos:
+                            payment_objs.append(Payment(
+                                inscripcion_id=enrollment.id,
+                                estudiante_id=student_id,
+                                curso_id=curso_id,
+                                metodo_pago="Migración",
+                                concepto=concepto,
+                                cantidad_pago=monto,
+                                numero_cuota=None,
+                                numero_transaccion=None,
+                                comprobante_url=None,
+                                remitente=None,
+                                banco="Migración Excel",
+                                monto_comprobante=monto,
+                                fecha_comprobante=None,
+                                cuenta_destino="Importación Masiva",
+                                estado_pago=EstadoPago.APROBADO,
+                                fecha_verificacion=datetime.utcnow(),
+                                verificado_por="import_masivo",
+                            ))
+
+                        # b) Link de comprobante de matrícula = voucher subido sin conciliar -> pago PENDIENTE
+                        #    (solo si no vino ya un monto numérico de matrícula y el curso tiene matrícula > 0)
+                        tiene_matricula_numerica = any(concepto == "Matrícula" for (concepto, _) in pagos)
+                        registro_voucher = (
+                            matricula_url
+                            and not tiene_matricula_numerica
+                            and enrollment.costo_matricula > 0
+                        )
                         if registro_voucher:
-                            matricula_vouchers_count += 1
-                except ValueError as e:
-                    errors.append(
-                        f"Inscripción de '{student_obj.nombre}' (Registro {student_obj.registro}) fallida: {str(e)}"
-                    )
-                except Exception as e:
-                    errors.append(
-                        f"Inscripción de '{student_obj.nombre}' (Registro {student_obj.registro}) fallida por error inesperado: {str(e)}"
-                    )
+                            payment_objs.append(Payment(
+                                inscripcion_id=enrollment.id,
+                                estudiante_id=student_id,
+                                curso_id=curso_id,
+                                metodo_pago="Transferencia",
+                                concepto="Matrícula",
+                                cantidad_pago=enrollment.costo_matricula,
+                                numero_cuota=None,
+                                numero_transaccion=None,
+                                comprobante_url=matricula_url,
+                                remitente=None,
+                                banco=None,
+                                monto_comprobante=enrollment.costo_matricula,
+                                fecha_comprobante=None,
+                                cuenta_destino=None,
+                                estado_pago=EstadoPago.PENDIENTE,
+                            ))
+
+                        if payment_objs:
+                            await Payment.insert_many(payment_objs)
+                            # El motor oficial reconstruye matrícula, módulos, totales y estado con los APROBADOS.
+                            # `enrollment` ya está en memoria, pasado para evitar el Enrollment.get() redundante.
+                            await enrollment_service.actualizar_saldo_enrollment(
+                                enrollment_id=enrollment.id,
+                                monto_pago_aprobado=0.0,
+                                enrollment=enrollment
+                            )
+
+                        async with resultados_lock:
+                            enrolled_count += 1
+                            course.inscritos.append(student_id)
+                            if curso_id not in student_obj.lista_cursos_ids:
+                                student_obj.lista_cursos_ids.append(curso_id)
+                            if pagos:
+                                migrated_payments_count += 1
+                            if registro_voucher:
+                                matricula_vouchers_count += 1
+                    except ValueError as e:
+                        async with resultados_lock:
+                            errors.append(
+                                f"Inscripción de '{student_obj.nombre}' (Registro {student_obj.registro}) fallida: {str(e)}"
+                            )
+                    except Exception as e:
+                        async with resultados_lock:
+                            errors.append(
+                                f"Inscripción de '{student_obj.nombre}' (Registro {student_obj.registro}) fallida por error inesperado: {str(e)}"
+                            )
+
+            await asyncio.gather(*[
+                _inscribir_estudiante_importado(student_id, student_obj, fin)
+                for student_id, student_obj, fin in zip(inserted_ids, students_to_insert, financials_to_insert)
+            ])
+
+            # Persistir en batch las referencias cruzadas acumuladas (1 sola
+            # escritura de red para el Course, en vez de una por estudiante).
+            # `student_obj.lista_cursos_ids` de cada estudiante NUEVO recién
+            # insertado se persiste con 1 update_many puntual por id (los
+            # estudiantes son documentos independientes entre sí, sin riesgo
+            # de condición de carrera entre ellos).
+            if course.inscritos:
+                await course.save()
+
+            estudiantes_con_curso_nuevo = [
+                student_id for student_id, student_obj in zip(inserted_ids, students_to_insert)
+                if curso_id in student_obj.lista_cursos_ids
+            ]
+            if estudiantes_con_curso_nuevo:
+                await Student.find(In(Student.id, estudiantes_con_curso_nuevo)).update(
+                    {"$set": {"lista_cursos_ids": [curso_id]}}
+                )
     elif hay_columnas_financieras and not curso_id and success_count > 0:
         errors.append(
             "Se detectaron columnas de pago (Matrícula/Módulos) en el archivo, pero no se seleccionó un curso; "
