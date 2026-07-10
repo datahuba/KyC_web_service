@@ -150,6 +150,17 @@ class UserRole(str, Enum):
     COORDINADOR = "coordinador"  # NUEVO (ISSUE-R-ROLES): supervisa Encargados de Curso de una misma área
 
 
+class SubtipoCoordinador(str, Enum):
+    """
+    Subtipo del rol COORDINADOR (ISSUE-R-PERFIL-GENERICO). Hay 3 coordinadores:
+    financiero, académico y de investigación. Solo el FINANCIERO tiene acceso
+    a la información económica (reportes de caja, resumen de ingresos, pagos).
+    """
+    FINANCIERO = "financiero"
+    ACADEMICO = "academico"
+    INVESTIGACION = "investigacion"
+
+
 class AssignmentType(str, Enum):
     """Tipo de actividad evaluable en un classroom"""
     TASK = "TASK"

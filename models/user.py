@@ -11,7 +11,7 @@ from typing import Optional, List
 import pymongo
 from pydantic import Field, EmailStr
 from .base import MongoBaseModel, PyObjectId
-from .enums import UserRole
+from .enums import UserRole, SubtipoCoordinador
 
 class User(MongoBaseModel):
     """
@@ -52,6 +52,13 @@ class User(MongoBaseModel):
     cursos_asignados: List[PyObjectId] = Field(
         default_factory=list,
         description="IDs de cursos asignados a este usuario. Relevante si rol es ENCARGADO_CURSO o COBRANZA."
+    )
+
+    # ISSUE-R-PERFIL-GENERICO: subtipo del COORDINADOR (financiero/academico/investigacion).
+    # Solo el coordinador FINANCIERO tiene acceso a la información económica.
+    subtipo_coordinador: Optional[SubtipoCoordinador] = Field(
+        None,
+        description="Subtipo del rol Coordinador. Solo 'financiero' ve lo económico. Obligatorio si rol es COORDINADOR."
     )
 
     # ISSUE-A-VERIFICACION: Verificación de Correo Electrónico (NO bloqueante)

@@ -367,6 +367,7 @@ async def get_me(
             registro=None,
             nombre_funcional=current_user.nombre_funcional,
             cursos_asignados=current_user.cursos_asignados,  # ISSUE-P-SEGMENTACION
+            subtipo_coordinador=current_user.subtipo_coordinador.value if current_user.subtipo_coordinador else None,  # ISSUE-R-PERFIL-GENERICO
             email_verificado=current_user.email_verificado  # ISSUE-A-VERIFICACION
         )
     else:  # Student

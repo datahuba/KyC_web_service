@@ -52,6 +52,10 @@ class CurrentUserResponse(BaseModel):
     nombre_funcional: Optional[str] = None
     cursos_asignados: List[PyObjectId] = Field(default_factory=list)
 
+    # ISSUE-R-PERFIL-GENERICO: subtipo del coordinador (financiero/academico/investigacion).
+    # El frontend lo usa para habilitar las vistas económicas solo al financiero.
+    subtipo_coordinador: Optional[str] = None
+
     # ISSUE-A-VERIFICACION: no bloqueante, solo informativo para mostrar un
     # banner sugiriendo verificar el correo (no impide el uso del sistema).
     email_verificado: bool = False
