@@ -182,8 +182,6 @@ async def list_payments(
             is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
             if current_user.rol == "cpd" and not is_matricula:
                 continue
-            if current_user.rol == "cobranza" and is_matricula:
-                continue
             filtered_payments.append(p)
             
         payments = filtered_payments
@@ -264,8 +262,6 @@ async def get_payment(
         
         if current_user.rol == "cpd" and not is_matricula:
             raise HTTPException(status_code=403, detail="El rol CPD solo tiene acceso a pagos de concepto Matrícula")
-        elif current_user.rol == "cobranza" and is_matricula:
-            raise HTTPException(status_code=403, detail="El rol Cobranza no tiene acceso a pagos de concepto Matrícula")
     
     return await payment_service.enrich_payment_with_details(payment)
 
@@ -297,8 +293,6 @@ async def aprobar_pago(
     
     if current_user.rol == "cpd" and not is_matricula:
         raise HTTPException(status_code=403, detail="El rol CPD solo puede aprobar pagos con concepto de Matrícula.")
-    if current_user.rol == "cobranza" and is_matricula:
-        raise HTTPException(status_code=403, detail="El rol Cobranza no puede aprobar pagos con concepto de Matrícula.")
         
     try:
         payment = await payment_service.aprobar_pago(
@@ -340,8 +334,6 @@ async def rechazar_pago(
     
     if current_user.rol == "cpd" and not is_matricula:
         raise HTTPException(status_code=403, detail="El rol CPD solo puede rechazar pagos con concepto de Matrícula.")
-    if current_user.rol == "cobranza" and is_matricula:
-        raise HTTPException(status_code=403, detail="El rol Cobranza no puede rechazar pagos con concepto de Matrícula.")
         
     try:
         payment = await payment_service.rechazar_pago(
@@ -461,8 +453,6 @@ async def get_payments_by_enrollment(
             is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
             if current_user.rol == "cpd" and not is_matricula:
                 continue
-            if current_user.rol == "cobranza" and is_matricula:
-                continue
         filtered_payments.append(p)
         
     return await payment_service.enrich_payments_with_details_bulk(filtered_payments)
@@ -526,9 +516,6 @@ async def get_payments_pendientes(
         
         if current_user.rol == "cpd":
             if is_matricula:
-                filtered_payments.append(p)
-        elif current_user.rol == "cobranza":
-            if not is_matricula:
                 filtered_payments.append(p)
         else:
             filtered_payments.append(p)
@@ -606,8 +593,6 @@ async def get_reporte_caja_endpoint(
     concepto_regex = None
     if current_user.rol == "cpd":
         concepto_regex = {"concepto": {"$regex": r"^matr[ií]cula$", "$options": "i"}}
-    elif current_user.rol == "cobranza":
-        concepto_regex = {"concepto": {"$not": {"$regex": r"^matr[ií]cula$", "$options": "i"}}}
 
     # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve su(s) curso(s).
     filtro_rol = filtro_cursos_por_rol(current_user)
@@ -671,8 +656,6 @@ async def generar_reporte_excel_pagos(
     concepto_regex = None
     if current_user.rol == "cpd":
         concepto_regex = {"concepto": {"$regex": r"^matr[ií]cula$", "$options": "i"}}
-    elif current_user.rol == "cobranza":
-        concepto_regex = {"concepto": {"$not": {"$regex": r"^matr[ií]cula$", "$options": "i"}}}
 
     # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo exporta pagos de esos cursos.
     filtro_rol = filtro_cursos_por_rol(current_user)
