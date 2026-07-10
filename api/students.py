@@ -23,7 +23,7 @@ import math
 )
 async def read_students(
     page: int = Query(1, ge=1, description="Número de página"),
-    per_page: int = Query(10, ge=1, le=500, description="Elementos por página"),
+    per_page: int = Query(10, ge=1, le=5000, description="Elementos por página"),
     q: Optional[str] = Query(None, description="Buscar por nombre, email, carnet o registro"),
     activo: Optional[bool] = Query(None, description="Filtrar por estado activo/inactivo"),
     estado_titulo: Optional[str] = Query(None, description="Filtrar por estado del título"),
@@ -53,7 +53,7 @@ async def read_students(
 async def create_student(
     *,
     student_in: StudentCreate,
-    current_user: User = Depends(require_cpd) # <-- SOLO EL CPD (Y ADMINS) PUEDEN CREAR ALUMNOS
+    current_user: User = Depends(require_encargado_curso) # <-- CPD, ADMIN, ENCARGADO, COORDINADOR PUEDEN CREAR ALUMNOS
 ) -> Any:
     """Crear nuevo estudiante"""
     try:

@@ -371,6 +371,13 @@ async def get_me(
             email_verificado=current_user.email_verificado  # ISSUE-A-VERIFICACION
         )
     else:  # Student
+        perfil_completado = all([
+            current_user.celular,
+            current_user.domicilio,
+            current_user.fecha_nacimiento,
+            current_user.carnet
+        ])
+
         return CurrentUserResponse(
             _id=current_user.id,
             username=current_user.registro,
@@ -382,6 +389,6 @@ async def get_me(
             nombre=current_user.nombre,  # Inyección del nombre real desde la ficha del estudiante
             registro=current_user.registro,  # Inyección del código de registro oficial
             terminos_aceptados=current_user.terminos_aceptados,  # ISSUE-Q-PRE
-            email_verificado=current_user.email_verificado  # ISSUE-A-VERIFICACION
+            email_verificado=current_user.email_verificado,  # ISSUE-A-VERIFICACION
+            perfil_completado=perfil_completado
         )
-    

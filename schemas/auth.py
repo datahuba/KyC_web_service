@@ -60,6 +60,8 @@ class CurrentUserResponse(BaseModel):
     # banner sugiriendo verificar el correo (no impide el uso del sistema).
     email_verificado: bool = False
 
+    perfil_completado: bool = True # Para mostrar banner recordatorio a estudiantes
+
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True
