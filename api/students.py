@@ -9,7 +9,7 @@ from services import student_service
 from beanie import PydanticObjectId
 
 # IMPORTAMOS NUESTRAS LLAVES DE SEGURIDAD GRANULARES DE LA UAGRM
-from api.dependencies import require_superadmin, require_cpd, require_staff, require_cobranza, get_current_user
+from api.dependencies import require_superadmin, require_cpd, require_staff, require_cobranza, get_current_user, require_encargado_curso
 
 router = APIRouter()
 
@@ -368,7 +368,7 @@ async def upload_student_titulo(
 async def verificar_titulo_estudiante(
     *, id: PydanticObjectId, titulo: Optional[str] = Form(None), numero_titulo: Optional[str] = Form(None),
     año_expedicion: Optional[str] = Form(None), universidad: Optional[str] = Form(None), 
-    current_user: User = Depends(require_cpd) # <-- CPD VERIFICA TÍTULOS ACADÉMICOS
+    current_user: User = Depends(require_encargado_curso) # <-- ENCARGADO DE CURSO Y SUPERIORES VERIFICAN TÍTULOS ACADÉMICOS
 ) -> Any:
     student = await student_service.get_student(id=id)
     if not student: raise HTTPException(404, "Estudiante no encontrado")
@@ -387,7 +387,7 @@ async def verificar_titulo_estudiante(
     return student
 
 @router.put("/{id}/titulo/rechazar", response_model=StudentResponse)
-async def rechazar_titulo_estudiante(*, id: PydanticObjectId, motivo: str = Form(...), current_user: User = Depends(require_cpd)) -> Any:
+async def rechazar_titulo_estudiante(*, id: PydanticObjectId, motivo: str = Form(...), current_user: User = Depends(require_encargado_curso)) -> Any:
     student = await student_service.get_student(id=id)
     if not student: raise HTTPException(404, "Estudiante no encontrado")
     
