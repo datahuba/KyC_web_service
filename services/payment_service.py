@@ -328,7 +328,8 @@ async def get_all_payments(
     estado: Optional[str] = None,
     curso_id: Optional[PydanticObjectId] = None,
     estudiante_id: Optional[PydanticObjectId] = None,
-    cursos_permitidos: Optional[List[PydanticObjectId]] = None
+    cursos_permitidos: Optional[List[PydanticObjectId]] = None,
+    tipo_concepto: Optional[str] = None
 ) -> tuple[List[Payment], int]:
     """
     cursos_permitidos (ISSUE-P-SEGMENTACION): si se provee (no None), restringe
@@ -351,6 +352,12 @@ async def get_all_payments(
     if cursos_permitidos is not None:
         query_dict["curso_id"] = {"$in": cursos_permitidos}
         
+    if tipo_concepto:
+        if tipo_concepto == "matricula":
+            query_dict["concepto"] = {"$regex": "matricula|matrícula", "$options": "i"}
+        elif tipo_concepto == "colegiatura":
+            query_dict["concepto"] = {"$not": {"$regex": "matricula|matrícula", "$options": "i"}}
+            
     if q:
         regex_pattern = {"$regex": q, "$options": "i"}
         

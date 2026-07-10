@@ -148,6 +148,7 @@ async def list_payments(
     estado: Optional[str] = Query(None, description="Filtrar por estado"),
     curso_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por Curso ID"),
     estudiante_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por Estudiante ID"),
+    tipo_concepto: Optional[str] = Query(None, description="Filtrar por tipo de concepto (matricula, colegiatura)"),
     current_user: User | Student = Depends(get_current_user)
 ) -> Any:
     
@@ -170,7 +171,8 @@ async def list_payments(
             estado=estado,
             curso_id=curso_id,
             estudiante_id=estudiante_id,
-            cursos_permitidos=cursos_permitidos
+            cursos_permitidos=cursos_permitidos,
+            tipo_concepto=tipo_concepto
         )
         
         # Filtrado de RBAC (CPD vs Cobranza)
@@ -193,6 +195,12 @@ async def list_payments(
         )
         if estado and estado != "Todos los estados":
             all_payments = [p for p in all_payments if p.estado_pago.value == estado]
+            
+        if tipo_concepto:
+            if tipo_concepto == "matricula":
+                all_payments = [p for p in all_payments if "matricula" in (p.concepto or "").lower() or "matrícula" in (p.concepto or "").lower()]
+            elif tipo_concepto == "colegiatura":
+                all_payments = [p for p in all_payments if "matricula" not in (p.concepto or "").lower() and "matrícula" not in (p.concepto or "").lower()]
             
         total_count = len(all_payments)
         start = (page - 1) * per_page
