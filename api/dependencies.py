@@ -424,7 +424,7 @@ def require_staff(
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> User:
     """
-    Requiere cualquier rol del personal administrativo de Postgrado.
+    Requiere cualquier rol del personal administrativo de Posgrado.
     Permite el acceso a: ADMIN, SUPERADMIN, MAE, CPD y COBRANZA.
     (Docentes y Estudiantes son bloqueados).
     """

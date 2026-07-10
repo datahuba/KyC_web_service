@@ -116,7 +116,7 @@ class Student(MongoBaseModel):
     # ========================================================================
     # ISSUE-Q-PRE: Términos y Condiciones (aceptación en el primer login)
     # ========================================================================
-    terminos_aceptados: bool = Field(default=False, description="Si el estudiante ya aceptó el reglamento de Postgrado. Se exige en el primer login.")
+    terminos_aceptados: bool = Field(default=False, description="Si el estudiante ya aceptó el reglamento de Posgrado. Se exige en el primer login.")
     fecha_aceptacion_terminos: Optional[datetime] = Field(default=None, description="Fecha (UTC) en la que el estudiante aceptó los términos por primera vez.")
 
     # ========================================================================

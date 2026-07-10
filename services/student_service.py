@@ -74,7 +74,7 @@ async def get_student(id: PydanticObjectId) -> Optional[Student]:
 
 async def accept_terms(student: Student) -> Student:
     """
-    ISSUE-Q-PRE: Registra la aceptación del reglamento de Postgrado.
+    ISSUE-Q-PRE: Registra la aceptación del reglamento de Posgrado.
 
     Idempotente: si ya había aceptado antes, no pisa la fecha original
     de la primera aceptación (se conserva como evidencia histórica).

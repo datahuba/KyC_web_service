@@ -765,7 +765,7 @@ async def validar_nota_borrador(
                 )
                 await send_email(
                     student.email,
-                    f"Nota validada: {nombre_modulo} · Postgrado UAGRM",
+                    f"Nota validada: {nombre_modulo} · Posgrado UAGRM",
                     html
                 )
     except Exception as e:

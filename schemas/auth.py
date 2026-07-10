@@ -41,7 +41,7 @@ class CurrentUserResponse(BaseModel):
     nombre: Optional[str] = None
     registro: Optional[str] = None
 
-    # ISSUE-Q-PRE: si el estudiante ya aceptó el reglamento de Postgrado.
+    # ISSUE-Q-PRE: si el estudiante ya aceptó el reglamento de Posgrado.
     # Siempre True para personal administrativo/docente (no aplica a ellos).
     terminos_aceptados: bool = True
 

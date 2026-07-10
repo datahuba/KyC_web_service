@@ -136,7 +136,7 @@ async def enviar_recordatorio_pago(
             )
             email_enviado = await send_email(
                 student.email,
-                "Recordatorio de Pago · Postgrado UAGRM",
+                "Recordatorio de Pago · Posgrado UAGRM",
                 html
             )
         except Exception as e:
@@ -201,7 +201,7 @@ async def accept_terms(
     current_user: Student = Depends(get_current_user)
 ) -> Any:
     """
-    Registra la aceptación del reglamento de Postgrado por parte del estudiante.
+    Registra la aceptación del reglamento de Posgrado por parte del estudiante.
 
     Se exige en el primer inicio de sesión (bloqueado por el frontend hasta
     que se llame este endpoint). Es idempotente: llamarlo de nuevo no falla

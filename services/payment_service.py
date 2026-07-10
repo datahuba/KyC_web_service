@@ -464,7 +464,7 @@ async def aprobar_pago(
                 monto=payment.cantidad_pago,
                 portal_link=portal_link
             )
-            await send_email(_est.email, "Pago Aprobado · Postgrado UAGRM", html)
+            await send_email(_est.email, "Pago Aprobado · Posgrado UAGRM", html)
     except Exception as e:
         print(f"Error al enviar correo de pago aprobado: {str(e)}")
 
