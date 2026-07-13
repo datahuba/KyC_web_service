@@ -99,14 +99,6 @@ class TipoTitulo(str, Enum):
     TITULO_DOCTORADO = "título de doctorado"
 
 
-class TipoEstudiante(str, Enum):
-    """
-    Tipo de estudiante según su relación con la universidad
-    """
-    INTERNO = "interno"
-    EXTERNO = "externo"
-
-
 class Sexo(str, Enum):
     """Sexo del estudiante (dato oficial UAGRM)"""
     MASCULINO = "masculino"
@@ -156,6 +148,17 @@ class UserRole(str, Enum):
     COBRANZA = "cobranza"
     ENCARGADO_CURSO = "encargado_curso"  # NUEVO (ISSUE-R-ROLES): responsable operativo de curso(s) específico(s)
     COORDINADOR = "coordinador"  # NUEVO (ISSUE-R-ROLES): supervisa Encargados de Curso de una misma área
+
+
+class SubtipoCoordinador(str, Enum):
+    """
+    Subtipo del rol COORDINADOR (ISSUE-R-PERFIL-GENERICO). Hay 3 coordinadores:
+    financiero, académico y de investigación. Solo el FINANCIERO tiene acceso
+    a la información económica (reportes de caja, resumen de ingresos, pagos).
+    """
+    FINANCIERO = "financiero"
+    ACADEMICO = "academico"
+    INVESTIGACION = "investigacion"
 
 
 class AssignmentType(str, Enum):

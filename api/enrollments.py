@@ -330,6 +330,42 @@ async def update_modulo_nota(
             updated_enrollment = await enrollment_service.subir_nota_borrador(
                 enrollment_id=id, modulo_index=index, nota_borrador=nota_update.nota
             )
+
+            # NOTIFICACIÓN a CPD/Admin/Superadmin: el docente subió un borrador
+            # que requiere validación. Sin esto, CPD nunca se enteraba.
+            try:
+                from services.notification_service import create_notification
+                from beanie.operators import Or as _Or
+
+                nombre_modulo = (
+                    updated_enrollment.modulos[index].nombre
+                    if index < len(updated_enrollment.modulos)
+                    else f"Módulo {index + 1}"
+                )
+
+                revisores = await User.find(
+                    User.activo == True,
+                    _Or(
+                        User.rol == UserRole.CPD,
+                        User.rol == UserRole.ADMIN,
+                        User.rol == UserRole.SUPERADMIN
+                    )
+                ).to_list()
+
+                for revisor in revisores:
+                    await create_notification(
+                        destinatario_id=revisor.id,
+                        tipo_destinatario="user",
+                        titulo="Nota Borrador Pendiente",
+                        mensaje=f"El docente {username} propuso una nota de {nota_update.nota} para '{nombre_modulo}'. Requiere tu validación.",
+                        tipo_alerta="warning",
+                        ruta="/app/enrollments",
+                        referencia_tipo="enrollment",
+                        referencia_id=id
+                    )
+            except Exception as e:
+                print(f"Error notificando borrador de nota a CPD: {str(e)}")
+
         else:
             updated_enrollment = await enrollment_service.actualizar_nota_modulo(
                 enrollment_id=id,
@@ -356,6 +392,33 @@ async def validar_modulo_nota(
     """ISSUE-Q-NOTA-BORRADOR: convierte el borrador del docente en nota oficial."""
     try:
         updated = await enrollment_service.validar_nota_borrador(id, index, current_user.nombre_visible)
+
+        # NOTIFICACIÓN al docente asignado: su borrador fue aprobado/oficializado.
+        try:
+            from services.notification_service import create_notification
+            from models.course import Course
+
+            nombre_modulo = (
+                updated.modulos[index].nombre
+                if index < len(updated.modulos)
+                else f"Módulo {index + 1}"
+            )
+
+            course = await Course.get(updated.curso_id)
+            if course and index < len(course.modulos) and course.modulos[index].docente_id:
+                await create_notification(
+                    destinatario_id=course.modulos[index].docente_id,
+                    tipo_destinatario="user",
+                    titulo="Nota Oficializada",
+                    mensaje=f"Tu nota propuesta para '{nombre_modulo}' fue validada y oficializada por CPD ({current_user.nombre_visible}).",
+                    tipo_alerta="success",
+                    ruta="/app/dashboard",
+                    referencia_tipo="enrollment",
+                    referencia_id=id
+                )
+        except Exception as e:
+            print(f"Error notificando validación de borrador al docente: {str(e)}")
+
         return await enrollment_service.enrich_enrollment_dates(updated)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -374,7 +437,37 @@ async def rechazar_modulo_nota(
 ) -> Any:
     """ISSUE-Q-NOTA-BORRADOR: descarta el borrador propuesto por el docente."""
     try:
+        # Cargar enrollment ANTES del rechazo para obtener el nombre del módulo
+        enrollment = await Enrollment.get(id)
+        nombre_modulo = (
+            enrollment.modulos[index].nombre
+            if enrollment and index < len(enrollment.modulos)
+            else f"Módulo {index + 1}"
+        )
+
         updated = await enrollment_service.rechazar_nota_borrador(id, index)
+
+        # NOTIFICACIÓN al docente asignado: su borrador fue rechazado.
+        # Sin esto, el docente no se enteraba y creía que su nota seguía pendiente.
+        try:
+            from services.notification_service import create_notification
+            from models.course import Course
+
+            course = await Course.get(updated.curso_id)
+            if course and index < len(course.modulos) and course.modulos[index].docente_id:
+                await create_notification(
+                    destinatario_id=course.modulos[index].docente_id,
+                    tipo_destinatario="user",
+                    titulo="Borrador de Nota Rechazado",
+                    mensaje=f"CPD ({current_user.nombre_visible}) rechazó tu nota propuesta para '{nombre_modulo}'. Por favor, revisa y envía una nueva calificación.",
+                    tipo_alerta="error",
+                    ruta="/app/dashboard",
+                    referencia_tipo="enrollment",
+                    referencia_id=id
+                )
+        except Exception as e:
+            print(f"Error notificando rechazo de borrador al docente: {str(e)}")
+
         return await enrollment_service.enrich_enrollment_dates(updated)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -411,18 +504,29 @@ async def listar_requisitos(
 @router.put("/{id}/requisitos/{index}", response_model=RequisitoResponse)
 async def subir_requisito(
     *, id: PydanticObjectId, index: int = Path(..., ge=0), file: UploadFile = File(...),
-    current_user: Student = Depends(get_current_user)
+    current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
-    if not isinstance(current_user, Student):
-        raise HTTPException(403, "Solo estudiantes")
-    
     enrollment = await Enrollment.get(id)
     if not enrollment:
         raise HTTPException(404, "Enrollment no encontrado")
-    
-    if enrollment.estudiante_id != current_user.id:
-        raise HTTPException(403, "No es tu enrollment")
-    
+
+    # Autorización: el estudiante dueño, o el personal habilitado. CPD/Admin/
+    # Superadmin sin restricción; Encargado de Curso/Coordinador pueden subir
+    # documentos por el estudiante (el Encargado solo en sus programas asignados).
+    # Cobranza/Docente/MAE NO suben requisitos.
+    if isinstance(current_user, Student):
+        if enrollment.estudiante_id != current_user.id:
+            raise HTTPException(403, "No es tu inscripción")
+    else:
+        roles_permitidos = {
+            UserRole.CPD, UserRole.ADMIN, UserRole.SUPERADMIN,
+            UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR
+        }
+        if current_user.rol not in roles_permitidos:
+            raise HTTPException(403, "No tienes permiso para subir documentos")
+        if current_user.rol == UserRole.ENCARGADO_CURSO and enrollment.curso_id not in current_user.cursos_asignados:
+            raise HTTPException(403, "No tienes asignado el programa de esta inscripción")
+
     if index >= len(enrollment.requisitos):
         raise HTTPException(400, f"Índice {index} fuera de rango")
     
@@ -441,7 +545,52 @@ async def subir_requisito(
         
         enrollment.requisitos[index].subir_documento(documento_url)
         await enrollment.save()
+
+        # ISSUE-Q-DOCUMENTOS-KYC (2026-07-09): al subir el estudiante, se
+        # notifica a quienes pueden aprobarlo (CPD/Admin/Superadmin siempre, +
+        # el Encargado de Curso asignado a ese curso) para que lo revisen. No
+        # bloqueante: si la notificación falla, la subida ya quedó registrada.
+        try:
+            from services.notification_service import create_notification
+            from beanie.operators import Or as _Or, In as _In
+
+            nombre_doc = enrollment.requisitos[index].descripcion
+            if isinstance(current_user, Student):
+                nombre_est = current_user.nombre or current_user.registro
+            else:
+                _est = await Student.get(enrollment.estudiante_id)
+                nombre_est = (_est.nombre or _est.registro) if _est else "Un estudiante"
+
+            revisores = await User.find(
+                User.activo == True,
+                _Or(
+                    User.rol == UserRole.CPD,
+                    User.rol == UserRole.ADMIN,
+                    User.rol == UserRole.SUPERADMIN,
+                    _In(User.cursos_asignados, [enrollment.curso_id])
+                )
+            ).to_list()
+
+            for revisor in revisores:
+                # El Encargado de Curso solo si el curso está entre sus asignados
+                if revisor.rol == UserRole.ENCARGADO_CURSO and enrollment.curso_id not in revisor.cursos_asignados:
+                    continue
+                await create_notification(
+                    destinatario_id=revisor.id,
+                    tipo_destinatario="user",
+                    titulo="Documento por revisar",
+                    mensaje=f"{nombre_est} subió el documento '{nombre_doc}' y requiere tu revisión.",
+                    tipo_alerta="info",
+                    ruta="/app/enrollments",
+                    referencia_tipo="enrollment",
+                    referencia_id=enrollment.id
+                )
+        except Exception as e:
+            print(f"Error notificando subida de documento a revisores: {str(e)}")
+
         return enrollment.requisitos[index]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Error: {str(e)}")
 
@@ -473,6 +622,23 @@ async def aprobar_requisito(
     
     enrollment.requisitos[index].aprobar(current_user.nombre_visible)  # ISSUE-R-PERFIL-GENERICO
     await enrollment.save()
+
+    # ISSUE-Q-DOCUMENTOS-KYC: notificar al estudiante que su documento fue aprobado.
+    try:
+        from services.notification_service import create_notification
+        await create_notification(
+            destinatario_id=enrollment.estudiante_id,
+            tipo_destinatario="student",
+            titulo="Documento aprobado",
+            mensaje=f"Tu documento '{enrollment.requisitos[index].descripcion}' fue aprobado.",
+            tipo_alerta="success",
+            ruta="/app/enrollments",
+            referencia_tipo="enrollment",
+            referencia_id=enrollment.id
+        )
+    except Exception as e:
+        print(f"Error notificando aprobación de documento al estudiante: {str(e)}")
+
     return enrollment.requisitos[index]
 
 
@@ -500,6 +666,23 @@ async def rechazar_requisito(
     
     enrollment.requisitos[index].rechazar(current_user.nombre_visible, rechazo.motivo)  # ISSUE-R-PERFIL-GENERICO
     await enrollment.save()
+
+    # ISSUE-Q-DOCUMENTOS-KYC: notificar al estudiante que su documento fue rechazado, con el motivo.
+    try:
+        from services.notification_service import create_notification
+        await create_notification(
+            destinatario_id=enrollment.estudiante_id,
+            tipo_destinatario="student",
+            titulo="Documento rechazado",
+            mensaje=f"Tu documento '{enrollment.requisitos[index].descripcion}' fue rechazado. Motivo: {rechazo.motivo}. Vuelve a subirlo corregido.",
+            tipo_alerta="error",
+            ruta="/app/enrollments",
+            referencia_tipo="enrollment",
+            referencia_id=enrollment.id
+        )
+    except Exception as e:
+        print(f"Error notificando rechazo de documento al estudiante: {str(e)}")
+
     return enrollment.requisitos[index]
 
 
@@ -536,6 +719,53 @@ async def subir_beca_respaldo(
             raise HTTPException(400, f"Formato no permitido: {file.content_type}")
 
         enrollment.beca_respaldo_url = url
+        enrollment.updated_at = datetime.utcnow()
+        await enrollment.save()
+        return await enrollment_service.enrich_enrollment_dates(enrollment)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Error: {str(e)}")
+
+
+@router.post(
+    "/{id}/formulario-inscripcion",
+    response_model=EnrollmentResponse,
+    summary="Subir Formulario de Inscripción lleno"
+)
+async def subir_formulario_inscripcion(
+    *,
+    id: PydanticObjectId,
+    file: UploadFile = File(...),
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> Any:
+    """
+    Sube (o reemplaza) el formulario de inscripción oficial lleno/firmado del
+    estudiante para esta inscripción. El estudiante puede subir el suyo; el
+    personal (CPD/Admin/Superadmin) también puede subirlo por él. Acepta PDF o
+    imagen (foto del formulario firmado). No bloqueante.
+    """
+    enrollment = await Enrollment.get(id)
+    if not enrollment:
+        raise HTTPException(404, "Inscripción no encontrada")
+
+    # El estudiante solo puede subir el formulario de su propia inscripción.
+    if isinstance(current_user, Student) and enrollment.estudiante_id != current_user.id:
+        raise HTTPException(403, "No es tu inscripción")
+
+    try:
+        folder = f"enrollments/{id}/formulario_inscripcion"
+        public_id = "formulario"
+
+        image_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
+        if file.content_type in image_types:
+            url = await upload_image(file, folder, public_id)
+        elif file.content_type == "application/pdf":
+            url = await upload_pdf(file, folder, public_id)
+        else:
+            raise HTTPException(400, f"Formato no permitido: {file.content_type}. Sube el formulario como PDF o imagen.")
+
+        enrollment.formulario_inscripcion_url = url
         enrollment.updated_at = datetime.utcnow()
         await enrollment.save()
         return await enrollment_service.enrich_enrollment_dates(enrollment)

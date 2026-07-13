@@ -328,7 +328,8 @@ async def get_all_payments(
     estado: Optional[str] = None,
     curso_id: Optional[PydanticObjectId] = None,
     estudiante_id: Optional[PydanticObjectId] = None,
-    cursos_permitidos: Optional[List[PydanticObjectId]] = None
+    cursos_permitidos: Optional[List[PydanticObjectId]] = None,
+    tipo_concepto: Optional[str] = None
 ) -> tuple[List[Payment], int]:
     """
     cursos_permitidos (ISSUE-P-SEGMENTACION): si se provee (no None), restringe
@@ -351,6 +352,12 @@ async def get_all_payments(
     if cursos_permitidos is not None:
         query_dict["curso_id"] = {"$in": cursos_permitidos}
         
+    if tipo_concepto:
+        if tipo_concepto == "matricula":
+            query_dict["concepto"] = {"$regex": "matricula|matrícula", "$options": "i"}
+        elif tipo_concepto == "colegiatura":
+            query_dict["concepto"] = {"$not": {"$regex": "matricula|matrícula", "$options": "i"}}
+            
     if q:
         regex_pattern = {"$regex": q, "$options": "i"}
         
@@ -447,7 +454,27 @@ async def aprobar_pago(
         )
     except Exception as e:
         print(f"Error al enviar notificación de pago aprobado: {str(e)}")
-    
+
+    # Correo real al estudiante confirmando la aprobación (no bloqueante: si
+    # falla el envío o el estudiante no tiene email, el pago ya quedó aprobado).
+    try:
+        from models.student import Student as _Student
+        from core.email_utils import send_email, build_pago_aprobado_email
+        from core.config import settings
+
+        _est = await _Student.get(payment.estudiante_id)
+        if _est and _est.email:
+            portal_link = f"{settings.FRONTEND_URL.rstrip('/')}/app/payments"
+            html = build_pago_aprobado_email(
+                nombre=_est.nombre or _est.registro,
+                concepto=payment.concepto,
+                monto=payment.cantidad_pago,
+                portal_link=portal_link
+            )
+            await send_email(_est.email, "Pago Aprobado · Posgrado UAGRM", html)
+    except Exception as e:
+        print(f"Error al enviar correo de pago aprobado: {str(e)}")
+
     return payment
 
 
@@ -563,6 +590,131 @@ async def anular_pago(
         print(f"Error al enviar notificación de pago anulado: {str(e)}")
 
     return payment
+
+
+async def eliminar_pago(
+    payment_id: PydanticObjectId,
+    admin_username: str
+) -> dict:
+    """
+    Elimina FÍSICAMENTE un pago de la base de datos (borrado destructivo,
+    exclusivo de superadmin). Pensado para limpiar pagos de prueba/erróneos
+    que no deben computar en la contabilidad.
+
+    A diferencia de `anular_pago` (que preserva el registro con estado ANULADO),
+    esto borra el documento por completo y luego recalcula el saldo/estado de la
+    inscripción desde CERO a partir de los pagos APROBADOS restantes en la base
+    de datos, sin importar en qué estado estuviera el pago borrado. De esta forma
+    los totales económicos quedan consistentes tras la eliminación.
+    """
+    payment = await Payment.get(payment_id)
+    if not payment:
+        raise ValueError(f"Pago {payment_id} no encontrado")
+
+    # Capturar datos antes de borrar (para auditoría y recálculo)
+    enrollment_id = payment.inscripcion_id
+    estudiante_id = payment.estudiante_id
+    monto = payment.cantidad_pago
+    concepto = payment.concepto
+    estado_previo = payment.estado_pago.value if payment.estado_pago else "desconocido"
+
+    await payment.delete()
+
+    # Recalcular saldo de la inscripción desde los pagos aprobados que quedan.
+    # actualizar_saldo_enrollment recomputa desde cero (suma los pagos APROBADOS
+    # actuales en BD), por lo que basta con invocarlo tras el borrado.
+    if enrollment_id:
+        try:
+            await enrollment_service.actualizar_saldo_enrollment(
+                enrollment_id=enrollment_id,
+                monto_pago_aprobado=0.0
+            )
+        except Exception as e:
+            print(f"Error al recalcular saldo tras eliminar pago {payment_id}: {str(e)}")
+
+    await _registrar_auditoria_financiera(
+        accion="ELIMINAR PAGO (BORRADO DEFINITIVO)",
+        payment_id=payment_id,
+        estudiante_id=estudiante_id,
+        monto=monto,
+        admin_username=admin_username,
+        detalles=f"Borrado físico de pago (estado previo: {estado_previo}, concepto: {concepto})"
+    )
+
+    return {
+        "success": True,
+        "message": "Pago eliminado correctamente",
+        "payment_id": str(payment_id)
+    }
+
+
+async def get_resumen_economico(
+    cursos_permitidos: Optional[List[PydanticObjectId]] = None
+) -> dict:
+    """
+    ISSUE-P-DASHBOARD-COBRANZA: resumen económico agregado para el dashboard de
+    Cobranza / coordinador financiero.
+
+    A diferencia de la vista de pagos (que a Cobranza le oculta las matrículas),
+    este resumen SÍ incluye el ingreso por matrícula como dato contable, porque
+    Cobranza genera los informes económicos y necesita ver todo lo recaudado
+    (regla confirmada en reunión: "cobranza lo ve porque generamos los informes
+    económicos"). Es de solo lectura y agregado; no expone pagos individuales de
+    matrícula ni permite operarlos.
+
+    Devuelve:
+      - ingreso_matricula: suma de pagos APROBADOS con concepto Matrícula.
+      - ingreso_colegiatura: suma de pagos APROBADOS de módulos/cuotas (no matrícula).
+      - total_ingresos: ingreso_matricula + ingreso_colegiatura.
+      - total_esperado: suma de total_a_pagar de todas las inscripciones del alcance.
+      - por_cobrar: suma de saldo_pendiente (lo que falta recaudar).
+      - cobros_pendientes: cantidad de PERSONAS/inscripciones con saldo pendiente (> 0).
+      - total_inscritos: cantidad de inscripciones en el alcance.
+
+    Respeta la segmentación por curso (Cobranza con cursos_asignados solo ve su
+    alcance) vía `cursos_permitidos`.
+    """
+    match_pagos: dict = {"estado_pago": EstadoPago.APROBADO}
+    match_enroll: dict = {}
+    if cursos_permitidos is not None:
+        match_pagos["curso_id"] = {"$in": cursos_permitidos}
+        match_enroll["curso_id"] = {"$in": cursos_permitidos}
+
+    pagos_task = Payment.find(match_pagos).to_list()
+    enrollments_task = Enrollment.find(match_enroll).to_list()
+    pagos, enrollments = await asyncio.gather(pagos_task, enrollments_task)
+
+    ingreso_matricula = 0.0
+    ingreso_colegiatura = 0.0
+    for p in pagos:
+        concepto = (p.concepto or "").lower().strip()
+        es_matricula = "matricula" in concepto or "matrícula" in concepto
+        if es_matricula:
+            ingreso_matricula += p.cantidad_pago or 0.0
+        else:
+            ingreso_colegiatura += p.cantidad_pago or 0.0
+
+    total_ingresos = ingreso_matricula + ingreso_colegiatura
+
+    total_esperado = 0.0
+    por_cobrar = 0.0
+    cobros_pendientes = 0
+    for e in enrollments:
+        total_esperado += e.total_a_pagar or 0.0
+        saldo = e.saldo_pendiente or 0.0
+        por_cobrar += saldo
+        if saldo > 0.01:
+            cobros_pendientes += 1
+
+    return {
+        "ingreso_matricula": round(ingreso_matricula, 2),
+        "ingreso_colegiatura": round(ingreso_colegiatura, 2),
+        "total_ingresos": round(total_ingresos, 2),
+        "total_esperado": round(total_esperado, 2),
+        "por_cobrar": round(por_cobrar, 2),
+        "cobros_pendientes": cobros_pendientes,
+        "total_inscritos": len(enrollments),
+    }
 
 
 def _construir_filtro_reporte_caja(

@@ -48,7 +48,6 @@ async def create_account_request(data: AccountRequestCreate) -> AccountRequest:
         carnet=carnet_norm,
         celular=data.celular,
         registro=data.registro.strip() if data.registro else None,
-        es_estudiante_interno=data.es_estudiante_interno,
         mensaje=data.mensaje.strip() if data.mensaje else None,
         estado="pendiente"
     )
@@ -137,7 +136,6 @@ async def approve_account_request(request_id: PydanticObjectId, admin_username: 
         email=solicitud.email,
         carnet=solicitud.carnet,
         celular=solicitud.celular,
-        es_estudiante_interno=solicitud.es_estudiante_interno,
         activo=True,
         lista_cursos_ids=[]
     )
@@ -161,7 +159,7 @@ async def approve_account_request(request_id: PydanticObjectId, admin_username: 
             token = create_email_verification_token(str(student.id), "student", student.email)
             verify_link = f"{settings.FRONTEND_URL.rstrip('/')}/auth/verify-email?token={token}"
             html = build_email_verification_email(student.nombre or "estudiante", verify_link, settings.EMAIL_VERIFICATION_EXPIRE_MINUTES // 60)
-            await send_email(student.email, "Confirma tu correo - Postgrado UAGRM", html)
+            await send_email(student.email, "Confirma tu correo - Posgrado UAGRM", html)
         except Exception as e:
             print(f"Error enviando verificación de correo al aprobar cuenta: {str(e)}")
 

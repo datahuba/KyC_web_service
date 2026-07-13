@@ -175,7 +175,7 @@ async def approve_enrollment_request(request_id: PydanticObjectId, admin_usernam
             )
             await send_email(
                 student.email,
-                f"Inscripción aprobada - {course.nombre_programa} · Postgrado UAGRM",
+                f"Inscripción aprobada - {course.nombre_programa} · Posgrado UAGRM",
                 html
             )
     except Exception as e:

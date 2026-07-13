@@ -15,7 +15,7 @@ Schemas incluidos:
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, Field, validator, field_validator
-from models.enums import TipoCurso, Modalidad, EstadoInscripcion, TipoEstudiante
+from models.enums import TipoCurso, Modalidad, EstadoInscripcion
 from models.base import PyObjectId
 from schemas.requisito import RequisitoTemplateCreate
 
@@ -225,7 +225,6 @@ class EnrollmentInfo(BaseModel):
     id: PyObjectId
     fecha_inscripcion: datetime
     estado: EstadoInscripcion
-    tipo_estudiante: TipoEstudiante
 
 class FinancialInfo(BaseModel):
     total_a_pagar: float

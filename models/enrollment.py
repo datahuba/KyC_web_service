@@ -11,7 +11,7 @@ from typing import Optional, List
 import pymongo
 from pydantic import BaseModel, Field, field_validator
 from .base import MongoBaseModel, PyObjectId
-from .enums import EstadoInscripcion, TipoEstudiante
+from .enums import EstadoInscripcion
 from .requisito import Requisito
 
 # ========================================================================
@@ -74,8 +74,6 @@ class Enrollment(MongoBaseModel):
     # ========================================================================
     # SNAPSHOT DE PRECIOS Y MÓDULOS (momento de inscripción)
     # ========================================================================
-    
-    es_estudiante_interno: TipoEstudiante = Field(..., description="Tipo de estudiante al momento de inscribirse (snapshot)")
     
     costo_total: float = Field(..., ge=0, description="Costo total del curso para este estudiante")
     costo_matricula: float = Field(..., ge=0, description="Costo de matrícula")
@@ -161,6 +159,13 @@ class Enrollment(MongoBaseModel):
     beca_respaldo_url: Optional[str] = Field(
         default=None,
         description="URL del documento de respaldo (resolución académica o de directorio) de la beca aplicada. None si aún no se ha subido."
+    )
+
+    # Formulario de inscripción lleno por el estudiante (PDF o imagen del
+    # documento oficial firmado). Requisito por programa. None si aún no se subió.
+    formulario_inscripcion_url: Optional[str] = Field(
+        default=None,
+        description="URL del formulario de inscripción oficial lleno/firmado por el estudiante. None si aún no se ha subido."
     )
 
     # ========================================================================

@@ -11,7 +11,7 @@ from typing import Optional, List
 import pymongo
 from pydantic import Field, EmailStr
 from .base import MongoBaseModel, PyObjectId
-from .enums import UserRole
+from .enums import UserRole, SubtipoCoordinador
 
 class User(MongoBaseModel):
     """
@@ -54,9 +54,19 @@ class User(MongoBaseModel):
         description="IDs de cursos asignados a este usuario. Relevante si rol es ENCARGADO_CURSO o COBRANZA."
     )
 
+    # ISSUE-R-PERFIL-GENERICO: subtipo del COORDINADOR (financiero/academico/investigacion).
+    # Solo el coordinador FINANCIERO tiene acceso a la información económica.
+    subtipo_coordinador: Optional[SubtipoCoordinador] = Field(
+        None,
+        description="Subtipo del rol Coordinador. Solo 'financiero' ve lo económico. Obligatorio si rol es COORDINADOR."
+    )
+
     # ISSUE-A-VERIFICACION: Verificación de Correo Electrónico (NO bloqueante)
     email_verificado: bool = Field(default=False, description="Si el usuario confirmó que su correo es válido y accesible. No bloquea el acceso al sistema.")
     fecha_verificacion_email: Optional[datetime] = Field(default=None, description="Fecha (UTC) en que se verificó el correo actual. Se reinicia a None si el correo cambia.")
+
+    # HOJA-DE-VIDA-DOCENTE: Subida de CV para docentes
+    cv_url: Optional[str] = Field(None, description="URL de la hoja de vida (CV) del docente (aplica principalmente al rol docente)")
 
     # ========================================================================
     # ISSUE-R-PERFIL-GENERICO (2026-07-08, reunión de postgrado contaduría)
@@ -85,9 +95,13 @@ class User(MongoBaseModel):
     class Settings:
         name = "users"
         indexes = [
-            # Índices únicos estrictos a nivel BD para evitar duplicados en login administrativo
+            # username es el credencial de login ÚNICO de cada perfil administrativo.
             pymongo.IndexModel([("username", pymongo.ASCENDING)], unique=True),
-            pymongo.IndexModel([("email", pymongo.ASCENDING)], unique=True)
+            # email NO es único a propósito: una misma persona puede tener varios
+            # perfiles funcionales (ej. Cobranza de un programa + Encargado del
+            # mismo programa) con el MISMO correo de contacto. El login se hace
+            # por username. El índice se mantiene (no único) solo para búsquedas.
+            pymongo.IndexModel([("email", pymongo.ASCENDING)], unique=False)
         ]
 
     class Config:

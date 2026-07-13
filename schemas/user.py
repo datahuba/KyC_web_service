@@ -14,7 +14,7 @@ Schemas incluidos:
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator
-from models.enums import UserRole
+from models.enums import UserRole, SubtipoCoordinador
 from models.base import PyObjectId
 
 # Roles que requieren nombre_funcional obligatorio (ISSUE-R-ROLES + ISSUE-R-PERFIL-GENERICO)
@@ -51,6 +51,11 @@ class UserCreate(BaseModel):
         default_factory=list,
         description="IDs de cursos asignados. Relevante si rol es ENCARGADO_CURSO o COBRANZA."
     )
+    # ISSUE-R-PERFIL-GENERICO: subtipo del coordinador (obligatorio si rol=COORDINADOR)
+    subtipo_coordinador: Optional[SubtipoCoordinador] = Field(
+        None, validate_default=True,
+        description="Subtipo del Coordinador (financiero/academico/investigacion). Obligatorio si rol es COORDINADOR."
+    )
 
     @field_validator("nombre_funcional")
     @classmethod
@@ -58,6 +63,13 @@ class UserCreate(BaseModel):
         rol = info.data.get("rol")
         if rol in _ROLES_REQUIEREN_NOMBRE_FUNCIONAL and not v:
             raise ValueError("nombre_funcional es obligatorio para los roles Encargado de Curso, Coordinador y Cobranza")
+        return v
+
+    @field_validator("subtipo_coordinador")
+    @classmethod
+    def validar_subtipo_coordinador(cls, v, info):
+        if info.data.get("rol") == UserRole.COORDINADOR and not v:
+            raise ValueError("subtipo_coordinador es obligatorio para el rol Coordinador (financiero/academico/investigacion)")
         return v
 
     @model_validator(mode="after")
@@ -100,6 +112,8 @@ class UserResponse(BaseModel):
     nombre_funcional: Optional[str] = None
     cursos_asignados: List[PyObjectId] = Field(default_factory=list)
     carnet: Optional[str] = None  # GAP-1
+    subtipo_coordinador: Optional[SubtipoCoordinador] = None  # ISSUE-R-PERFIL-GENERICO
+    cv_url: Optional[str] = None  # HOJA-DE-VIDA-DOCENTE
     
     
     model_config = {
@@ -134,6 +148,8 @@ class UserUpdate(BaseModel):
     nombre_funcional: Optional[str] = Field(None, max_length=150, validate_default=True)
     cursos_asignados: Optional[List[PyObjectId]] = None
     carnet: Optional[str] = Field(None, max_length=20)  # GAP-1
+    subtipo_coordinador: Optional[SubtipoCoordinador] = None  # ISSUE-R-PERFIL-GENERICO
+    cv_url: Optional[str] = None  # HOJA-DE-VIDA-DOCENTE
 
     @field_validator("nombre_funcional")
     @classmethod
@@ -141,6 +157,13 @@ class UserUpdate(BaseModel):
         rol = info.data.get("rol")
         if rol in _ROLES_REQUIEREN_NOMBRE_FUNCIONAL and not v:
             raise ValueError("nombre_funcional es obligatorio para los roles Encargado de Curso, Coordinador y Cobranza")
+        return v
+
+    @field_validator("subtipo_coordinador")
+    @classmethod
+    def validar_subtipo_coordinador(cls, v, info):
+        if info.data.get("rol") == UserRole.COORDINADOR and not v:
+            raise ValueError("subtipo_coordinador es obligatorio para el rol Coordinador (financiero/academico/investigacion)")
         return v
 
     model_config = {

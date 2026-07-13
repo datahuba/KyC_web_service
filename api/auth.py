@@ -60,7 +60,7 @@ async def forgot_password(data: ForgotPasswordRequest, request: Request) -> Any:
         reset_link = f"{settings.FRONTEND_URL.rstrip('/')}/auth/reset-password?token={token}"
         nombre = getattr(target, "nombre", None) or getattr(target, "username", None) or "usuario"
         html = build_password_reset_email(nombre, reset_link, settings.PASSWORD_RESET_EXPIRE_MINUTES)
-        await send_email(email, "Restablece tu contraseña - Postgrado UAGRM", html)
+        await send_email(email, "Restablece tu contraseña - Posgrado UAGRM", html)
 
     return {
         "message": "Si el correo está registrado, recibirás un enlace para restablecer tu contraseña."
@@ -166,9 +166,10 @@ async def resend_verification(
     verify_link = f"{settings.FRONTEND_URL.rstrip('/')}/auth/verify-email?token={token}"
     nombre = getattr(current_user, "nombre", None) or getattr(current_user, "username", None) or "usuario"
     html = build_email_verification_email(nombre, verify_link, settings.EMAIL_VERIFICATION_EXPIRE_MINUTES // 60)
-    enviado = await send_email(current_user.email, "Confirma tu correo - Postgrado UAGRM", html)
+    enviado = await send_email(current_user.email, "Confirma tu correo - Posgrado UAGRM", html)
 
     return {
+        "enviado": enviado,
         "message": "Te enviamos un enlace de verificación a tu correo." if enviado
                     else "No se pudo enviar el correo en este momento. Intenta de nuevo más tarde."
     }
@@ -200,21 +201,42 @@ async def login_user(login_data: LoginRequest, request: Request) -> Any:
     # era completamente viable contra este endpoint. Ver core/rate_limit.py.
     check_rate_limit(request, "login", max_intentos=10, ventana_segundos=15 * 60)
 
-    # Buscar usuario por username o email (el formulario del frontend acepta ambos)
+    # ISSUE-Q-LOGIN-MULTIPLE (2026-07-09): el personal (docentes principalmente)
+    # puede iniciar sesión indistintamente con su username, su email o su carnet
+    # (CI). Para administrativos con perfiles personalizados, username/email
+    # siguen funcionando igual; el carnet solo hace match si la cuenta lo tiene.
     identificador = login_data.username.strip()
-    user = await User.find_one(
+    
+    # Buscar todos los usuarios que coincidan
+    users = await User.find(
         Or(
             User.username == identificador,
-            User.email == identificador.lower()
+            User.email == identificador.lower(),
+            User.carnet == identificador
         )
-    )
+    ).to_list()
     
-    if not user:
+    if not users:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Credenciales incorrectas",
             headers={"WWW-Authenticate": "Bearer"},
         )
+        
+    # Si hay más de un usuario con el mismo email o carnet, requerir el username exacto
+    if len(users) > 1 and identificador != users[0].username:
+        # Verificamos si el identificador es exactamente igual a alguno de los usernames
+        exact_match = next((u for u in users if u.username == identificador), None)
+        if exact_match:
+            user = exact_match
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Hay múltiples perfiles administrativos asociados a este correo/carnet. Por favor, inicie sesión utilizando su Nombre de Usuario específico para indicar a qué perfil desea ingresar."
+            )
+    else:
+        user = users[0]
+
     
     # Verificar contraseña
     if not verify_password(login_data.password, user.password):
@@ -270,7 +292,7 @@ async def login_student(login_data: LoginRequest, request: Request) -> Any:
     **Acceso público** (no requiere autenticación)
     
     **Credenciales:**
-    - `username`: Número de registro del estudiante
+    - `username`: Registro, correo o carnet (CI) del estudiante
     - `password`: Contraseña (inicialmente = 'Uagrm.<CI>')
     
     **Retorna:** JWT Token de acceso
@@ -278,12 +300,15 @@ async def login_student(login_data: LoginRequest, request: Request) -> Any:
     # AUDITORÍA (ALTO #8 - seguridad): ver nota equivalente en login_user.
     check_rate_limit(request, "login-student", max_intentos=10, ventana_segundos=15 * 60)
 
-    # Buscar estudiante por registro o email (el formulario del frontend acepta ambos)
+    # ISSUE-Q-LOGIN-MULTIPLE (2026-07-09): el estudiante puede iniciar sesión
+    # indistintamente con su número de registro, su correo o su carnet (CI).
+    # La contraseña inicial por defecto es 'Uagrm.<CI>' (ya la puede cambiar).
     identificador = login_data.username.strip()
     student = await Student.find_one(
         Or(
             Student.registro == identificador,
-            Student.email == identificador.lower()
+            Student.email == identificador.lower(),
+            Student.carnet == identificador
         )
     )
     
@@ -359,9 +384,17 @@ async def get_me(
             registro=None,
             nombre_funcional=current_user.nombre_funcional,
             cursos_asignados=current_user.cursos_asignados,  # ISSUE-P-SEGMENTACION
+            subtipo_coordinador=current_user.subtipo_coordinador.value if current_user.subtipo_coordinador else None,  # ISSUE-R-PERFIL-GENERICO
             email_verificado=current_user.email_verificado  # ISSUE-A-VERIFICACION
         )
     else:  # Student
+        perfil_completado = all([
+            current_user.celular,
+            current_user.domicilio,
+            current_user.fecha_nacimiento,
+            current_user.carnet
+        ])
+
         return CurrentUserResponse(
             _id=current_user.id,
             username=current_user.registro,
@@ -373,6 +406,6 @@ async def get_me(
             nombre=current_user.nombre,  # Inyección del nombre real desde la ficha del estudiante
             registro=current_user.registro,  # Inyección del código de registro oficial
             terminos_aceptados=current_user.terminos_aceptados,  # ISSUE-Q-PRE
-            email_verificado=current_user.email_verificado  # ISSUE-A-VERIFICACION
+            email_verificado=current_user.email_verificado,  # ISSUE-A-VERIFICACION
+            perfil_completado=perfil_completado
         )
-    

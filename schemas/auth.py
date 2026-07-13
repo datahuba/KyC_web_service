@@ -41,7 +41,7 @@ class CurrentUserResponse(BaseModel):
     nombre: Optional[str] = None
     registro: Optional[str] = None
 
-    # ISSUE-Q-PRE: si el estudiante ya aceptó el reglamento de Postgrado.
+    # ISSUE-Q-PRE: si el estudiante ya aceptó el reglamento de Posgrado.
     # Siempre True para personal administrativo/docente (no aplica a ellos).
     terminos_aceptados: bool = True
 
@@ -52,9 +52,15 @@ class CurrentUserResponse(BaseModel):
     nombre_funcional: Optional[str] = None
     cursos_asignados: List[PyObjectId] = Field(default_factory=list)
 
+    # ISSUE-R-PERFIL-GENERICO: subtipo del coordinador (financiero/academico/investigacion).
+    # El frontend lo usa para habilitar las vistas económicas solo al financiero.
+    subtipo_coordinador: Optional[str] = None
+
     # ISSUE-A-VERIFICACION: no bloqueante, solo informativo para mostrar un
     # banner sugiriendo verificar el correo (no impide el uso del sistema).
     email_verificado: bool = False
+
+    perfil_completado: bool = True # Para mostrar banner recordatorio a estudiantes
 
     model_config = {
         "populate_by_name": True,

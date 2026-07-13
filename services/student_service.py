@@ -12,7 +12,7 @@ import openpyxl
 from io import BytesIO, StringIO
 from typing import List, Optional, Union
 from models.student import Student
-from models.enums import EstadoTitulo, TipoEstudiante
+from models.enums import EstadoTitulo
 from schemas.student import StudentCreate, StudentUpdateSelf, StudentUpdateAdmin
 from beanie import PydanticObjectId
 from beanie.operators import Or, RegEx, In
@@ -74,7 +74,7 @@ async def get_student(id: PydanticObjectId) -> Optional[Student]:
 
 async def accept_terms(student: Student) -> Student:
     """
-    ISSUE-Q-PRE: Registra la aceptación del reglamento de Postgrado.
+    ISSUE-Q-PRE: Registra la aceptación del reglamento de Posgrado.
 
     Idempotente: si ya había aceptado antes, no pisa la fecha original
     de la primera aceptación (se conserva como evidencia histórica).
@@ -411,24 +411,6 @@ def _detectar_leyenda_colores(sheet) -> dict:
     return leyenda
 
 
-def _inferir_tipo_estudiante(extension: Optional[str], force_tipo: TipoEstudiante) -> TipoEstudiante:
-    """
-    Determina si un estudiante es INTERNO o EXTERNO usando como referencia el
-    lugar de expedición de su carnet (`extension`, ej. 'SC'/'LPZ'/'CBBA'),
-    ya que hoy no hay forma de verificar la residencia real del estudiante
-    (ISSUE-Q-INTERNO-EXTERNO, 2026-07-08). Se asume INTERNO si el CI fue
-    expedido en Santa Cruz de la Sierra ('SC'), EXTERNO en cualquier otro
-    caso. Es solo informativo desde ISSUE-P-PRECIO-UNICO (el precio del
-    programa ya es el mismo para todos, este dato no afecta ningún monto).
-
-    Si la fila no trae `extension`, se usa `force_tipo` (la selección hecha
-    por el CPD en el modal de importación) como respaldo.
-    """
-    if extension:
-        return TipoEstudiante.INTERNO if extension.strip().upper() == "SC" else TipoEstudiante.EXTERNO
-    return force_tipo
-
-
 def _parse_amount(value) -> float:
     """Convierte una celda monetaria a float. Devuelve 0.0 si no es un número válido."""
     if value is None:
@@ -447,16 +429,11 @@ def _parse_amount(value) -> float:
 
 async def import_students_from_excel(
     file_content: bytes,
-    force_tipo: TipoEstudiante,
     curso_id: Optional[PydanticObjectId] = None,
     filename: Optional[str] = None
 ) -> dict:
     """
     Importar estudiantes de forma masiva desde un archivo de Excel (.xlsx).
-    
-    ¡OPTIMIZACIÓN DE ALTO RENDIMIENTO (ISSUE G)!
-    Forzará el tipo de estudiante basado en `force_tipo` (INTERNO/EXTERNO) enviado desde el frontend,
-    ignorando cualquier columna que diga "tipo" en el Excel, previniendo errores de digitación de los administrativos.
 
     AUTO-INSCRIPCIÓN OPCIONAL:
     Si se proporciona `curso_id`, todos los estudiantes recién creados en esta importación
@@ -706,10 +683,6 @@ async def import_students_from_excel(
                 "domicilio": domicilio,
                 "fecha_nacimiento": fecha_nacimiento,
                 "tipo_sangre": tipo_sangre,
-                # ISSUE-Q-INTERNO-EXTERNO: se infiere por el lugar de expedición
-                # del CI (extension) si el archivo lo trae; si no, se usa la
-                # selección forzada del modal de importación (force_tipo, ISSUE G).
-                "es_estudiante_interno": _inferir_tipo_estudiante(extension, force_tipo),
                 "pagos": pagos_fila, # Montos a migrar (si el archivo trae columnas financieras)
                 "matricula_comprobante_url": matricula_comprobante_url # Link del voucher de matrícula
             })
@@ -780,7 +753,6 @@ async def import_students_from_excel(
                 domicilio=c["domicilio"],
                 fecha_nacimiento=c["fecha_nacimiento"],
                 tipo_sangre=c["tipo_sangre"],
-                es_estudiante_interno=c["es_estudiante_interno"],
                 activo=True,
                 lista_cursos_ids=[]
             )

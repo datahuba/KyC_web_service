@@ -15,7 +15,7 @@ Schemas incluidos:
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, Field, EmailStr, field_validator
-from models.enums import TipoEstudiante, Sexo, EstadoCivil, TipoSangre
+from models.enums import Sexo, EstadoCivil, TipoSangre
 from models.base import PyObjectId
 
 
@@ -77,7 +77,6 @@ class StudentCreate(BaseModel):
     celular: Optional[str] = Field(None, description="Número de celular para notificaciones")
     domicilio: Optional[str] = Field(None, description="Dirección física del estudiante")
     fecha_nacimiento: Optional[datetime] = Field(None, description="Fecha de nacimiento")
-    es_estudiante_interno: Optional[TipoEstudiante] = Field(None, description="Tipo de estudiante: INTERNO o EXTERNO")
 
     # Datos oficiales UAGRM (opcionales)
     sexo: Optional[Sexo] = None
@@ -92,12 +91,24 @@ class StudentCreate(BaseModel):
     tipo_sangre: Optional[TipoSangre] = None
     titulo_bachiller: Optional[str] = None
 
-    @field_validator('sexo', 'estado_civil', 'tipo_sangre', 'es_estudiante_interno', mode='before')
+    @field_validator('sexo', 'estado_civil', 'tipo_sangre', mode='before')
     @classmethod
     def _empty_enum_a_none(cls, v):
         # Los <select> del frontend envían "" cuando no se elige nada; para enums
         # opcionales eso debe interpretarse como None (no como valor inválido).
         if v == '' or v is None:
+            return None
+        return v
+
+    @field_validator('password', mode='before')
+    @classmethod
+    def _password_vacio_a_none(cls, v):
+        # El frontend envía "" cuando el campo de contraseña queda vacío. Sin este
+        # validador, Pydantic evaluaba "" contra min_length=5 y rechazaba la
+        # creación con "string should have at least 5 characters", aunque el
+        # carnet estuviera presente para generar la contraseña por defecto.
+        # Se normaliza "" -> None para que el servicio genere 'Uagrm.<carnet>'.
+        if v is None or (isinstance(v, str) and v.strip() == ""):
             return None
         return v
 
@@ -133,8 +144,7 @@ class StudentCreate(BaseModel):
                 "extension": "LP",
                 "celular": "70123456",
                 "domicilio": "Av. 6 de Agosto #1234, La Paz, Bolivia",
-                "fecha_nacimiento": "2000-05-15T00:00:00",
-                "es_estudiante_interno": "interno"
+                "fecha_nacimiento": "2000-05-15T00:00:00"
             }
         }
     }
@@ -157,7 +167,6 @@ class StudentResponse(BaseModel):
     domicilio: Optional[str] = None
     fecha_nacimiento: Optional[datetime] = None
     foto_url: Optional[str] = None
-    es_estudiante_interno: Optional[TipoEstudiante] = None
 
     # Datos oficiales UAGRM
     sexo: Optional[Sexo] = None
@@ -174,8 +183,16 @@ class StudentResponse(BaseModel):
     
     # DOCUMENTACIÓN (URLs de Cloudinary de los PDFs)
     cv_url: Optional[str] = None
+    cv_estado: str = "pendiente"
+    cv_motivo_rechazo: Optional[str] = None
+
     carnet_url: Optional[str] = None
+    carnet_estado: str = "pendiente"
+    carnet_motivo_rechazo: Optional[str] = None
+
     afiliacion_url: Optional[str] = None
+    afiliacion_estado: str = "pendiente"
+    afiliacion_motivo_rechazo: Optional[str] = None
     
     # OBJETO ANIDADO DEL TÍTULO PROFESIONAL
     titulo: Optional[dict] = None
@@ -206,7 +223,6 @@ class StudentResponse(BaseModel):
                 "domicilio": "Av. Internacional #13, Santa Cruz, Bolivia",
                 "fecha_nacimiento": "2002-03-20T00:00:00",
                 "foto_url": "https://storage.example.com/photos/brandon.jpg",
-                "es_estudiante_interno": "interno",
                 "activo": True,
                 "lista_cursos_ids": [],
                 "created_at": "2024-03-20T10:00:00",
@@ -225,6 +241,27 @@ class StudentUpdateSelf(BaseModel):
     celular: Optional[str] = None
     domicilio: Optional[str] = None
     telefono: Optional[str] = None
+
+    # Reunión postgrado 2026-07-09: el estudiante ahora puede completar/editar
+    # sus propios datos oficiales UAGRM desde su perfil (antes solo CPD), para
+    # aliviar la carga de CPD. Todos opcionales.
+    sexo: Optional[Sexo] = None
+    estado_civil: Optional[EstadoCivil] = None
+    tipo_sangre: Optional[TipoSangre] = None
+    pais: Optional[str] = None
+    departamento: Optional[str] = None
+    provincia: Optional[str] = None
+    nacionalidad: Optional[str] = None
+    modalidad_ingreso: Optional[str] = None
+    periodo: Optional[str] = None
+    titulo_bachiller: Optional[str] = None
+
+    @field_validator('sexo', 'estado_civil', 'tipo_sangre', mode='before')
+    @classmethod
+    def _self_empty_enum_a_none(cls, v):
+        if v == '' or v is None:
+            return None
+        return v
 
     @field_validator('celular', 'telefono')
     @classmethod
@@ -261,7 +298,6 @@ class StudentUpdateAdmin(BaseModel):
     celular: Optional[str] = None
     domicilio: Optional[str] = None
     fecha_nacimiento: Optional[datetime] = None
-    es_estudiante_interno: Optional[TipoEstudiante] = None
     activo: Optional[bool] = None
     lista_cursos_ids: Optional[List[PyObjectId]] = None
 
@@ -278,7 +314,7 @@ class StudentUpdateAdmin(BaseModel):
     tipo_sangre: Optional[TipoSangre] = None
     titulo_bachiller: Optional[str] = None
 
-    @field_validator('sexo', 'estado_civil', 'tipo_sangre', 'es_estudiante_interno', mode='before')
+    @field_validator('sexo', 'estado_civil', 'tipo_sangre', mode='before')
     @classmethod
     def _admin_empty_enum_a_none(cls, v):
         if v == '' or v is None:
@@ -317,7 +353,6 @@ class StudentUpdateAdmin(BaseModel):
                 "celular": "68765432",
                 "domicilio": "Calle Junín #789, Cochabamba, Bolivia",
                 "fecha_nacimiento": "1995-08-22T00:00:00",
-                "es_estudiante_interno": "externo",
                 "activo": True,
                 "lista_cursos_ids": ["507f1f77bcf86cd799439012"]
             }

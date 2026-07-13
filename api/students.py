@@ -4,13 +4,12 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Q
 from pydantic import BaseModel, Field
 from models.student import Student
 from models.user import User
-from models.enums import TipoEstudiante
 from schemas.student import StudentCreate, StudentResponse, StudentUpdateSelf, StudentUpdateAdmin, ChangePassword
 from services import student_service
 from beanie import PydanticObjectId
 
 # IMPORTAMOS NUESTRAS LLAVES DE SEGURIDAD GRANULARES DE LA UAGRM
-from api.dependencies import require_superadmin, require_cpd, require_staff, require_cobranza, get_current_user
+from api.dependencies import require_superadmin, require_cpd, require_staff, require_cobranza, get_current_user, require_encargado_curso
 
 router = APIRouter()
 
@@ -24,7 +23,7 @@ import math
 )
 async def read_students(
     page: int = Query(1, ge=1, description="Número de página"),
-    per_page: int = Query(10, ge=1, le=500, description="Elementos por página"),
+    per_page: int = Query(10, ge=1, le=5000, description="Elementos por página"),
     q: Optional[str] = Query(None, description="Buscar por nombre, email, carnet o registro"),
     activo: Optional[bool] = Query(None, description="Filtrar por estado activo/inactivo"),
     estado_titulo: Optional[str] = Query(None, description="Filtrar por estado del título"),
@@ -54,7 +53,7 @@ async def read_students(
 async def create_student(
     *,
     student_in: StudentCreate,
-    current_user: User = Depends(require_cpd) # <-- SOLO EL CPD (Y ADMINS) PUEDEN CREAR ALUMNOS
+    current_user: User = Depends(require_encargado_curso) # <-- CPD, ADMIN, ENCARGADO, COORDINADOR PUEDEN CREAR ALUMNOS
 ) -> Any:
     """Crear nuevo estudiante"""
     try:
@@ -137,7 +136,7 @@ async def enviar_recordatorio_pago(
             )
             email_enviado = await send_email(
                 student.email,
-                "Recordatorio de Pago · Postgrado UAGRM",
+                "Recordatorio de Pago · Posgrado UAGRM",
                 html
             )
         except Exception as e:
@@ -202,7 +201,7 @@ async def accept_terms(
     current_user: Student = Depends(get_current_user)
 ) -> Any:
     """
-    Registra la aceptación del reglamento de Postgrado por parte del estudiante.
+    Registra la aceptación del reglamento de Posgrado por parte del estudiante.
 
     Se exige en el primer inicio de sesión (bloqueado por el frontend hasta
     que se llame este endpoint). Es idempotente: llamarlo de nuevo no falla
@@ -233,32 +232,6 @@ async def update_student_admin(
         return student
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-# ============================================================================
-# ISSUE H: Mutación rápida del tipo de estudiante
-# ============================================================================
-class ToggleTipoRequest(BaseModel):
-    tipo: TipoEstudiante
-
-@router.patch(
-    "/{id}/toggle-tipo", 
-    response_model=StudentResponse, 
-    summary="Cambio rápido de tipo de estudiante"
-)
-async def toggle_student_tipo(
-    *, 
-    id: PydanticObjectId, 
-    payload: ToggleTipoRequest,
-    current_user: User = Depends(require_cpd)
-) -> Any:
-    student = await student_service.get_student(id)
-    if not student:
-        raise HTTPException(status_code=404, detail="Estudiante no encontrado")
-        
-    student.es_estudiante_interno = payload.tipo
-    await student.save()
-    return student
-
 
 @router.delete(
     "/{id}",
@@ -322,42 +295,54 @@ async def upload_student_photo(
     return student
 
 
+async def _subir_documento_estudiante(file: UploadFile, folder: str, public_id: str) -> str:
+    """Sube un documento del estudiante (CV/Carnet/Afiliación) aceptando PDF o
+    imagen (JPG/PNG/WEBP), ya que muchos suben fotos del documento. Devuelve la URL."""
+    from core.cloudinary_utils import upload_pdf, upload_image
+    image_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
+    if file.content_type in image_types:
+        return await upload_image(file, folder, public_id)
+    elif file.content_type == "application/pdf":
+        return await upload_pdf(file, folder, public_id)
+    raise HTTPException(400, f"Formato no permitido: {file.content_type}. Sube el documento como PDF o imagen (JPG/PNG).")
+
+
 @router.post("/{id}/upload/cv", response_model=StudentResponse)
 async def upload_student_cv(*, id: PydanticObjectId, file: UploadFile, current_user: Union[User, Student] = Depends(get_current_user)) -> Any:
-    from core.cloudinary_utils import upload_pdf
     student = await student_service.get_student(id=id)
     if not student: raise HTTPException(404, "Estudiante no encontrado")
     if isinstance(current_user, Student) and current_user.id != id: raise HTTPException(403, "No tienes permiso")
     
-    folder = f"students/{id}/cv"
-    public_id = f"cv_{id}"
-    student.cv_url = await upload_pdf(file, folder, public_id)
+    cv_url = await _subir_documento_estudiante(file, f"students/{id}/cv", f"cv_{id}")
+    student.cv_url = cv_url
+    student.cv_estado = "pendiente"
+    student.cv_motivo_rechazo = None
     await student.save()
     return student
 
 @router.post("/{id}/upload/carnet", response_model=StudentResponse)
 async def upload_student_carnet(*, id: PydanticObjectId, file: UploadFile, current_user: Union[User, Student] = Depends(get_current_user)) -> Any:
-    from core.cloudinary_utils import upload_pdf
     student = await student_service.get_student(id=id)
     if not student: raise HTTPException(404, "Estudiante no encontrado")
     if isinstance(current_user, Student) and current_user.id != id: raise HTTPException(403, "No tienes permiso")
     
-    folder = f"students/{id}/carnet"
-    public_id = f"carnet_{id}"
-    student.carnet_url = await upload_pdf(file, folder, public_id)
+    carnet_url = await _subir_documento_estudiante(file, f"students/{id}/carnet", f"carnet_{id}")
+    student.carnet_url = carnet_url
+    student.carnet_estado = "pendiente"
+    student.carnet_motivo_rechazo = None
     await student.save()
     return student
 
 @router.post("/{id}/upload/afiliacion", response_model=StudentResponse)
 async def upload_student_afiliacion(*, id: PydanticObjectId, file: UploadFile, current_user: Union[User, Student] = Depends(get_current_user)) -> Any:
-    from core.cloudinary_utils import upload_pdf
     student = await student_service.get_student(id=id)
     if not student: raise HTTPException(404, "Estudiante no encontrado")
     if isinstance(current_user, Student) and current_user.id != id: raise HTTPException(403, "No tienes permiso")
     
-    folder = f"students/{id}/afiliacion"
-    public_id = f"afiliacion_{id}"
-    student.afiliacion_url = await upload_pdf(file, folder, public_id)
+    afiliacion_url = await _subir_documento_estudiante(file, f"students/{id}/afiliacion", f"afiliacion_{id}")
+    student.afiliacion_url = afiliacion_url
+    student.afiliacion_estado = "pendiente"
+    student.afiliacion_motivo_rechazo = None
     await student.save()
     return student
 
@@ -386,7 +371,7 @@ async def upload_student_titulo(
 async def verificar_titulo_estudiante(
     *, id: PydanticObjectId, titulo: Optional[str] = Form(None), numero_titulo: Optional[str] = Form(None),
     año_expedicion: Optional[str] = Form(None), universidad: Optional[str] = Form(None), 
-    current_user: User = Depends(require_cpd) # <-- CPD VERIFICA TÍTULOS ACADÉMICOS
+    current_user: User = Depends(require_encargado_curso) # <-- ENCARGADO DE CURSO Y SUPERIORES VERIFICAN TÍTULOS ACADÉMICOS
 ) -> Any:
     student = await student_service.get_student(id=id)
     if not student: raise HTTPException(404, "Estudiante no encontrado")
@@ -405,7 +390,7 @@ async def verificar_titulo_estudiante(
     return student
 
 @router.put("/{id}/titulo/rechazar", response_model=StudentResponse)
-async def rechazar_titulo_estudiante(*, id: PydanticObjectId, motivo: str = Form(...), current_user: User = Depends(require_cpd)) -> Any:
+async def rechazar_titulo_estudiante(*, id: PydanticObjectId, motivo: str = Form(...), current_user: User = Depends(require_encargado_curso)) -> Any:
     student = await student_service.get_student(id=id)
     if not student: raise HTTPException(404, "Estudiante no encontrado")
     
@@ -418,6 +403,57 @@ async def rechazar_titulo_estudiante(*, id: PydanticObjectId, motivo: str = Form
     await student.save()
     return student
 
+@router.put("/{id}/documentos/{tipo}/verificar", response_model=StudentResponse)
+async def verificar_documento_estudiante(
+    id: PydanticObjectId,
+    tipo: str,
+    current_user: User = Depends(require_encargado_curso)
+) -> Any:
+    if tipo not in ["cv", "carnet", "afiliacion"]:
+        raise HTTPException(400, "Tipo de documento inválido")
+        
+    student = await student_service.get_student(id=id)
+    if not student: raise HTTPException(404, "Estudiante no encontrado")
+    
+    if tipo == "cv":
+        student.cv_estado = "verificado"
+        student.cv_motivo_rechazo = None
+    elif tipo == "carnet":
+        student.carnet_estado = "verificado"
+        student.carnet_motivo_rechazo = None
+    elif tipo == "afiliacion":
+        student.afiliacion_estado = "verificado"
+        student.afiliacion_motivo_rechazo = None
+        
+    await student.save()
+    return student
+
+@router.put("/{id}/documentos/{tipo}/rechazar", response_model=StudentResponse)
+async def rechazar_documento_estudiante(
+    id: PydanticObjectId,
+    tipo: str,
+    motivo: str = Form(...),
+    current_user: User = Depends(require_encargado_curso)
+) -> Any:
+    if tipo not in ["cv", "carnet", "afiliacion"]:
+        raise HTTPException(400, "Tipo de documento inválido")
+        
+    student = await student_service.get_student(id=id)
+    if not student: raise HTTPException(404, "Estudiante no encontrado")
+    
+    if tipo == "cv":
+        student.cv_estado = "rechazado"
+        student.cv_motivo_rechazo = motivo
+    elif tipo == "carnet":
+        student.carnet_estado = "rechazado"
+        student.carnet_motivo_rechazo = motivo
+    elif tipo == "afiliacion":
+        student.afiliacion_estado = "rechazado"
+        student.afiliacion_motivo_rechazo = motivo
+        
+    await student.save()
+    return student
+
 
 # ============================================================================
 # ISSUE G: Selector en Importación Masiva
@@ -425,7 +461,6 @@ async def rechazar_titulo_estudiante(*, id: PydanticObjectId, motivo: str = Form
 @router.post("/import/excel", summary="Importar Estudiantes de forma Masiva desde Excel")
 async def import_students(
     file: UploadFile = File(...), 
-    tipo_estudiante: TipoEstudiante = Form(...), # Recibe Interno/Externo desde el frontend
     curso_id: Optional[PydanticObjectId] = Form(None), # Curso opcional para auto-inscribir a los estudiantes importados
     current_user: User = Depends(require_cpd)
 ) -> Any:
@@ -433,7 +468,7 @@ async def import_students(
         raise HTTPException(400, "Formato no permitido. Sube un archivo .xlsx, .xls o .csv")
     contents = await file.read()
     try:
-        return await student_service.import_students_from_excel(contents, tipo_estudiante, curso_id, file.filename)
+        return await student_service.import_students_from_excel(contents, curso_id, file.filename)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

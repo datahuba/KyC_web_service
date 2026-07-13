@@ -28,8 +28,10 @@ from schemas.payment import (
 from services import payment_service
 from beanie import PydanticObjectId
 from beanie.operators import In
+from bson import ObjectId
+from fastapi.encoders import jsonable_encoder
 
-from api.dependencies import require_cobranza, require_staff, get_current_user, filtro_cursos_por_rol
+from api.dependencies import require_cobranza, require_staff, require_superadmin, get_current_user, filtro_cursos_por_rol, puede_ver_economico
 from schemas.common import PaginatedResponse, PaginationMeta
 import math
 
@@ -146,6 +148,7 @@ async def list_payments(
     estado: Optional[str] = Query(None, description="Filtrar por estado"),
     curso_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por Curso ID"),
     estudiante_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por Estudiante ID"),
+    tipo_concepto: Optional[str] = Query(None, description="Filtrar por tipo de concepto (matricula, colegiatura)"),
     current_user: User | Student = Depends(get_current_user)
 ) -> Any:
     
@@ -168,7 +171,8 @@ async def list_payments(
             estado=estado,
             curso_id=curso_id,
             estudiante_id=estudiante_id,
-            cursos_permitidos=cursos_permitidos
+            cursos_permitidos=cursos_permitidos,
+            tipo_concepto=tipo_concepto
         )
         
         # Filtrado de RBAC (CPD vs Cobranza)
@@ -177,8 +181,6 @@ async def list_payments(
             concepto_lower = (p.concepto or "").lower().strip()
             is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
             if current_user.rol == "cpd" and not is_matricula:
-                continue
-            if current_user.rol == "cobranza" and is_matricula:
                 continue
             filtered_payments.append(p)
             
@@ -191,6 +193,12 @@ async def list_payments(
         )
         if estado and estado != "Todos los estados":
             all_payments = [p for p in all_payments if p.estado_pago.value == estado]
+            
+        if tipo_concepto:
+            if tipo_concepto == "matricula":
+                all_payments = [p for p in all_payments if "matricula" in (p.concepto or "").lower() or "matrícula" in (p.concepto or "").lower()]
+            elif tipo_concepto == "colegiatura":
+                all_payments = [p for p in all_payments if "matricula" not in (p.concepto or "").lower() and "matrícula" not in (p.concepto or "").lower()]
             
         total_count = len(all_payments)
         start = (page - 1) * per_page
@@ -254,8 +262,6 @@ async def get_payment(
         
         if current_user.rol == "cpd" and not is_matricula:
             raise HTTPException(status_code=403, detail="El rol CPD solo tiene acceso a pagos de concepto Matrícula")
-        elif current_user.rol == "cobranza" and is_matricula:
-            raise HTTPException(status_code=403, detail="El rol Cobranza no tiene acceso a pagos de concepto Matrícula")
     
     return await payment_service.enrich_payment_with_details(payment)
 
@@ -287,8 +293,6 @@ async def aprobar_pago(
     
     if current_user.rol == "cpd" and not is_matricula:
         raise HTTPException(status_code=403, detail="El rol CPD solo puede aprobar pagos con concepto de Matrícula.")
-    if current_user.rol == "cobranza" and is_matricula:
-        raise HTTPException(status_code=403, detail="El rol Cobranza no puede aprobar pagos con concepto de Matrícula.")
         
     try:
         payment = await payment_service.aprobar_pago(
@@ -330,8 +334,6 @@ async def rechazar_pago(
     
     if current_user.rol == "cpd" and not is_matricula:
         raise HTTPException(status_code=403, detail="El rol CPD solo puede rechazar pagos con concepto de Matrícula.")
-    if current_user.rol == "cobranza" and is_matricula:
-        raise HTTPException(status_code=403, detail="El rol Cobranza no puede rechazar pagos con concepto de Matrícula.")
         
     try:
         payment = await payment_service.rechazar_pago(
@@ -383,6 +385,39 @@ async def anular_pago(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.delete(
+    "/{id}",
+    summary="Eliminar Pago (Borrado Definitivo)"
+)
+async def eliminar_pago(
+    *,
+    id: PydanticObjectId,
+    current_user: User = Depends(require_superadmin)
+) -> Any:
+    """
+    Elimina físicamente un pago de la base de datos. Operación destructiva y
+    financiera, restringida a SUPERADMIN (mismo criterio que eliminar usuarios
+    o cursos). Pensado para limpiar pagos de prueba o registros erróneos que no
+    deben computar en la contabilidad.
+
+    Tras el borrado se recalcula el saldo/estado de la inscripción desde los
+    pagos APROBADOS restantes, para que los totales económicos queden
+    consistentes.
+    """
+    payment = await payment_service.get_payment(id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+
+    try:
+        resultado = await payment_service.eliminar_pago(
+            payment_id=id,
+            admin_username=current_user.nombre_visible  # ISSUE-R-PERFIL-GENERICO
+        )
+        return resultado
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("/enrollment/{enrollment_id}", response_model=List[PaymentResponse])
 async def get_payments_by_enrollment(
     *,
@@ -417,8 +452,6 @@ async def get_payments_by_enrollment(
             concepto_lower = (p.concepto or "").lower().strip()
             is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
             if current_user.rol == "cpd" and not is_matricula:
-                continue
-            if current_user.rol == "cobranza" and is_matricula:
                 continue
         filtered_payments.append(p)
         
@@ -484,9 +517,6 @@ async def get_payments_pendientes(
         if current_user.rol == "cpd":
             if is_matricula:
                 filtered_payments.append(p)
-        elif current_user.rol == "cobranza":
-            if not is_matricula:
-                filtered_payments.append(p)
         else:
             filtered_payments.append(p)
             
@@ -505,6 +535,31 @@ def _parse_rango_fechas(fecha_desde: Optional[str], fecha_hasta: Optional[str]):
     except ValueError:
         raise HTTPException(status_code=400, detail="Formato de fecha inválido. Usar YYYY-MM-DD")
     return fecha_desde, fecha_hasta, fecha_desde_dt, fecha_hasta_dt
+
+
+@router.get(
+    "/dashboard/resumen-economico",
+    summary="Resumen Económico del Dashboard (Cobranza / Coordinador Financiero)"
+)
+async def get_resumen_economico_endpoint(
+    *,
+    current_user: User = Depends(require_staff)
+) -> Any:
+    """
+    ISSUE-P-DASHBOARD-COBRANZA: tarjetas de resumen económico del dashboard.
+    Incluye el ingreso por matrícula como dato contable (aunque Cobranza no
+    apruebe matrículas, sí debe verlas recaudadas porque genera los informes
+    económicos). Mismo conjunto de roles económicos que los reportes de caja.
+    """
+    # ISSUE-R-PERFIL-GENERICO: económico = superadmin/admin/cobranza/mae + coordinador FINANCIERO.
+    if not puede_ver_economico(current_user):
+        raise HTTPException(status_code=403, detail="No autorizado para ver el resumen económico")
+
+    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve su(s) curso(s).
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
+    return await payment_service.get_resumen_economico(cursos_permitidos=cursos_permitidos)
 
 
 @router.get(
@@ -527,7 +582,10 @@ async def get_reporte_caja_endpoint(
     página solicitada + totales agregados de TODO el rango filtrado (no solo
     la página actual) para el resumen visual encima de la tabla.
     """
-    if current_user.rol not in ["superadmin", "admin", "cpd", "cobranza", "mae"]:
+    # CPD excluido: los reportes de caja son económicos (regla del usuario:
+    # "económico solo cobranza y el coordinador financiero"; CPD solo audita la
+    # matrícula desde Gestión de Pagos, no ve reportes de caja).
+    if not puede_ver_economico(current_user):
         raise HTTPException(status_code=403, detail="No autorizado para ver reportes de caja")
 
     _, _, fecha_desde_dt, fecha_hasta_dt = _parse_rango_fechas(fecha_desde, fecha_hasta)
@@ -535,8 +593,6 @@ async def get_reporte_caja_endpoint(
     concepto_regex = None
     if current_user.rol == "cpd":
         concepto_regex = {"concepto": {"$regex": r"^matr[ií]cula$", "$options": "i"}}
-    elif current_user.rol == "cobranza":
-        concepto_regex = {"concepto": {"$not": {"$regex": r"^matr[ií]cula$", "$options": "i"}}}
 
     # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve su(s) curso(s).
     filtro_rol = filtro_cursos_por_rol(current_user)
@@ -556,14 +612,22 @@ async def get_reporte_caja_endpoint(
     total_pages = math.ceil(resultado["total_count"] / per_page) if resultado["total_count"] > 0 else 0
     enriched = await payment_service.enrich_payments_with_details_bulk(resultado["payments"])
 
-    return {
-        "data": enriched,
-        "resumen": resultado["resumen"],
-        "meta": PaginationMeta(
-            page=page, limit=per_page, totalItems=resultado["total_count"], totalPages=total_pages,
-            hasNextPage=(page < total_pages), hasPrevPage=(page > 1)
-        )
-    }
+    # Los pagos enriquecidos vienen de model_dump() y conservan campos PyObjectId
+    # (inscripcion_id, estudiante_id, curso_id, _id) como objetos ObjectId. Este
+    # endpoint devuelve un dict crudo (sin response_model que los coaccione, a
+    # diferencia de list_payments), por lo que hay que serializarlos a string
+    # explícitamente o FastAPI falla con PydanticSerializationError.
+    return jsonable_encoder(
+        {
+            "data": enriched,
+            "resumen": resultado["resumen"],
+            "meta": PaginationMeta(
+                page=page, limit=per_page, totalItems=resultado["total_count"], totalPages=total_pages,
+                hasNextPage=(page < total_pages), hasPrevPage=(page > 1)
+            )
+        },
+        custom_encoder={ObjectId: str}
+    )
 
 
 @router.get(
@@ -584,7 +648,7 @@ async def generar_reporte_excel_pagos(
     from io import BytesIO
     from models.enrollment import Enrollment
     
-    if current_user.rol not in ["superadmin", "admin", "cpd", "cobranza", "mae"]:
+    if not puede_ver_economico(current_user):
         raise HTTPException(status_code=403, detail="No autorizado para generar reportes")
 
     fecha_desde, fecha_hasta, fecha_desde_dt, fecha_hasta_dt = _parse_rango_fechas(fecha_desde, fecha_hasta)
@@ -592,8 +656,6 @@ async def generar_reporte_excel_pagos(
     concepto_regex = None
     if current_user.rol == "cpd":
         concepto_regex = {"concepto": {"$regex": r"^matr[ií]cula$", "$options": "i"}}
-    elif current_user.rol == "cobranza":
-        concepto_regex = {"concepto": {"$not": {"$regex": r"^matr[ií]cula$", "$options": "i"}}}
 
     # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo exporta pagos de esos cursos.
     filtro_rol = filtro_cursos_por_rol(current_user)

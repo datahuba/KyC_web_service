@@ -1,12 +1,14 @@
 from typing import List, Any, Optional
-from fastapi import APIRouter, HTTPException, Depends, Query, status
+from fastapi import APIRouter, HTTPException, Depends, Query, status, UploadFile, File, Form
 from models.user import User
 from schemas.user import UserCreate, UserResponse, UserUpdate
 from services import user_service
 from beanie import PydanticObjectId
+from models.course import Course
 
 # Importamos las nuevas dependencias creadas en el ISSUE L
-from api.dependencies import require_superadmin, require_cpd, get_current_user
+from api.dependencies import require_superadmin, require_cpd, get_current_user, require_encargado_curso
+from models.enums import UserRole
 
 # Para el cambio de contraseña (Bug 5)
 from core.security import verify_password, get_password_hash
@@ -16,6 +18,7 @@ router = APIRouter()
 
 from schemas.common import PaginatedResponse, PaginationMeta
 import math
+from core.cloudinary_utils import upload_pdf
 
 
 class UserChangePassword(BaseModel):
@@ -30,14 +33,26 @@ class UserChangePassword(BaseModel):
     summary="Listar Docentes Activos"
 )
 async def get_teachers(
-    current_user: User = Depends(require_cpd)  # <-- CORRECCIÓN: El CPD ya tiene permiso
+    current_user: User = Depends(require_encargado_curso)
 ) -> Any:
     """
     Obtiene solo los usuarios ACTIVOS que son docentes
     
-    **Requiere:** CPD, Admin o SuperAdmin
+    **Requiere:** CPD, Admin, SuperAdmin, o Encargado/Coordinador
     """
     users = await user_service.get_active_users()
+    
+    if current_user.rol in [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
+        if not current_user.cursos_asignados:
+            return []
+        courses = await Course.find({"_id": {"$in": current_user.cursos_asignados}}).to_list()
+        allowed_teacher_ids = set()
+        for course in courses:
+            for modulo in course.modulos:
+                if modulo.docente_id:
+                    allowed_teacher_ids.add(modulo.docente_id)
+        users = [u for u in users if u.id in allowed_teacher_ids]
+        
     return users
 
 
@@ -94,11 +109,13 @@ async def create_user(
     existing_user = await user_service.get_user_by_username(user_in.username)
     if existing_user:
         raise HTTPException(status_code=400, detail="Username ya existe")
-    
-    existing_email = await user_service.get_user_by_email(user_in.email)
-    if existing_email:
-        raise HTTPException(status_code=400, detail="Email ya existe")
-    
+
+    # NOTA: el email NO se valida como único a propósito. Una misma persona puede
+    # tener varios perfiles funcionales (ej. Cobranza + Encargado del mismo
+    # programa) con el mismo correo de contacto; cada perfil se distingue e
+    # inicia sesión por su `username` único. (Antes se rechazaba con "Email ya
+    # existe" — se removió para permitir perfiles por función que comparten correo.)
+
     user = await user_service.create_user(user_in=user_in)
     return user
 
@@ -173,6 +190,98 @@ async def delete_user(
         )
         
     user = await user_service.delete_user(id=id)
+    return user
+
+
+@router.post("/{id}/cv/upload", response_model=UserResponse)
+async def upload_teacher_cv(
+    id: PydanticObjectId,
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_encargado_curso)
+) -> Any:
+    user = await user_service.get_user(id=id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        
+    if current_user.rol in [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
+        if not current_user.cursos_asignados:
+            raise HTTPException(status_code=403, detail="No tienes cursos asignados para gestionar docentes")
+        courses = await Course.find({"_id": {"$in": current_user.cursos_asignados}}).to_list()
+        allowed_teacher_ids = set()
+        for course in courses:
+            for modulo in course.modulos:
+                if modulo.docente_id:
+                    allowed_teacher_ids.add(modulo.docente_id)
+        if id not in allowed_teacher_ids:
+            raise HTTPException(status_code=403, detail="Este docente no pertenece a tus cursos asignados")
+    
+    cv_url = await upload_pdf(
+        file=file,
+        folder="users/cv",
+        public_id=f"cv_{user.id}"
+    )
+    
+    user.cv_url = cv_url
+    user.cv_estado = "pendiente"
+    user.cv_motivo_rechazo = None
+    await user.save()
+    
+    return user
+
+
+@router.put("/{id}/cv/verificar", response_model=UserResponse)
+async def verificar_cv_docente(
+    id: PydanticObjectId,
+    current_user: User = Depends(require_encargado_curso)
+) -> Any:
+    user = await user_service.get_user(id=id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        
+    if current_user.rol in [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
+        if not current_user.cursos_asignados:
+            raise HTTPException(status_code=403, detail="No tienes cursos asignados para gestionar docentes")
+        courses = await Course.find({"_id": {"$in": current_user.cursos_asignados}}).to_list()
+        allowed_teacher_ids = set()
+        for course in courses:
+            for modulo in course.modulos:
+                if modulo.docente_id:
+                    allowed_teacher_ids.add(modulo.docente_id)
+        if id not in allowed_teacher_ids:
+            raise HTTPException(status_code=403, detail="Este docente no pertenece a tus cursos asignados")
+        
+    user.cv_estado = "verificado"
+    user.cv_motivo_rechazo = None
+        
+    await user.save()
+    return user
+
+@router.put("/{id}/cv/rechazar", response_model=UserResponse)
+async def rechazar_cv_docente(
+    id: PydanticObjectId,
+    motivo: str = Form(...),
+    current_user: User = Depends(require_encargado_curso)
+) -> Any:
+    user = await user_service.get_user(id=id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        
+    if current_user.rol in [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
+        if not current_user.cursos_asignados:
+            raise HTTPException(status_code=403, detail="No tienes cursos asignados para gestionar docentes")
+        courses = await Course.find({"_id": {"$in": current_user.cursos_asignados}}).to_list()
+        allowed_teacher_ids = set()
+        for course in courses:
+            for modulo in course.modulos:
+                if modulo.docente_id:
+                    allowed_teacher_ids.add(modulo.docente_id)
+        if id not in allowed_teacher_ids:
+            raise HTTPException(status_code=403, detail="Este docente no pertenece a tus cursos asignados")
+
+    user.cv_estado = "rechazado"
+    user.cv_motivo_rechazo = motivo
+        
+    await user.save()
     return user
 
 

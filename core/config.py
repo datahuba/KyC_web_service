@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     SMTP_USER: Optional[str] = Field(default=None, env="SMTP_USER")
     SMTP_PASSWORD: Optional[str] = Field(default=None, env="SMTP_PASSWORD")
     SMTP_FROM: Optional[str] = Field(default=None, env="SMTP_FROM")
-    SMTP_FROM_NAME: str = Field(default="Postgrado UAGRM", env="SMTP_FROM_NAME")
+    SMTP_FROM_NAME: str = Field(default="Posgrado UAGRM", env="SMTP_FROM_NAME")
     SMTP_USE_TLS: bool = Field(default=True, env="SMTP_USE_TLS")
 
     # URL pública del frontend (para construir enlaces en correos)

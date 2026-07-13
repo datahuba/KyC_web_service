@@ -13,10 +13,27 @@ from beanie import PydanticObjectId
 from core.security import decode_access_token
 from models.user import User
 from models.student import Student
-from models.enums import UserRole
+from models.enums import UserRole, SubtipoCoordinador
 
 ADMIN_OR_ABOVE = {UserRole.ADMIN, UserRole.SUPERADMIN}
 DOCENTE_OR_ABOVE = {UserRole.DOCENTE, UserRole.ADMIN, UserRole.SUPERADMIN}
+
+
+def puede_ver_economico(current_user) -> bool:
+    """
+    ISSUE-R-PERFIL-GENERICO: True si el usuario puede ver información económica
+    (reportes de caja, resumen de ingresos, pagos). Roles económicos:
+    superadmin, admin, mae, cobranza; y COORDINADOR únicamente si su subtipo es
+    FINANCIERO (los coordinadores académico/investigación NO ven lo económico).
+    """
+    if not isinstance(current_user, User):
+        return False
+    if current_user.rol in {UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MAE, UserRole.COBRANZA}:
+        return True
+    return (
+        current_user.rol == UserRole.COORDINADOR
+        and current_user.subtipo_coordinador == SubtipoCoordinador.FINANCIERO
+    )
 
 # Security scheme para JWT (auto_error=False permite bypass en modo desarrollo)
 security = HTTPBearer(auto_error=False)
@@ -313,20 +330,22 @@ def require_extracto_bancario(
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> User:
     """
-    Requiere Cobranza, CPD, ADMIN o SUPERADMIN.
+    Requiere Cobranza, ADMIN o SUPERADMIN.
     (ISSUE-P-EXTRACTO): registro y cruce manual del extracto bancario.
+    CPD queda EXCLUIDO: el extracto bancario es información económica y CPD no
+    ve dinero (regla del usuario: "CPD nada de dinero salvo la matrícula").
     """
     if not isinstance(current_user, User):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Se requiere credenciales de Cobranza/CPD o superior"
+            detail="Se requiere credenciales de Cobranza o Administración"
         )
 
-    allowed = [UserRole.COBRANZA, UserRole.CPD, UserRole.ADMIN, UserRole.SUPERADMIN]
+    allowed = [UserRole.COBRANZA, UserRole.ADMIN, UserRole.SUPERADMIN]
     if current_user.rol not in allowed:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Acceso restringido a Cobranza/CPD o Administración"
+            detail="Acceso restringido a Cobranza o Administración (información económica)"
         )
 
     return current_user
@@ -405,7 +424,7 @@ def require_staff(
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> User:
     """
-    Requiere cualquier rol del personal administrativo de Postgrado.
+    Requiere cualquier rol del personal administrativo de Posgrado.
     Permite el acceso a: ADMIN, SUPERADMIN, MAE, CPD y COBRANZA.
     (Docentes y Estudiantes son bloqueados).
     """
