@@ -258,12 +258,17 @@ async def get_modules_by_teacher(
         raise HTTPException(status_code=403, detail="Acceso denegado para estudiantes.")
         
     # Validar que si es un docente, solo pueda solicitar ver sus PROPIOS módulos
-    if current_user.rol.value not in ["superadmin", "admin", "cpd", "mae", "cobranza"]:
+    if current_user.rol.value not in ["superadmin", "admin", "cpd", "mae", "cobranza", "encargado_curso", "coordinador"]:
         if str(current_user.id) != str(teacher_id):
             raise HTTPException(status_code=403, detail="No tienes permisos para ver esta sección administrativa.")
 
-    # Buscamos todos los cursos activos en la base de datos
-    courses = await Course.find(Course.activo == True).to_list()
+    # Buscamos todos los cursos activos en la base de datos (filtrando para encargados/coordinadores)
+    if current_user.rol.value in ["encargado_curso", "coordinador"]:
+        if not current_user.cursos_asignados:
+            return []
+        courses = await Course.find({"_id": {"$in": current_user.cursos_asignados}, "activo": True}).to_list()
+    else:
+        courses = await Course.find(Course.activo == True).to_list()
     
     assigned_modules = []
     
