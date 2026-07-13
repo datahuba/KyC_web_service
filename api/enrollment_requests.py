@@ -28,7 +28,8 @@ from schemas.enrollment_request import (
 from schemas.enrollment import EnrollmentResponse
 from schemas.common import PaginatedResponse, PaginationMeta
 from services import enrollment_request_service, enrollment_service
-from api.dependencies import require_cpd, get_current_user
+from api.dependencies import require_encargado_curso, get_current_user
+from models.enums import UserRole
 
 router = APIRouter()
 
@@ -96,10 +97,11 @@ async def list_requests(
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
     estado: Optional[str] = Query(None, description="Filtrar: pendiente | aprobado | rechazado"),
-    current_user: User = Depends(require_cpd)
+    current_user: User = Depends(require_encargado_curso)
 ) -> Any:
+    cursos_permitidos = current_user.cursos_asignados if current_user.rol in [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR] else None
     items, total = await enrollment_request_service.get_enrollment_requests(
-        estado=estado, page=page, per_page=per_page
+        estado=estado, page=page, per_page=per_page, cursos_permitidos=cursos_permitidos
     )
     enriched = await _enrich_requests(items)
     total_pages = math.ceil(total / per_page) if total > 0 else 0
@@ -134,7 +136,16 @@ async def list_my_requests(
     response_model=EnrollmentResponse,
     summary="Aprobar Solicitud de Inscripción (CPD)"
 )
-async def approve_request(id: PydanticObjectId, current_user: User = Depends(require_cpd)) -> Any:
+async def approve_request(id: PydanticObjectId, current_user: User = Depends(require_encargado_curso)) -> Any:
+    from models.enrollment_request import EnrollmentRequest
+    solicitud = await EnrollmentRequest.get(id)
+    if not solicitud:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+    
+    if current_user.rol in [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
+        if solicitud.curso_id not in current_user.cursos_asignados:
+            raise HTTPException(status_code=403, detail="No tienes permiso para aprobar solicitudes de este curso.")
+
     try:
         enrollment = await enrollment_request_service.approve_enrollment_request(id, current_user.nombre_visible)
         return await enrollment_service.enrich_enrollment_dates(enrollment)
@@ -150,8 +161,17 @@ async def approve_request(id: PydanticObjectId, current_user: User = Depends(req
 async def reject_request(
     id: PydanticObjectId,
     body: EnrollmentRequestReject,
-    current_user: User = Depends(require_cpd)
+    current_user: User = Depends(require_encargado_curso)
 ) -> Any:
+    from models.enrollment_request import EnrollmentRequest
+    solicitud = await EnrollmentRequest.get(id)
+    if not solicitud:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+    
+    if current_user.rol in [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
+        if solicitud.curso_id not in current_user.cursos_asignados:
+            raise HTTPException(status_code=403, detail="No tienes permiso para rechazar solicitudes de este curso.")
+
     try:
         return await enrollment_request_service.reject_enrollment_request(id, current_user.nombre_visible, body.motivo)
     except ValueError as e:
