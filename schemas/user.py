@@ -113,6 +113,7 @@ class UserResponse(BaseModel):
     cursos_asignados: List[PyObjectId] = Field(default_factory=list)
     carnet: Optional[str] = None  # GAP-1
     subtipo_coordinador: Optional[SubtipoCoordinador] = None  # ISSUE-R-PERFIL-GENERICO
+    cv_url: Optional[str] = None  # HOJA-DE-VIDA-DOCENTE
     
     
     model_config = {
@@ -148,6 +149,7 @@ class UserUpdate(BaseModel):
     cursos_asignados: Optional[List[PyObjectId]] = None
     carnet: Optional[str] = Field(None, max_length=20)  # GAP-1
     subtipo_coordinador: Optional[SubtipoCoordinador] = None  # ISSUE-R-PERFIL-GENERICO
+    cv_url: Optional[str] = None  # HOJA-DE-VIDA-DOCENTE
 
     @field_validator("nombre_funcional")
     @classmethod

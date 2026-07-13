@@ -313,9 +313,10 @@ async def upload_student_cv(*, id: PydanticObjectId, file: UploadFile, current_u
     if not student: raise HTTPException(404, "Estudiante no encontrado")
     if isinstance(current_user, Student) and current_user.id != id: raise HTTPException(403, "No tienes permiso")
     
-    folder = f"students/{id}/cv"
-    public_id = f"cv_{id}"
-    student.cv_url = await _subir_documento_estudiante(file, folder, public_id)
+    cv_url = await _subir_documento_estudiante(file, f"students/{id}/cv", f"cv_{id}")
+    student.cv_url = cv_url
+    student.cv_estado = "pendiente"
+    student.cv_motivo_rechazo = None
     await student.save()
     return student
 
@@ -325,9 +326,10 @@ async def upload_student_carnet(*, id: PydanticObjectId, file: UploadFile, curre
     if not student: raise HTTPException(404, "Estudiante no encontrado")
     if isinstance(current_user, Student) and current_user.id != id: raise HTTPException(403, "No tienes permiso")
     
-    folder = f"students/{id}/carnet"
-    public_id = f"carnet_{id}"
-    student.carnet_url = await _subir_documento_estudiante(file, folder, public_id)
+    carnet_url = await _subir_documento_estudiante(file, f"students/{id}/carnet", f"carnet_{id}")
+    student.carnet_url = carnet_url
+    student.carnet_estado = "pendiente"
+    student.carnet_motivo_rechazo = None
     await student.save()
     return student
 
@@ -337,9 +339,10 @@ async def upload_student_afiliacion(*, id: PydanticObjectId, file: UploadFile, c
     if not student: raise HTTPException(404, "Estudiante no encontrado")
     if isinstance(current_user, Student) and current_user.id != id: raise HTTPException(403, "No tienes permiso")
     
-    folder = f"students/{id}/afiliacion"
-    public_id = f"afiliacion_{id}"
-    student.afiliacion_url = await _subir_documento_estudiante(file, folder, public_id)
+    afiliacion_url = await _subir_documento_estudiante(file, f"students/{id}/afiliacion", f"afiliacion_{id}")
+    student.afiliacion_url = afiliacion_url
+    student.afiliacion_estado = "pendiente"
+    student.afiliacion_motivo_rechazo = None
     await student.save()
     return student
 
@@ -396,6 +399,57 @@ async def rechazar_titulo_estudiante(*, id: PydanticObjectId, motivo: str = Form
     else:
         student.titulo["estado"] = "rechazado"
         student.titulo["motivo_rechazo"] = motivo
+        
+    await student.save()
+    return student
+
+@router.put("/{id}/documentos/{tipo}/verificar", response_model=StudentResponse)
+async def verificar_documento_estudiante(
+    id: PydanticObjectId,
+    tipo: str,
+    current_user: User = Depends(require_encargado_curso)
+) -> Any:
+    if tipo not in ["cv", "carnet", "afiliacion"]:
+        raise HTTPException(400, "Tipo de documento inválido")
+        
+    student = await student_service.get_student(id=id)
+    if not student: raise HTTPException(404, "Estudiante no encontrado")
+    
+    if tipo == "cv":
+        student.cv_estado = "verificado"
+        student.cv_motivo_rechazo = None
+    elif tipo == "carnet":
+        student.carnet_estado = "verificado"
+        student.carnet_motivo_rechazo = None
+    elif tipo == "afiliacion":
+        student.afiliacion_estado = "verificado"
+        student.afiliacion_motivo_rechazo = None
+        
+    await student.save()
+    return student
+
+@router.put("/{id}/documentos/{tipo}/rechazar", response_model=StudentResponse)
+async def rechazar_documento_estudiante(
+    id: PydanticObjectId,
+    tipo: str,
+    motivo: str = Form(...),
+    current_user: User = Depends(require_encargado_curso)
+) -> Any:
+    if tipo not in ["cv", "carnet", "afiliacion"]:
+        raise HTTPException(400, "Tipo de documento inválido")
+        
+    student = await student_service.get_student(id=id)
+    if not student: raise HTTPException(404, "Estudiante no encontrado")
+    
+    if tipo == "cv":
+        student.cv_estado = "rechazado"
+        student.cv_motivo_rechazo = motivo
+    elif tipo == "carnet":
+        student.carnet_estado = "rechazado"
+        student.carnet_motivo_rechazo = motivo
+    elif tipo == "afiliacion":
+        student.afiliacion_estado = "rechazado"
+        student.afiliacion_motivo_rechazo = motivo
         
     await student.save()
     return student

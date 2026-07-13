@@ -183,8 +183,16 @@ class StudentResponse(BaseModel):
     
     # DOCUMENTACIÓN (URLs de Cloudinary de los PDFs)
     cv_url: Optional[str] = None
+    cv_estado: str = "pendiente"
+    cv_motivo_rechazo: Optional[str] = None
+
     carnet_url: Optional[str] = None
+    carnet_estado: str = "pendiente"
+    carnet_motivo_rechazo: Optional[str] = None
+
     afiliacion_url: Optional[str] = None
+    afiliacion_estado: str = "pendiente"
+    afiliacion_motivo_rechazo: Optional[str] = None
     
     # OBJETO ANIDADO DEL TÍTULO PROFESIONAL
     titulo: Optional[dict] = None

@@ -206,20 +206,37 @@ async def login_user(login_data: LoginRequest, request: Request) -> Any:
     # (CI). Para administrativos con perfiles personalizados, username/email
     # siguen funcionando igual; el carnet solo hace match si la cuenta lo tiene.
     identificador = login_data.username.strip()
-    user = await User.find_one(
+    
+    # Buscar todos los usuarios que coincidan
+    users = await User.find(
         Or(
             User.username == identificador,
             User.email == identificador.lower(),
             User.carnet == identificador
         )
-    )
+    ).to_list()
     
-    if not user:
+    if not users:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Credenciales incorrectas",
             headers={"WWW-Authenticate": "Bearer"},
         )
+        
+    # Si hay más de un usuario con el mismo email o carnet, requerir el username exacto
+    if len(users) > 1 and identificador != users[0].username:
+        # Verificamos si el identificador es exactamente igual a alguno de los usernames
+        exact_match = next((u for u in users if u.username == identificador), None)
+        if exact_match:
+            user = exact_match
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Hay múltiples perfiles administrativos asociados a este correo/carnet. Por favor, inicie sesión utilizando su Nombre de Usuario específico para indicar a qué perfil desea ingresar."
+            )
+    else:
+        user = users[0]
+
     
     # Verificar contraseña
     if not verify_password(login_data.password, user.password):

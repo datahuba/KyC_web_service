@@ -1,5 +1,5 @@
 from typing import List, Any, Optional
-from fastapi import APIRouter, HTTPException, Depends, Query, status
+from fastapi import APIRouter, HTTPException, Depends, Query, status, UploadFile, File
 from models.user import User
 from schemas.user import UserCreate, UserResponse, UserUpdate
 from services import user_service
@@ -16,6 +16,7 @@ router = APIRouter()
 
 from schemas.common import PaginatedResponse, PaginationMeta
 import math
+from core.cloudinary_utils import upload_pdf
 
 
 class UserChangePassword(BaseModel):
@@ -175,6 +176,45 @@ async def delete_user(
         )
         
     user = await user_service.delete_user(id=id)
+    return user
+
+
+@router.post(
+    "/{id}/cv",
+    response_model=UserResponse,
+    summary="Subir Hoja de Vida (CV) del Docente"
+)
+async def upload_teacher_cv(
+    id: PydanticObjectId,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+) -> Any:
+    """
+    Sube el CV de un docente (en formato PDF).
+    
+    **Requiere:** El propio docente, o un administrador (SuperAdmin, Admin, CPD).
+    """
+    if current_user.id != id and current_user.role not in ["superadmin", "admin", "cpd"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tiene permisos para subir el CV de este usuario"
+        )
+
+    user = await user_service.get_user(id=id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        
+    # Usamos upload_pdf que ya valida tamaño y tipo
+    cv_url = await upload_pdf(
+        file=file,
+        folder="users/cv",
+        public_id=f"cv_{user.id}"
+    )
+    
+    # Actualizar la propiedad en la base de datos
+    user.cv_url = cv_url
+    await user.save()
+    
     return user
 
 

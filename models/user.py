@@ -65,6 +65,9 @@ class User(MongoBaseModel):
     email_verificado: bool = Field(default=False, description="Si el usuario confirmó que su correo es válido y accesible. No bloquea el acceso al sistema.")
     fecha_verificacion_email: Optional[datetime] = Field(default=None, description="Fecha (UTC) en que se verificó el correo actual. Se reinicia a None si el correo cambia.")
 
+    # HOJA-DE-VIDA-DOCENTE: Subida de CV para docentes
+    cv_url: Optional[str] = Field(None, description="URL de la hoja de vida (CV) del docente (aplica principalmente al rol docente)")
+
     # ========================================================================
     # ISSUE-R-PERFIL-GENERICO (2026-07-08, reunión de postgrado contaduría)
     # ========================================================================

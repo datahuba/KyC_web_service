@@ -129,8 +129,16 @@ class Student(MongoBaseModel):
     # DOCUMENTACIÓN (Cargados desde el Panel de Admin)
     # ========================================================================
     cv_url: Optional[str] = Field(None, description="URL del Currículum Vitae (PDF)")
+    cv_estado: str = Field("pendiente", description="Estado de validación: pendiente, verificado, rechazado")
+    cv_motivo_rechazo: Optional[str] = Field(None, description="Motivo si fue rechazado")
+
     carnet_url: Optional[str] = Field(None, description="URL del Carnet de Identidad (PDF)")
+    carnet_estado: str = Field("pendiente", description="Estado de validación: pendiente, verificado, rechazado")
+    carnet_motivo_rechazo: Optional[str] = Field(None, description="Motivo si fue rechazado")
+
     afiliacion_url: Optional[str] = Field(None, description="URL de la Afiliación (PDF)")
+    afiliacion_estado: str = Field("pendiente", description="Estado de validación: pendiente, verificado, rechazado")
+    afiliacion_motivo_rechazo: Optional[str] = Field(None, description="Motivo si fue rechazado")
     
     # INFORMACIÓN ACADÉMICA DEL TÍTULO PROFESIONAL
     titulo: Optional[dict] = Field(

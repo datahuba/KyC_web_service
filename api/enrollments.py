@@ -330,6 +330,42 @@ async def update_modulo_nota(
             updated_enrollment = await enrollment_service.subir_nota_borrador(
                 enrollment_id=id, modulo_index=index, nota_borrador=nota_update.nota
             )
+
+            # NOTIFICACIÓN a CPD/Admin/Superadmin: el docente subió un borrador
+            # que requiere validación. Sin esto, CPD nunca se enteraba.
+            try:
+                from services.notification_service import create_notification
+                from beanie.operators import Or as _Or
+
+                nombre_modulo = (
+                    updated_enrollment.modulos[index].nombre
+                    if index < len(updated_enrollment.modulos)
+                    else f"Módulo {index + 1}"
+                )
+
+                revisores = await User.find(
+                    User.activo == True,
+                    _Or(
+                        User.rol == UserRole.CPD,
+                        User.rol == UserRole.ADMIN,
+                        User.rol == UserRole.SUPERADMIN
+                    )
+                ).to_list()
+
+                for revisor in revisores:
+                    await create_notification(
+                        destinatario_id=revisor.id,
+                        tipo_destinatario="user",
+                        titulo="Nota Borrador Pendiente",
+                        mensaje=f"El docente {username} propuso una nota de {nota_update.nota} para '{nombre_modulo}'. Requiere tu validación.",
+                        tipo_alerta="warning",
+                        ruta="/app/enrollments",
+                        referencia_tipo="enrollment",
+                        referencia_id=id
+                    )
+            except Exception as e:
+                print(f"Error notificando borrador de nota a CPD: {str(e)}")
+
         else:
             updated_enrollment = await enrollment_service.actualizar_nota_modulo(
                 enrollment_id=id,
@@ -356,6 +392,33 @@ async def validar_modulo_nota(
     """ISSUE-Q-NOTA-BORRADOR: convierte el borrador del docente en nota oficial."""
     try:
         updated = await enrollment_service.validar_nota_borrador(id, index, current_user.nombre_visible)
+
+        # NOTIFICACIÓN al docente asignado: su borrador fue aprobado/oficializado.
+        try:
+            from services.notification_service import create_notification
+            from models.course import Course
+
+            nombre_modulo = (
+                updated.modulos[index].nombre
+                if index < len(updated.modulos)
+                else f"Módulo {index + 1}"
+            )
+
+            course = await Course.get(updated.curso_id)
+            if course and index < len(course.modulos) and course.modulos[index].docente_id:
+                await create_notification(
+                    destinatario_id=course.modulos[index].docente_id,
+                    tipo_destinatario="user",
+                    titulo="Nota Oficializada",
+                    mensaje=f"Tu nota propuesta para '{nombre_modulo}' fue validada y oficializada por CPD ({current_user.nombre_visible}).",
+                    tipo_alerta="success",
+                    ruta="/app/dashboard",
+                    referencia_tipo="enrollment",
+                    referencia_id=id
+                )
+        except Exception as e:
+            print(f"Error notificando validación de borrador al docente: {str(e)}")
+
         return await enrollment_service.enrich_enrollment_dates(updated)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -374,7 +437,37 @@ async def rechazar_modulo_nota(
 ) -> Any:
     """ISSUE-Q-NOTA-BORRADOR: descarta el borrador propuesto por el docente."""
     try:
+        # Cargar enrollment ANTES del rechazo para obtener el nombre del módulo
+        enrollment = await Enrollment.get(id)
+        nombre_modulo = (
+            enrollment.modulos[index].nombre
+            if enrollment and index < len(enrollment.modulos)
+            else f"Módulo {index + 1}"
+        )
+
         updated = await enrollment_service.rechazar_nota_borrador(id, index)
+
+        # NOTIFICACIÓN al docente asignado: su borrador fue rechazado.
+        # Sin esto, el docente no se enteraba y creía que su nota seguía pendiente.
+        try:
+            from services.notification_service import create_notification
+            from models.course import Course
+
+            course = await Course.get(updated.curso_id)
+            if course and index < len(course.modulos) and course.modulos[index].docente_id:
+                await create_notification(
+                    destinatario_id=course.modulos[index].docente_id,
+                    tipo_destinatario="user",
+                    titulo="Borrador de Nota Rechazado",
+                    mensaje=f"CPD ({current_user.nombre_visible}) rechazó tu nota propuesta para '{nombre_modulo}'. Por favor, revisa y envía una nueva calificación.",
+                    tipo_alerta="error",
+                    ruta="/app/dashboard",
+                    referencia_tipo="enrollment",
+                    referencia_id=id
+                )
+        except Exception as e:
+            print(f"Error notificando rechazo de borrador al docente: {str(e)}")
+
         return await enrollment_service.enrich_enrollment_dates(updated)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
