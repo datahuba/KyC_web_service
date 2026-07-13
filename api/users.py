@@ -4,7 +4,7 @@ from models.user import User
 from schemas.user import UserCreate, UserResponse, UserUpdate
 from services import user_service
 from beanie import PydanticObjectId
-from models.classroom import Classroom
+from models.course import Course
 
 # Importamos las nuevas dependencias creadas en el ISSUE L
 from api.dependencies import require_superadmin, require_cpd, get_current_user, require_encargado_curso
@@ -45,8 +45,12 @@ async def get_teachers(
     if current_user.rol in [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
         if not current_user.cursos_asignados:
             return []
-        classrooms = await Classroom.find({"course_id": {"$in": current_user.cursos_asignados}}).to_list()
-        allowed_teacher_ids = {c.teacher_user_id for c in classrooms}
+        courses = await Course.find({"_id": {"$in": current_user.cursos_asignados}}).to_list()
+        allowed_teacher_ids = set()
+        for course in courses:
+            for modulo in course.modulos:
+                if modulo.docente_id:
+                    allowed_teacher_ids.add(modulo.docente_id)
         users = [u for u in users if u.id in allowed_teacher_ids]
         
     return users
@@ -202,8 +206,12 @@ async def upload_teacher_cv(
     if current_user.rol in [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
         if not current_user.cursos_asignados:
             raise HTTPException(status_code=403, detail="No tienes cursos asignados para gestionar docentes")
-        classrooms = await Classroom.find({"course_id": {"$in": current_user.cursos_asignados}}).to_list()
-        allowed_teacher_ids = {c.teacher_user_id for c in classrooms}
+        courses = await Course.find({"_id": {"$in": current_user.cursos_asignados}}).to_list()
+        allowed_teacher_ids = set()
+        for course in courses:
+            for modulo in course.modulos:
+                if modulo.docente_id:
+                    allowed_teacher_ids.add(modulo.docente_id)
         if id not in allowed_teacher_ids:
             raise HTTPException(status_code=403, detail="Este docente no pertenece a tus cursos asignados")
     
@@ -233,8 +241,12 @@ async def verificar_cv_docente(
     if current_user.rol in [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
         if not current_user.cursos_asignados:
             raise HTTPException(status_code=403, detail="No tienes cursos asignados para gestionar docentes")
-        classrooms = await Classroom.find({"course_id": {"$in": current_user.cursos_asignados}}).to_list()
-        allowed_teacher_ids = {c.teacher_user_id for c in classrooms}
+        courses = await Course.find({"_id": {"$in": current_user.cursos_asignados}}).to_list()
+        allowed_teacher_ids = set()
+        for course in courses:
+            for modulo in course.modulos:
+                if modulo.docente_id:
+                    allowed_teacher_ids.add(modulo.docente_id)
         if id not in allowed_teacher_ids:
             raise HTTPException(status_code=403, detail="Este docente no pertenece a tus cursos asignados")
         
@@ -257,8 +269,12 @@ async def rechazar_cv_docente(
     if current_user.rol in [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
         if not current_user.cursos_asignados:
             raise HTTPException(status_code=403, detail="No tienes cursos asignados para gestionar docentes")
-        classrooms = await Classroom.find({"course_id": {"$in": current_user.cursos_asignados}}).to_list()
-        allowed_teacher_ids = {c.teacher_user_id for c in classrooms}
+        courses = await Course.find({"_id": {"$in": current_user.cursos_asignados}}).to_list()
+        allowed_teacher_ids = set()
+        for course in courses:
+            for modulo in course.modulos:
+                if modulo.docente_id:
+                    allowed_teacher_ids.add(modulo.docente_id)
         if id not in allowed_teacher_ids:
             raise HTTPException(status_code=403, detail="Este docente no pertenece a tus cursos asignados")
 
