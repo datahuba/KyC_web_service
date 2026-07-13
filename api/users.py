@@ -4,6 +4,7 @@ from models.user import User
 from schemas.user import UserCreate, UserResponse, UserUpdate
 from services import user_service
 from beanie import PydanticObjectId
+from models.classroom import Classroom
 
 # Importamos las nuevas dependencias creadas en el ISSUE L
 from api.dependencies import require_superadmin, require_cpd, get_current_user, require_encargado_curso
@@ -32,14 +33,22 @@ class UserChangePassword(BaseModel):
     summary="Listar Docentes Activos"
 )
 async def get_teachers(
-    current_user: User = Depends(require_cpd)  # <-- CORRECCIÓN: El CPD ya tiene permiso
+    current_user: User = Depends(require_encargado_curso)
 ) -> Any:
     """
     Obtiene solo los usuarios ACTIVOS que son docentes
     
-    **Requiere:** CPD, Admin o SuperAdmin
+    **Requiere:** CPD, Admin, SuperAdmin, o Encargado/Coordinador
     """
     users = await user_service.get_active_users()
+    
+    if current_user.rol in [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
+        if not current_user.cursos_asignados:
+            return []
+        classrooms = await Classroom.find({"course_id": {"$in": current_user.cursos_asignados}}).to_list()
+        allowed_teacher_ids = {c.teacher_user_id for c in classrooms}
+        users = [u for u in users if u.id in allowed_teacher_ids]
+        
     return users
 
 
@@ -180,39 +189,30 @@ async def delete_user(
     return user
 
 
-@router.post(
-    "/{id}/cv",
-    response_model=UserResponse,
-    summary="Subir Hoja de Vida (CV) del Docente"
-)
+@router.post("/{id}/cv/upload", response_model=UserResponse)
 async def upload_teacher_cv(
     id: PydanticObjectId,
     file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_encargado_curso)
 ) -> Any:
-    """
-    Sube el CV de un docente (en formato PDF).
-    
-    **Requiere:** El propio docente, o un administrador (SuperAdmin, Admin, CPD).
-    """
-    if current_user.id != id and current_user.rol not in [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.CPD, UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No tiene permisos para subir el CV de este usuario"
-        )
-
     user = await user_service.get_user(id=id)
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
         
-    # Usamos upload_pdf que ya valida tamaño y tipo
+    if current_user.rol in [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
+        if not current_user.cursos_asignados:
+            raise HTTPException(status_code=403, detail="No tienes cursos asignados para gestionar docentes")
+        classrooms = await Classroom.find({"course_id": {"$in": current_user.cursos_asignados}}).to_list()
+        allowed_teacher_ids = {c.teacher_user_id for c in classrooms}
+        if id not in allowed_teacher_ids:
+            raise HTTPException(status_code=403, detail="Este docente no pertenece a tus cursos asignados")
+    
     cv_url = await upload_pdf(
         file=file,
         folder="users/cv",
         public_id=f"cv_{user.id}"
     )
     
-    # Actualizar la propiedad en la base de datos
     user.cv_url = cv_url
     user.cv_estado = "pendiente"
     user.cv_motivo_rechazo = None
@@ -230,6 +230,14 @@ async def verificar_cv_docente(
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
         
+    if current_user.rol in [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
+        if not current_user.cursos_asignados:
+            raise HTTPException(status_code=403, detail="No tienes cursos asignados para gestionar docentes")
+        classrooms = await Classroom.find({"course_id": {"$in": current_user.cursos_asignados}}).to_list()
+        allowed_teacher_ids = {c.teacher_user_id for c in classrooms}
+        if id not in allowed_teacher_ids:
+            raise HTTPException(status_code=403, detail="Este docente no pertenece a tus cursos asignados")
+        
     user.cv_estado = "verificado"
     user.cv_motivo_rechazo = None
         
@@ -246,6 +254,14 @@ async def rechazar_cv_docente(
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
         
+    if current_user.rol in [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
+        if not current_user.cursos_asignados:
+            raise HTTPException(status_code=403, detail="No tienes cursos asignados para gestionar docentes")
+        classrooms = await Classroom.find({"course_id": {"$in": current_user.cursos_asignados}}).to_list()
+        allowed_teacher_ids = {c.teacher_user_id for c in classrooms}
+        if id not in allowed_teacher_ids:
+            raise HTTPException(status_code=403, detail="Este docente no pertenece a tus cursos asignados")
+
     user.cv_estado = "rechazado"
     user.cv_motivo_rechazo = motivo
         
