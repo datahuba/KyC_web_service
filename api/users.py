@@ -1,12 +1,13 @@
 from typing import List, Any, Optional
-from fastapi import APIRouter, HTTPException, Depends, Query, status, UploadFile, File
+from fastapi import APIRouter, HTTPException, Depends, Query, status, UploadFile, File, Form
 from models.user import User
 from schemas.user import UserCreate, UserResponse, UserUpdate
 from services import user_service
 from beanie import PydanticObjectId
 
 # Importamos las nuevas dependencias creadas en el ISSUE L
-from api.dependencies import require_superadmin, require_cpd, get_current_user
+from api.dependencies import require_superadmin, require_cpd, get_current_user, require_encargado_curso
+from models.enums import UserRole
 
 # Para el cambio de contraseña (Bug 5)
 from core.security import verify_password, get_password_hash
@@ -194,7 +195,7 @@ async def upload_teacher_cv(
     
     **Requiere:** El propio docente, o un administrador (SuperAdmin, Admin, CPD).
     """
-    if current_user.id != id and current_user.role not in ["superadmin", "admin", "cpd"]:
+    if current_user.id != id and current_user.rol not in [UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.CPD, UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No tiene permisos para subir el CV de este usuario"
@@ -213,8 +214,42 @@ async def upload_teacher_cv(
     
     # Actualizar la propiedad en la base de datos
     user.cv_url = cv_url
+    user.cv_estado = "pendiente"
+    user.cv_motivo_rechazo = None
     await user.save()
     
+    return user
+
+
+@router.put("/{id}/cv/verificar", response_model=UserResponse)
+async def verificar_cv_docente(
+    id: PydanticObjectId,
+    current_user: User = Depends(require_encargado_curso)
+) -> Any:
+    user = await user_service.get_user(id=id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        
+    user.cv_estado = "verificado"
+    user.cv_motivo_rechazo = None
+        
+    await user.save()
+    return user
+
+@router.put("/{id}/cv/rechazar", response_model=UserResponse)
+async def rechazar_cv_docente(
+    id: PydanticObjectId,
+    motivo: str = Form(...),
+    current_user: User = Depends(require_encargado_curso)
+) -> Any:
+    user = await user_service.get_user(id=id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        
+    user.cv_estado = "rechazado"
+    user.cv_motivo_rechazo = motivo
+        
+    await user.save()
     return user
 
 
