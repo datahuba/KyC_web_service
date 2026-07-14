@@ -132,3 +132,46 @@ async def delete_user(id: PydanticObjectId) -> User:
     if user:
         await user.delete()
     return user
+
+
+async def assign_course_to_users(course_id: PydanticObjectId, encargados_ids: List[str]) -> None:
+    """
+    Asigna un curso a una lista de usuarios (Encargados de Curso/Coordinadores),
+    y lo remueve de aquellos que ya no estén en la lista.
+    Valida el límite máximo de 5 cursos.
+    """
+    # Buscar a todos los encargados que actualmente tienen el curso
+    current_encargados = await User.find(
+        User.cursos_asignados == course_id,
+        Or(User.rol == UserRole.ENCARGADO_CURSO, User.rol == UserRole.COORDINADOR)
+    ).to_list()
+    
+    current_ids = {str(u.id): u for u in current_encargados}
+    new_ids = set(encargados_ids)
+    
+    # Usuarios a los que se les debe remover el curso
+    to_remove_ids = set(current_ids.keys()) - new_ids
+    for uid in to_remove_ids:
+        u = current_ids[uid]
+        if course_id in (u.cursos_asignados or []):
+            u.cursos_asignados.remove(course_id)
+            await u.save()
+            
+    # Usuarios a los que se les debe agregar el curso
+    for uid in new_ids:
+        if uid in current_ids:
+            continue # ya lo tiene
+            
+        u = await User.get(PydanticObjectId(uid))
+        if not u or u.rol not in [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
+            continue
+            
+        if not u.cursos_asignados:
+            u.cursos_asignados = []
+            
+        if course_id not in u.cursos_asignados:
+            if len(u.cursos_asignados) >= 5:
+                raise ValueError(f"El usuario {u.username} ya tiene el máximo de 5 programas asignados.")
+            u.cursos_asignados.append(course_id)
+            await u.save()
+
