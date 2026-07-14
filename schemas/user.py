@@ -84,6 +84,12 @@ class UserCreate(BaseModel):
             raise ValueError("Debes proveer 'password' o 'carnet' (la contraseña se autogenera como 'Uagrm.<CI>').")
         return self
 
+    @model_validator(mode="after")
+    def validar_limite_programas(self):
+        if self.rol == UserRole.ENCARGADO_CURSO and self.cursos_asignados and len(self.cursos_asignados) > 5:
+            raise ValueError("Un encargado de curso puede tener máximo 5 programas asignados")
+        return self
+
     model_config = {
         "json_schema_extra": {
             "example": {
@@ -165,6 +171,16 @@ class UserUpdate(BaseModel):
         if info.data.get("rol") == UserRole.COORDINADOR and not v:
             raise ValueError("subtipo_coordinador es obligatorio para el rol Coordinador (financiero/academico/investigacion)")
         return v
+
+    @model_validator(mode="after")
+    def validar_limite_programas(self):
+        # Para UserUpdate, 'rol' puede ser None si no se envió en el PATCH, 
+        # pero asumimos que la validación completa en update_user en backend también pasará si es necesario.
+        # Aquí validamos si el rol se está enviando como ENCARGADO_CURSO explícitamente en el PATCH, 
+        # o si hay cursos_asignados > 5 (el servicio de actualización validará contra el rol existente de ser necesario).
+        if self.rol == UserRole.ENCARGADO_CURSO and self.cursos_asignados and len(self.cursos_asignados) > 5:
+            raise ValueError("Un encargado de curso puede tener máximo 5 programas asignados")
+        return self
 
     model_config = {
         "json_schema_extra": {

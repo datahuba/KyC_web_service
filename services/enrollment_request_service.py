@@ -29,6 +29,20 @@ async def create_enrollment_request(
     data: EnrollmentRequestCreate,
     current_student: Student
 ) -> EnrollmentRequest:
+    # ISSUE-Q-INSCRIPCION-DOCS: Requisitos Documentales Previos
+    missing_docs = []
+    if current_student.cv_estado != "verificado":
+        missing_docs.append("CV")
+    if current_student.carnet_estado != "verificado":
+        missing_docs.append("Carnet de Identidad")
+    if current_student.afiliacion_estado != "verificado":
+        missing_docs.append("Formulario de Inscripción (Afiliación)")
+    if not current_student.titulo or current_student.titulo.get("estado") != "verificado":
+        missing_docs.append("Título Profesional")
+    
+    if missing_docs:
+        raise ValueError(f"No puedes solicitar inscripción. Faltan documentos obligatorios o no están validados: {', '.join(missing_docs)}.")
+
     course = await Course.get(data.curso_id)
     if not course:
         raise ValueError("Curso no encontrado")
@@ -99,15 +113,21 @@ async def create_enrollment_request(
 async def get_enrollment_requests(
     estado: Optional[str] = None,
     page: int = 1,
-    per_page: int = 20
-) -> tuple[List[EnrollmentRequest], int]:
-    query_dict = {}
+    per_page: int = 20,
+    cursos_permitidos: Optional[list] = None
+) -> tuple[list[EnrollmentRequest], int]:
+    conditions = []
     if estado and estado in ("pendiente", "aprobado", "rechazado"):
-        query_dict["estado"] = estado
+        conditions.append(EnrollmentRequest.estado == estado)
+    
+    if cursos_permitidos is not None:
+        from beanie.operators import In
+        conditions.append(In(EnrollmentRequest.curso_id, cursos_permitidos))
 
-    total = await EnrollmentRequest.find(query_dict).count()
+    query = EnrollmentRequest.find(*conditions) if conditions else EnrollmentRequest.find_all()
+    total = await query.count()
     skip = (page - 1) * per_page
-    items = await EnrollmentRequest.find(query_dict).sort("-created_at").skip(skip).limit(per_page).to_list()
+    items = await query.sort("-created_at").skip(skip).limit(per_page).to_list()
     return items, total
 
 
@@ -138,7 +158,8 @@ async def approve_enrollment_request(request_id: PydanticObjectId, admin_usernam
     solicitud.estado = "aprobado"
     solicitud.enrollment_id = enrollment.id
     solicitud.revisado_por = admin_username
-    solicitud.fecha_revision = datetime.utcnow()
+    from datetime import timezone
+    solicitud.fecha_revision = datetime.now(timezone.utc)
     await solicitud.save()
 
     try:
@@ -198,7 +219,8 @@ async def reject_enrollment_request(
     solicitud.estado = "rechazado"
     solicitud.motivo_rechazo = motivo
     solicitud.revisado_por = admin_username
-    solicitud.fecha_revision = datetime.utcnow()
+    from datetime import timezone
+    solicitud.fecha_revision = datetime.now(timezone.utc)
     await solicitud.save()
 
     try:
