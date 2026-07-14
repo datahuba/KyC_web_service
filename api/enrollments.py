@@ -87,6 +87,7 @@ async def list_enrollments(
     estudiante_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por Estudiante ID"),
     con_descuento: Optional[bool] = Query(None, description="Filtrar solo inscripciones con (True) o sin (False) descuento personal aplicado"),
     descuento_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por un Discount específico"),
+    requiere_accion_documentos: Optional[bool] = Query(None, description="Filtrar inscripciones con documentos pendientes de validación o subida"),
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
     """Listar inscripciones con paginación y filtros avanzados"""
@@ -99,7 +100,8 @@ async def list_enrollments(
             page=page, per_page=per_page, q=q, estado=estado,
             curso_id=curso_id, estudiante_id=estudiante_id,
             cursos_permitidos=cursos_permitidos,
-            con_descuento=con_descuento, descuento_id=descuento_id
+            con_descuento=con_descuento, descuento_id=descuento_id,
+            requiere_accion_documentos=requiere_accion_documentos
         )
     elif isinstance(current_user, Student):
         all_enrollments = await enrollment_service.get_enrollments_by_student(

@@ -247,7 +247,8 @@ async def get_all_enrollments(
     estudiante_id: Optional[PydanticObjectId] = None,
     cursos_permitidos: Optional[List[PydanticObjectId]] = None,
     con_descuento: Optional[bool] = None,
-    descuento_id: Optional[PydanticObjectId] = None
+    descuento_id: Optional[PydanticObjectId] = None,
+    requiere_accion_documentos: Optional[bool] = None
 ) -> tuple[List[Enrollment], int]:
     """
     cursos_permitidos (ISSUE-R-ROLES): si se provee (no None), restringe los resultados
@@ -283,6 +284,10 @@ async def get_all_enrollments(
             Enrollment.descuento_estudiante_id == None,
             Or(Enrollment.descuento_personalizado == None, Enrollment.descuento_personalizado <= 0)
         )
+        
+    if requiere_accion_documentos:
+        # ISSUE-Q-DOCUMENTOS-KYC: Filtrar inscripciones que tengan algún documento pendiente de validación o subida
+        query = query.find({"requisitos.estado": {"$in": ["pendiente", "en_proceso", "rechazado", "sin_subir"]}})
         
     if q:
         regex_pattern = {"$regex": q, "$options": "i"}
