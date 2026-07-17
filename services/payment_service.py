@@ -359,26 +359,52 @@ async def get_all_payments(
             query_dict["concepto"] = {"$not": {"$regex": "matricula|matrícula", "$options": "i"}}
             
     if q:
-        regex_pattern = {"$regex": q, "$options": "i"}
-        
-        matching_students = await Student.find(
-            Or(
-                Student.nombre == regex_pattern,
-                Student.registro == regex_pattern,
-                Student.carnet == regex_pattern,
-                Student.email == regex_pattern
-            )
-        ).to_list()
-        
-        matching_student_ids = [s.id for s in matching_students]
+        # BUG 8 FIX: el Or de Beanie con `==` comparaba un dict de regex contra
+        # un string, por lo que NUNCA encontraba estudiantes (solo coincidía si
+        # el nombre era literalmente el dict, lo cual es imposible). Se reemplaza
+        # por RegEx de Beanie, que arma correctamente la consulta Mongo
+        # `{$regex: q, $options: "i"}` para los 4 campos del estudiante.
+        from beanie.operators import RegEx
+        regex_q = q.strip()
+        if not regex_q:
+            # cadena vacía tras trim: no aplicar filtro de búsqueda libre
+            pass
+        else:
+            matching_students = await Student.find(
+                Or(
+                    RegEx(Student.nombre, regex_q, "i"),
+                    RegEx(Student.registro, regex_q, "i"),
+                    RegEx(Student.carnet, regex_q, "i"),
+                    RegEx(Student.email, regex_q, "i"),
+                )
+            ).to_list()
 
-        query_dict["$or"] = [
-            {"numero_transaccion": regex_pattern},
-            {"concepto": regex_pattern},
-            {"remitente": regex_pattern},
-            {"banco": regex_pattern},
-            {"estudiante_id": {"$in": matching_student_ids}}
-        ]
+            matching_student_ids = [s.id for s in matching_students]
+
+            # $or ya no puede vivir en el mismo nivel si hay otros filtros
+            # restrictivos; Mongo lo rechaza con "already has $or" si se mete
+            # en query_dict después de haber establecido $and/u otras claves
+            # iguales. La forma correcta es $and a nivel raíz.
+            or_filters = [
+                {"numero_transaccion": {"$regex": regex_q, "$options": "i"}},
+                {"concepto": {"$regex": regex_q, "$options": "i"}},
+                {"remitente": {"$regex": regex_q, "$options": "i"}},
+                {"banco": {"$regex": regex_q, "$options": "i"}},
+                {"estudiante_id": {"$in": matching_student_ids}},
+            ]
+            # Combinar con cualquier $and previo (cursos_permitidos, etc.)
+            if "$and" in query_dict:
+                query_dict["$and"].append({"$or": or_filters})
+            elif any(k in query_dict for k in ("estado_pago", "estudiante_id", "inscripcion_id", "curso_id", "concepto")):
+                # Hay otros filtros: hay que envolverlos en $and para que convivan con $or
+                other_filters = {k: v for k, v in query_dict.items() if k != "$or"}
+                query_dict.clear()
+                query_dict["$and"] = [
+                    other_filters,
+                    {"$or": or_filters},
+                ]
+            else:
+                query_dict["$or"] = or_filters
     
     total_count = await Payment.find(query_dict).count()
     skip = (page - 1) * per_page
