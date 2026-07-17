@@ -1,4 +1,4 @@
-"""
+﻿"""
 Modelo de Descuento
 ==================
 
@@ -250,7 +250,7 @@ class Discount(MongoBaseModel):
 
     class Config:
         """Configuración y ejemplos de uso"""
-        schema_extra = {
+        json_schema_extra = {
             "examples": [
                 {
                     "nombre": "Beca Excelencia Académica",

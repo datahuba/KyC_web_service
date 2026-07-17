@@ -1,4 +1,4 @@
-"""
+﻿"""
 Modelo de Usuario
 =================
 
@@ -105,7 +105,7 @@ class User(MongoBaseModel):
         ]
 
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "username": "admin",
                 "email": "admin@kyc.com",

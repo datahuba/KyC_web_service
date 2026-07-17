@@ -1,4 +1,4 @@
-"""
+﻿"""
 Modelo de Estudiante
 ====================
 
@@ -166,7 +166,7 @@ class Student(MongoBaseModel):
 
     class Config:
         """Configuración y ejemplo de uso"""
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "registro": "220005958",
                 "password": "$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewY5GyYIq.Ru",
