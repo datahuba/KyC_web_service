@@ -26,6 +26,8 @@ from models.account_request import AccountRequest
 from models.passive_request import PassiveRequest
 from models.bank_statement_entry import BankStatementEntry
 from models.enrollment_request import EnrollmentRequest
+# ISSUE-Q-PRE-REGISTRO-FORM (2026-07-17): formularios dinámicos de pre-inscripción.
+from models.pre_registration import PreRegistrationForm, PreRegistration
 
 
 async def _sanitize_legacy_database(db):
@@ -179,6 +181,9 @@ async def init_db():
             PassiveRequest,
             BankStatementEntry,
             EnrollmentRequest,
+            # ISSUE-Q-PRE-REGISTRO-FORM
+            PreRegistrationForm,
+            PreRegistration,
             Course,
             Enrollment,
             Payment,
