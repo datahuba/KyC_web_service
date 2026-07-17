@@ -19,6 +19,7 @@ from beanie import PydanticObjectId
 from beanie.operators import In, Or
 from beanie.exceptions import RevisionIdWasChanged
 from services import enrollment_service
+from core.timezone_utils import utcnow_naive, to_bolivia_time
 
 # ISSUE-P-REVERSION: ventana en la que el banco puede revertir una transferencia ya aprobada
 VENTANA_REVERSION_HORAS = 48
@@ -66,11 +67,10 @@ async def _registrar_auditoria_financiera(
 
 async def enrich_payment_with_details(payment: Payment) -> dict:
     payment_dict = payment.model_dump(by_alias=True)
-    
+
     student = await Student.get(payment.estudiante_id)
     nombre_estudiante = student.nombre if student and student.nombre else "Sin nombre"
-    
-    from core.timezone_utils import utcnow_naive, to_bolivia_time
+
     fecha = to_bolivia_time(payment.fecha_subida)
     created_at_bolivia = to_bolivia_time(payment.created_at)
     updated_at_bolivia = to_bolivia_time(payment.updated_at)
@@ -112,8 +112,6 @@ async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dic
 
     students_map = {s.id: s for s in students}
     enrollments_map = {e.id: e for e in enrollments}
-
-    from core.timezone_utils import utcnow_naive, to_bolivia_time
 
     enriched_list = []
     for payment in payments:
