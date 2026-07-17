@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sys
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -8,6 +9,19 @@ from core.database import init_db
 from api.api import api_router
 
 logger = logging.getLogger("kyc.congelado_job")
+
+# Configurar el logger de kyc.* (FIX 2026-07-17): sin handler ni nivel
+# explícito, los logger.info() se perdían silenciosamente aunque la task
+# se estuviera ejecutando. Agregamos un handler de stdout y forzamos nivel
+# INFO, salvo que se haya configurado otra cosa en el root.
+if not logger.handlers:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    ))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False  # evitar duplicación si el root también loguea
 
 # ISSUE-P-CONGELADO / ISSUE-R-NOTIFICACION-MORA: job periódico (cada 24h) que
 # revisa inactividad de pagos, notifica mora preventiva y marca abandono
@@ -20,6 +34,11 @@ _INTERVALO_JOB_CONGELADO_SEGUNDOS = 24 * 60 * 60
 async def _job_verificar_inactividad_periodico():
     from services import congelado_service
 
+    logger.info(
+        f"[job-congelado] INICIADO — primera ejecución en "
+        f"{_INTERVALO_JOB_CONGELADO_SEGUNDOS // 3600}h, "
+        f"luego cada {_INTERVALO_JOB_CONGELADO_SEGUNDOS // 3600}h"
+    )
     while True:
         # IMPORTANTE: se espera el intervalo COMPLETO antes de la primera
         # ejecución. Con uvicorn --reload en desarrollo, el evento de
@@ -30,9 +49,9 @@ async def _job_verificar_inactividad_periodico():
         await asyncio.sleep(_INTERVALO_JOB_CONGELADO_SEGUNDOS)
         try:
             resultado = await congelado_service.verificar_inactividad_pagos()
-            logger.info(f"[job-congelado] {resultado}")
+            logger.info(f"[job-congelado] ejecución OK: {resultado}")
         except Exception as e:
-            logger.error(f"[job-congelado] Error en la verificación periódica: {str(e)}")
+            logger.exception(f"[job-congelado] Error en la verificación periódica: {e}")
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -74,7 +93,12 @@ async def start_db():
     # con --reload, para no correr el job real contra la base compartida con
     # producción en cada guardado de archivo).
     if settings.JOB_CONGELADO_ACTIVO:
-        asyncio.create_task(_job_verificar_inactividad_periodico())
+        task = asyncio.create_task(_job_verificar_inactividad_periodico())
+        # Guardar referencia para evitar garbage collection (best practice en
+        # Python 3.12+, donde las tasks sin referencia pueden ser GCed antes
+        # de su primera await).
+        _job_verificar_inactividad_periodico._task = task  # type: ignore
+        logger.info("[job-congelado] task creada y referenciada")
     else:
         logger.warning("[job-congelado] DESACTIVADO por JOB_CONGELADO_ACTIVO=False")
 
