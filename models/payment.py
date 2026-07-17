@@ -1,4 +1,4 @@
-"""
+﻿"""
 Modelo de Pago
 =============
 
@@ -7,6 +7,7 @@ Colección MongoDB: payments
 """
 
 from datetime import datetime
+from core.timezone_utils import utcnow_naive
 from typing import Optional
 import pymongo
 from pydantic import Field
@@ -140,28 +141,28 @@ class Payment(MongoBaseModel):
     
     def aprobar_pago(self, admin_username: str):
         self.estado_pago = EstadoPago.APROBADO
-        self.fecha_verificacion = datetime.utcnow()
+        self.fecha_verificacion = utcnow_naive()
         self.verificado_por = admin_username
         self.motivo_rechazo = None
         self.motivo_reversion = None
-        self.updated_at = datetime.utcnow()
+        self.updated_at = utcnow_naive()
     
     def rechazar_pago(self, admin_username: str, motivo: str):
         self.estado_pago = EstadoPago.RECHAZADO
-        self.fecha_verificacion = datetime.utcnow()
+        self.fecha_verificacion = utcnow_naive()
         self.verificado_por = admin_username
         self.motivo_rechazo = motivo
-        self.updated_at = datetime.utcnow()
+        self.updated_at = utcnow_naive()
 
     def anular_pago(self, admin_username: str, motivo: str):
         """
         Anula un pago que YA ESTABA APROBADO (Rollback financiero)
         """
         self.estado_pago = EstadoPago.ANULADO  # Requerirá agregar ANULADO al enum EstadoPago
-        self.fecha_verificacion = datetime.utcnow()
+        self.fecha_verificacion = utcnow_naive()
         self.verificado_por = admin_username
         self.motivo_reversion = motivo
-        self.updated_at = datetime.utcnow()
+        self.updated_at = utcnow_naive()
     
     class Settings:
         name = "payments"

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Endpoints de Autenticación
 ==========================
 
@@ -6,6 +6,7 @@ Login y gestión de tokens.
 """
 
 from datetime import datetime
+from core.timezone_utils import utcnow_naive
 from typing import Any
 from fastapi import APIRouter, HTTPException, Depends, status, Request
 from beanie import PydanticObjectId
@@ -133,7 +134,7 @@ async def verify_email(data: VerifyEmailRequest) -> Any:
 
     if not target.email_verificado:
         target.email_verificado = True
-        target.fecha_verificacion_email = datetime.utcnow()
+        target.fecha_verificacion_email = utcnow_naive()
         await target.save()
 
     return {"message": "Correo verificado correctamente."}
@@ -254,7 +255,7 @@ async def login_user(login_data: LoginRequest, request: Request) -> Any:
         )
     
     # Actualizar último acceso
-    user.ultimo_acceso = datetime.utcnow()
+    user.ultimo_acceso = utcnow_naive()
     await user.save()
     
     # Crear token

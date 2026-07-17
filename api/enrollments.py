@@ -1,4 +1,4 @@
-"""
+﻿"""
 API de Inscripciones (Enrollments)
 ==================================
 
@@ -18,6 +18,7 @@ Permisos (Según Jerarquía UAGRM):
 
 from typing import List, Any, Optional, Union
 from datetime import datetime
+from core.timezone_utils import utcnow_naive
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Path
 from models.enrollment import Enrollment
 from models.student import Student
@@ -721,7 +722,7 @@ async def subir_beca_respaldo(
             raise HTTPException(400, f"Formato no permitido: {file.content_type}")
 
         enrollment.beca_respaldo_url = url
-        enrollment.updated_at = datetime.utcnow()
+        enrollment.updated_at = utcnow_naive()
         await enrollment.save()
         return await enrollment_service.enrich_enrollment_dates(enrollment)
     except HTTPException:
@@ -768,7 +769,7 @@ async def subir_formulario_inscripcion(
             raise HTTPException(400, f"Formato no permitido: {file.content_type}. Sube el formulario como PDF o imagen.")
 
         enrollment.formulario_inscripcion_url = url
-        enrollment.updated_at = datetime.utcnow()
+        enrollment.updated_at = utcnow_naive()
         await enrollment.save()
         return await enrollment_service.enrich_enrollment_dates(enrollment)
     except HTTPException:

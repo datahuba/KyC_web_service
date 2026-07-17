@@ -1,4 +1,4 @@
-"""
+﻿"""
 Servicio de Pagos (Payments)
 ============================
 
@@ -37,7 +37,7 @@ def _calcular_en_ventana_reversion(payment: Payment) -> bool:
     if not payment.fecha_verificacion:
         return False
     limite = payment.fecha_verificacion + timedelta(hours=VENTANA_REVERSION_HORAS)
-    return datetime.utcnow() < limite
+    return utcnow_naive() < limite
 
 # ========================================================================
 # MOTOR DE AUDITORÍA FINANCIERA
@@ -55,7 +55,7 @@ async def _registrar_auditoria_financiera(
     """
     try:
         print(
-            f"[AUDIT TRAIL] [{datetime.utcnow()}] ACCIÓN: {accion} | "
+            f"[AUDIT TRAIL] [{utcnow_naive()}] ACCIÓN: {accion} | "
             f"ADMIN: {admin_username} | PAGO_ID: {payment_id} | "
             f"ESTUDIANTE_ID: {estudiante_id} | MONTO: Bs. {monto} | "
             f"DETALLE: {detalles}"
@@ -70,7 +70,7 @@ async def enrich_payment_with_details(payment: Payment) -> dict:
     student = await Student.get(payment.estudiante_id)
     nombre_estudiante = student.nombre if student and student.nombre else "Sin nombre"
     
-    from core.timezone_utils import to_bolivia_time
+    from core.timezone_utils import utcnow_naive, to_bolivia_time
     fecha = to_bolivia_time(payment.fecha_subida)
     created_at_bolivia = to_bolivia_time(payment.created_at)
     updated_at_bolivia = to_bolivia_time(payment.updated_at)
@@ -113,7 +113,7 @@ async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dic
     students_map = {s.id: s for s in students}
     enrollments_map = {e.id: e for e in enrollments}
 
-    from core.timezone_utils import to_bolivia_time
+    from core.timezone_utils import utcnow_naive, to_bolivia_time
 
     enriched_list = []
     for payment in payments:
@@ -872,13 +872,13 @@ async def create_caja_directo_payment(
         remitente=remitente,
         banco="Caja Física",
         monto_comprobante=cantidad_pago,
-        fecha_comprobante=datetime.utcnow(),
+        fecha_comprobante=utcnow_naive(),
         cuenta_destino=cuenta_destino or f"Caja Física - {admin_username}",
         estado_pago=EstadoPago.APROBADO
     )
     
     # Sellar la verificación automática de caja
-    payment.fecha_verificacion = datetime.utcnow()
+    payment.fecha_verificacion = utcnow_naive()
     payment.verificado_por = admin_username
     
     await payment.insert()

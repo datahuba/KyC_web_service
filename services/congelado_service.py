@@ -1,4 +1,4 @@
-"""
+﻿"""
 Servicio de Congelamiento y Abandono (ISSUE-P-CONGELADO / ISSUE-R-NOTIFICACION-MORA)
 =====================================================================================
 
@@ -21,6 +21,7 @@ calculados; solo cambian el estado académico y dejan trazabilidad.
 """
 
 from datetime import datetime, timedelta
+from core.timezone_utils import utcnow_naive
 from typing import List, Optional
 from beanie import PydanticObjectId
 from beanie.operators import Or
@@ -68,9 +69,9 @@ async def congelar_inscripcion(
 
     enrollment.estado = EstadoInscripcion.SUSPENDIDO
     enrollment.motivo_suspension = "congelado"
-    enrollment.fecha_congelamiento = datetime.utcnow()
+    enrollment.fecha_congelamiento = utcnow_naive()
     enrollment.tasa_congelamiento_pagada = tasa_pagada
-    enrollment.updated_at = datetime.utcnow()
+    enrollment.updated_at = utcnow_naive()
     await enrollment.save()
 
     try:
@@ -114,7 +115,7 @@ async def reactivar_desde_congelado_o_abandono(enrollment_id: PydanticObjectId, 
     )
     enrollment.motivo_suspension = None
     enrollment.mora_notificada = False
-    enrollment.updated_at = datetime.utcnow()
+    enrollment.updated_at = utcnow_naive()
     await enrollment.save()
 
     try:
@@ -182,7 +183,7 @@ async def _notificar_mora_preventiva(enrollment: Enrollment) -> None:
             print(f"Error notificando mora preventiva: {str(e)}")
 
     enrollment.mora_notificada = True
-    enrollment.updated_at = datetime.utcnow()
+    enrollment.updated_at = utcnow_naive()
     await enrollment.save()
 
 
@@ -192,8 +193,8 @@ async def _marcar_abandono_automatico(enrollment: Enrollment) -> None:
 
     enrollment.estado = EstadoInscripcion.SUSPENDIDO
     enrollment.motivo_suspension = "abandono"
-    enrollment.fecha_abandono = datetime.utcnow()
-    enrollment.updated_at = datetime.utcnow()
+    enrollment.fecha_abandono = utcnow_naive()
+    enrollment.updated_at = utcnow_naive()
     await enrollment.save()
 
     try:
@@ -230,7 +231,7 @@ async def verificar_inactividad_pagos(enrollment_ids: Optional[List[PydanticObje
 
     Retorna un resumen para logging/endpoint manual de disparo.
     """
-    ahora = datetime.utcnow()
+    ahora = utcnow_naive()
     filtros = [
         Or(Enrollment.estado == EstadoInscripcion.ACTIVO, Enrollment.estado == EstadoInscripcion.PENDIENTE_PAGO),
         Enrollment.saldo_pendiente > 0

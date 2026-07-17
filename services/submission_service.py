@@ -1,4 +1,4 @@
-"""
+﻿"""
 Servicio de Submissions (Entregas de Estudiantes)
 ===================================================
 
@@ -8,6 +8,7 @@ Manejo de entregas y calificaciones.
 """
 
 from datetime import datetime
+from core.timezone_utils import utcnow_naive
 from typing import List, Optional
 from fastapi import HTTPException, UploadFile, status
 from beanie import PydanticObjectId
@@ -90,7 +91,7 @@ async def submit(
             "size_bytes": result["size_bytes"],
         }
 
-    now = datetime.utcnow()
+    now = utcnow_naive()
 
     if submission is None:
         submission = Submission(
@@ -126,6 +127,6 @@ async def grade_submission(
     submission.feedback = data.feedback
     submission.status = SubmissionStatus.GRADED
     submission.graded_by = graded_by
-    submission.graded_at = datetime.utcnow()
+    submission.graded_at = utcnow_naive()
     await submission.save()
     return submission
