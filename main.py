@@ -8,6 +8,35 @@ from core.config import settings
 from core.database import init_db
 from api.api import api_router
 
+# TECH-004: Sentry (error tracking). Si SENTRY_DSN no está configurado, la
+# llamada a init() es un no-op — Sentry queda deshabilitado sin afectar el
+# funcionamiento. Para activarlo: crear proyecto en sentry.io → setear
+# SENTRY_DSN en .env del backend.
+if settings.SENTRY_DSN:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        from sentry_sdk.integrations.starlette import StarletteIntegration
+        from sentry_sdk.integrations.logging import LoggingIntegration
+
+        sentry_sdk.init(
+            dsn=settings.SENTRY_DSN,
+            environment=settings.SENTRY_ENVIRONMENT,
+            traces_sample_rate=settings.SENTRY_TRACES_SAMPLE_RATE,
+            integrations=[
+                FastApiIntegration(),
+                StarletteIntegration(),
+                LoggingIntegration(level=logging.INFO, event_level=logging.ERROR),
+            ],
+            # Capturar info del entorno sin datos sensibles
+            send_default_pii=False,
+        )
+        print(f"[sentry] Inicializado (env={settings.SENTRY_ENVIRONMENT}, traces={settings.SENTRY_TRACES_SAMPLE_RATE})", file=sys.stdout)
+    except ImportError:
+        print("[sentry] sentry-sdk no instalado. pip install sentry-sdk[fastapi] para activarlo.", file=sys.stdout)
+    except Exception as e:
+        print(f"[sentry] Error inicializando: {e}", file=sys.stdout)
+
 logger = logging.getLogger("kyc.congelado_job")
 
 # Configurar el logger de kyc.* (FIX 2026-07-17): sin handler ni nivel
@@ -83,6 +112,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# TECH-004: handler global de excepciones. Sentry captura automáticamente
+# las excepciones no manejadas, pero este handler las registra con un
+# mensaje consistente en logs del servidor también, y devuelve un 500
+# genérico al cliente (sin filtrar detalles internos).
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    # Loggear con traceback
+    import traceback
+    logger.error(
+        f"[500] {request.method} {request.url.path}: {type(exc).__name__}: {exc}\n"
+        f"{traceback.format_exc()}"
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Error interno del servidor. El equipo técnico ha sido notificado."},
+    )
 
 @app.on_event("startup")
 async def start_db():

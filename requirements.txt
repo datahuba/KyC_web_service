@@ -11,3 +11,5 @@ bcrypt>=4.0.0
 cloudinary>=1.41.0
 openpyxl>=3.1.2
 pymongo<=4.6.3
+# TECH-004: error tracking en producción (opcional; solo se activa si SENTRY_DSN está configurado)
+sentry-sdk[fastapi]>=2.0.0
