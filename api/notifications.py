@@ -6,8 +6,8 @@ Router de Notificaciones
 import asyncio
 import json
 import logging
-from typing import List, Any, Union
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from typing import List, Any, Union, Optional
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
 from beanie import PydanticObjectId
 from sse_starlette.sse import EventSourceResponse
 from models.user import User
@@ -15,10 +15,51 @@ from models.student import Student
 from schemas.notification import NotificationResponse, NotificationUnreadCount
 from services import notification_service
 from services.sse_bus import sse_bus
+from core.security import decode_access_token
 from api.dependencies import get_current_user
 
 router = APIRouter()
 _sse_logger = logging.getLogger("kyc.sse")
+
+
+async def _resolve_user_from_query(token: str) -> Union[User, Student]:
+    """
+    TECH-003: el browser EventSource no permite enviar headers custom, así
+    que pasamos el JWT via query string. Esta función valida el token y
+    devuelve el User/Student asociado. Replica la lógica de get_current_user
+    pero acepta token por query.
+    """
+    from core.config import settings
+    if settings.DEVELOPMENT_MODE:
+        from core.config import settings as _s
+        # En dev, devolver admin mock (igual que get_current_user)
+        from models.enums import UserRole
+        return User(
+            id=PydanticObjectId("000000000000000000000001"),
+            username="dev_admin",
+            password="mock_password",
+            email="dev@example.com",
+            rol=UserRole.SUPERADMIN,
+            activo=True
+        )
+
+    payload = decode_access_token(token)
+    if payload is None:
+        raise HTTPException(status_code=401, detail="Token inválido o expirado")
+    if payload.get("purpose") in ("password_reset", "email_verification"):
+        raise HTTPException(status_code=401, detail="Token de un solo uso, no válido para streaming")
+    user_id = payload.get("sub")
+    user_type = payload.get("user_type")
+    if not user_id or not user_type:
+        raise HTTPException(status_code=401, detail="Token inválido")
+
+    if user_type == "student":
+        user = await Student.get(PydanticObjectId(user_id))
+    else:
+        user = await User.get(PydanticObjectId(user_id))
+    if user is None:
+        raise HTTPException(status_code=401, detail="Usuario no encontrado")
+    return user
 
 
 @router.get(
@@ -101,11 +142,16 @@ async def read_all_notifications(
 )
 async def stream_notifications(
     request: Request,
-    current_user: Union[User, Student] = Depends(get_current_user)
+    token: Optional[str] = Query(default=None, description="JWT para autenticar el stream SSE (alternativa al header Authorization porque EventSource no soporta headers custom)")
 ):
     """Stream persistente SSE. Heartbeat cada 30s para mantener viva la
     conexión a través de proxies intermedios. Se desconecta automáticamente
     cuando el cliente cierra la pestaña."""
+
+    # TECH-003: resolver user desde query token (EventSource no soporta headers)
+    current_user = await _resolve_user_from_query(token) if token else None
+    if current_user is None:
+        raise HTTPException(status_code=401, detail="Se requiere token de autenticación")
 
     user_id = current_user.id
     queue = await sse_bus.subscribe(user_id)
