@@ -308,8 +308,8 @@ async def get_submissions_for_admin(
                 return [], 0
         form_query = {"_id": form_oid}
 
-    form_ids = [f async for f in PreRegistrationForm.find(form_query).only("_id")]
-    form_ids_oid = [f.id for f in form_ids]
+    form_ids = [f.id for f in await PreRegistrationForm.find(form_query).to_list()]
+    form_ids_oid = form_ids
     if not form_ids_oid:
         return [], 0
 
