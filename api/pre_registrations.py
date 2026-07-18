@@ -27,7 +27,7 @@ Endpoints:
 
 import math
 from typing import Any, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from beanie import PydanticObjectId
 
 from models.user import User
@@ -204,14 +204,17 @@ async def reopen_form(
 @router.delete(
     "/forms/{form_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
     summary="Eliminar Formulario (solo super admin)"
 )
 async def delete_form(
     form_id: PydanticObjectId,
     current_user: User = Depends(require_superadmin)
-) -> Any:
+):
     try:
         await pre_registration_service.delete_form(form_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
