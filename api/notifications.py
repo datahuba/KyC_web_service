@@ -3,16 +3,22 @@ Router de Notificaciones
 ========================
 """
 
+import asyncio
+import json
+import logging
 from typing import List, Any, Union
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from beanie import PydanticObjectId
+from sse_starlette.sse import EventSourceResponse
 from models.user import User
 from models.student import Student
 from schemas.notification import NotificationResponse, NotificationUnreadCount
 from services import notification_service
+from services.sse_bus import sse_bus
 from api.dependencies import get_current_user
 
 router = APIRouter()
+_sse_logger = logging.getLogger("kyc.sse")
 
 
 @router.get(
@@ -81,3 +87,65 @@ async def read_all_notifications(
         "message": "Operación exitosa",
         "modified_count": modified_count
     }
+
+
+# TECH-003: Server-Sent Events para push de notificaciones en tiempo real.
+# Reemplaza el polling cada 45s del frontend. El cliente abre
+# `EventSource('/api/v1/notifications/stream')` y recibe eventos
+# `notification` con JSON payload cada vez que se crea una nueva
+# notificación para este usuario.
+@router.get(
+    "/stream",
+    summary="Stream SSE de notificaciones en tiempo real",
+    response_class=EventSourceResponse,
+)
+async def stream_notifications(
+    request: Request,
+    current_user: Union[User, Student] = Depends(get_current_user)
+):
+    """Stream persistente SSE. Heartbeat cada 30s para mantener viva la
+    conexión a través de proxies intermedios. Se desconecta automáticamente
+    cuando el cliente cierra la pestaña."""
+
+    user_id = current_user.id
+    queue = await sse_bus.subscribe(user_id)
+    _sse_logger.info(f"[sse] user={user_id} subscribed (bus={sse_bus.stats()})")
+
+    async def event_generator():
+        try:
+            # Enviar evento inicial de "conectado" con el unread_count actual
+            unread = await notification_service.get_unread_count(destinatario_id=user_id)
+            yield {
+                "event": "connected",
+                "data": json.dumps({"unread_count": unread}),
+            }
+            last_heartbeat = asyncio.get_event_loop().time()
+            while True:
+                # Heartbeat cada 30s para mantener viva la conexión
+                now = asyncio.get_event_loop().time()
+                if now - last_heartbeat > 30:
+                    yield {"event": "heartbeat", "data": "{}"}
+                    last_heartbeat = now
+
+                # Si el cliente se desconecta, salir
+                if await request.is_disconnected():
+                    break
+
+                # Esperar un mensaje con timeout corto para chequear disconnect
+                try:
+                    data = await asyncio.wait_for(queue.get(), timeout=1.0)
+                    yield {
+                        "event": "notification",
+                        "data": json.dumps(data, default=str),
+                    }
+                except asyncio.TimeoutError:
+                    # No había mensaje, seguir el loop para chequear disconnect
+                    continue
+        except asyncio.CancelledError:
+            # Cliente desconectó abruptamente
+            pass
+        finally:
+            await sse_bus.unsubscribe(user_id, queue)
+            _sse_logger.info(f"[sse] user={user_id} unsubscribed (bus={sse_bus.stats()})")
+
+    return EventSourceResponse(event_generator())

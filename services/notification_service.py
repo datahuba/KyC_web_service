@@ -24,6 +24,10 @@ async def create_notification(
     `ruta` habilita el deep-linking: al hacer click en la campana, el frontend
     navega a esa ruta (ej. '/app/payments'). `referencia_tipo`/`referencia_id`
     permiten resaltar/abrir la entidad concreta (pago, inscripción, etc.).
+
+    TECH-003: después de insertar, publica en el SSE bus para notificar en
+    tiempo real a los clientes conectados (elimina el polling cada 45s del
+    frontend).
     """
     notification = Notification(
         destinatario_id=destinatario_id,
@@ -36,6 +40,29 @@ async def create_notification(
         referencia_id=referencia_id
     )
     await notification.insert()
+
+    # TECH-003: push en tiempo real via SSE. No bloquea: si nadie está
+    # conectado, se ignora. Si la queue está llena, descarta.
+    try:
+        from services.sse_bus import sse_bus
+        # Serializar a dict para que el JSON sea estable
+        notif_dict = {
+            "id": str(notification.id),
+            "titulo": notification.titulo,
+            "mensaje": notification.mensaje,
+            "tipo_alerta": notification.tipo_alerta,
+            "ruta": notification.ruta,
+            "referencia_tipo": notification.referencia_tipo,
+            "referencia_id": str(notification.referencia_id) if notification.referencia_id else None,
+            "leido": notification.leido,
+            "created_at": notification.created_at.isoformat() if notification.created_at else None,
+        }
+        await sse_bus.publish(destinatario_id, notif_dict)
+    except Exception as e:
+        # No fallar la creación de la notificación por un error en el bus
+        import logging
+        logging.getLogger("kyc.sse").warning(f"[sse] publish failed: {e}")
+
     return notification
 
 
