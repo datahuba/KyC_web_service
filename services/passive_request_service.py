@@ -1,4 +1,4 @@
-"""
+﻿"""
 Servicio de Solicitudes de Estado Pasivo (Passive Requests)
 =============================================================
 
@@ -9,6 +9,7 @@ Reutiliza el mismo patrón que account_request_service.py.
 
 from typing import List, Optional, Union
 from datetime import datetime
+from core.timezone_utils import utcnow_naive
 from beanie import PydanticObjectId
 
 from models.passive_request import PassiveRequest
@@ -145,12 +146,12 @@ async def approve_passive_request(request_id: PydanticObjectId, admin_username: 
         raise ValueError("La inscripción asociada ya no existe")
 
     enrollment.estado = EstadoInscripcion.SUSPENDIDO
-    enrollment.updated_at = datetime.utcnow()
+    enrollment.updated_at = utcnow_naive()
     await enrollment.save()
 
     solicitud.estado = "aprobado"
     solicitud.revisado_por = admin_username
-    solicitud.fecha_revision = datetime.utcnow()
+    solicitud.fecha_revision = utcnow_naive()
     await solicitud.save()
 
     try:
@@ -185,7 +186,7 @@ async def reject_passive_request(
     solicitud.estado = "rechazado"
     solicitud.motivo_rechazo = motivo
     solicitud.revisado_por = admin_username
-    solicitud.fecha_revision = datetime.utcnow()
+    solicitud.fecha_revision = utcnow_naive()
     await solicitud.save()
 
     try:
@@ -218,7 +219,7 @@ async def reactivate_enrollment(enrollment_id: PydanticObjectId, admin_username:
     enrollment.estado = (
         EstadoInscripcion.ACTIVO if enrollment.matricula_pagada else EstadoInscripcion.PENDIENTE_PAGO
     )
-    enrollment.updated_at = datetime.utcnow()
+    enrollment.updated_at = utcnow_naive()
     await enrollment.save()
 
     try:

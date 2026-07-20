@@ -61,6 +61,14 @@ class Settings(BaseSettings):
     # está iterando sobre este código con --reload.
     JOB_CONGELADO_ACTIVO: bool = Field(default=True, env="JOB_CONGELADO_ACTIVO")
 
+    # TECH-004: Sentry (error tracking en producción). Si no se configura
+    # SENTRY_DSN, Sentry no hace nada (no-op) — la integración es segura de
+    # agregar sin afectar el funcionamiento. Para activarlo, crear un proyecto
+    # en https://sentry.io y setear SENTRY_DSN en .env.
+    SENTRY_DSN: Optional[str] = Field(default=None, env="SENTRY_DSN")
+    SENTRY_TRACES_SAMPLE_RATE: float = Field(default=0.1, env="SENTRY_TRACES_SAMPLE_RATE")
+    SENTRY_ENVIRONMENT: str = Field(default="production", env="SENTRY_ENVIRONMENT")
+
     model_config = {
         "env_file": ".env",
         "case_sensitive": True

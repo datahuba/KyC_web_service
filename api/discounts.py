@@ -1,4 +1,5 @@
-from datetime import datetime
+﻿from datetime import datetime
+from core.timezone_utils import utcnow_naive
 from typing import List, Any
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from models.discount import Discount
@@ -189,7 +190,7 @@ async def subir_resolucion_descuento(
             raise HTTPException(400, f"Formato no permitido: {file.content_type}")
 
         discount.resolucion_url = url
-        discount.updated_at = datetime.utcnow()
+        discount.updated_at = utcnow_naive()
         await discount.save()
         return discount
     except HTTPException:

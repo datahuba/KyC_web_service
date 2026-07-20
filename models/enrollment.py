@@ -1,4 +1,4 @@
-"""
+﻿"""
 Modelo de Inscripción
 ====================
 
@@ -7,6 +7,7 @@ Colección MongoDB: enrollments
 """
 
 from datetime import datetime
+from core.timezone_utils import utcnow_naive
 from typing import Optional, List
 import pymongo
 from pydantic import BaseModel, Field, field_validator
@@ -198,7 +199,7 @@ class Enrollment(MongoBaseModel):
     def actualizar_saldo(self, monto_pago_aprobado: float):
         self.total_pagado += monto_pago_aprobado
         self.saldo_pendiente = max(0, self.total_a_pagar - self.total_pagado)
-        self.updated_at = datetime.utcnow()
+        self.updated_at = utcnow_naive()
     
     def esta_completamente_pagado(self) -> bool:
         return self.saldo_pendiente <= 0.01

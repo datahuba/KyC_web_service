@@ -1,4 +1,4 @@
-"""
+﻿"""
 Servicio de Extracto Bancario (Bank Statement Entries)
 =========================================================
 
@@ -8,6 +8,7 @@ Registro y cruce MANUAL de movimientos bancarios contra pagos existentes.
 
 from typing import List, Optional
 from datetime import datetime
+from core.timezone_utils import utcnow_naive
 from beanie import PydanticObjectId
 
 from models.bank_statement_entry import BankStatementEntry
@@ -76,7 +77,7 @@ async def match_entry_to_payment(entry_id: PydanticObjectId, payment_id: Pydanti
         raise ValueError("Pago no encontrado")
 
     entry.payment_id = payment_id
-    entry.updated_at = datetime.utcnow()
+    entry.updated_at = utcnow_naive()
     await entry.save()
     return entry
 

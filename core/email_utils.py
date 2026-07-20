@@ -266,3 +266,49 @@ def build_enrollment_approved_email(nombre: str, curso_nombre: str, total_a_paga
       </div>
     </div>
     """
+
+
+def build_welcome_pre_registration_email(
+    nombre: str,
+    carnet: str,
+    initial_password: str,
+    login_url: str
+) -> str:
+    """
+    ISSUE-Q-PRE-REGISTRO-FORM: email que recibe un estudiante cuando CPD/Encargado
+    aprueba su pre-inscripción al programa. Le enviamos su contraseña inicial
+    'Uagrm.<CI>' para que pueda entrar al portal por primera vez.
+    """
+    return f"""
+    <div style="font-family: Arial, Helvetica, sans-serif; max-width: 520px; margin: 0 auto; color: #1f2937;">
+      <div style="background: #8a1f2f; padding: 20px; text-align: center; border-radius: 12px 12px 0 0;">
+        <h1 style="color: #ffffff; margin: 0; font-size: 18px;">Escuela de Posgrado · UAGRM</h1>
+        <p style="color: #f3d2d7; margin: 4px 0 0; font-size: 13px;">Contaduría Pública</p>
+      </div>
+      <div style="border: 1px solid #e5e7eb; border-top: none; padding: 24px; border-radius: 0 0 12px 12px;">
+        <p style="font-size: 15px;">Hola <strong>{nombre}</strong>,</p>
+        <p style="font-size: 14px; line-height: 1.6;">
+          ¡Tu pre-inscripción fue <strong style="color: #008244;">aprobada</strong> por el equipo
+          académico! Ya tienes una cuenta en el portal de Posgrado de la UAGRM.
+        </p>
+        <div style="background: #f9fafb; border-radius: 10px; padding: 16px; margin: 20px 0; border-left: 4px solid #8a1f2f;">
+          <p style="margin: 0 0 6px; font-size: 13px; color: #6b7280;">Usuario (CI)</p>
+          <p style="margin: 0 0 12px; font-size: 18px; font-weight: bold; color: #1f2937; font-family: monospace;">{carnet}</p>
+          <p style="margin: 0 0 6px; font-size: 13px; color: #6b7280;">Contraseña inicial</p>
+          <p style="margin: 0; font-size: 18px; font-weight: bold; color: #8a1f2f; font-family: monospace;">{initial_password}</p>
+        </div>
+        <p style="font-size: 13px; color: #6b7280; line-height: 1.6;">
+          Por seguridad, te recomendamos cambiar tu contraseña después del primer ingreso.
+          Conserva este correo hasta que completes ese paso.
+        </p>
+        <div style="text-align: center; margin: 24px 0;">
+          <a href="{login_url}" style="background: #8a1f2f; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: bold; font-size: 14px; display: inline-block;">
+            Ingresar al Portal
+          </a>
+        </div>
+        <p style="font-size: 12px; color: #9ca3af;">
+          Unidad de Postgrado · Facultad de Ciencias Contables, Auditoría, Sistemas de Control de Gestión y Finanzas · UAGRM
+        </p>
+      </div>
+    </div>
+    """

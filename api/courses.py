@@ -238,6 +238,33 @@ async def get_course_students(
     report = await course_service.get_course_students(course_id=id)
     return report
 
+
+class EncargadosAssignRequest(BaseModel):
+    encargados_ids: List[str] = Field(default_factory=list)
+
+@router.put(
+    "/{id}/encargados",
+    summary="Asignar encargados a un curso"
+)
+async def assign_encargados(
+    *,
+    id: PydanticObjectId,
+    payload: EncargadosAssignRequest,
+    current_user: User = Depends(require_cpd) # <-- CPD ASIGNA ENCARGADOS
+) -> Any:
+    """Asignar encargados (Encargado de Curso/Coordinador) a un curso existente."""
+    course = await course_service.get_course(id=id)
+    if not course:
+        raise HTTPException(status_code=404, detail="Curso no encontrado")
+        
+    from services.user_service import assign_course_to_users
+    try:
+        await assign_course_to_users(course_id=id, encargados_ids=payload.encargados_ids)
+        return {"success": True, "detail": "Encargados asignados correctamente"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 # ========================================================================
 # NUEVO ENDPOINT (ISSUE R): Obtener Módulos por Docente
 # ========================================================================

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Utilidades de Zona Horaria
 ===========================
 
@@ -6,7 +6,7 @@ Funciones helper para convertir timestamps UTC a hora boliviana (UTC-4).
 
 Uso:
 ----
-from core.timezone_utils import to_bolivia_time, convert_dict_dates_to_bolivia
+from core.timezone_utils import utcnow_naive, to_bolivia_time, convert_dict_dates_to_bolivia
 
 # Convertir un datetime
 fecha_bolivia = to_bolivia_time(payment.fecha_subida)
@@ -18,11 +18,29 @@ data = convert_dict_dates_to_bolivia(
 )
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Any
 
 # Constante: Offset de Bolivia respecto a UTC
 BOLIVIA_OFFSET = timedelta(hours=-4)
+
+
+def utcnow_naive() -> datetime:
+    """
+    Retorna el datetime UTC actual SIN timezone info (naive).
+    Reemplazo compatible de `utcnow_naive()` (deprecado en Python 3.12+).
+
+    Mantener el resultado NAIVE es importante: todos los datetimes
+    almacenados en MongoDB son naive (UTC por convención del proyecto,
+    ver `tech.md` seccion 3). Mezclar datetimes aware y naive causa
+    `TypeError: can't subtract offset-naive and offset-aware datetimes`
+    al compararlos (ej: `enrollment.fecha_pago > datetime.now()`).
+
+    Si en el futuro se quiere migrar a datetimes aware, hay que hacerlo
+    de forma coordinada en TODOS los modelos + scripts de migración
+    de datos + tests. Por ahora, mantener naive es la convencion.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def to_bolivia_time(utc_dt: Optional[datetime]) -> str:

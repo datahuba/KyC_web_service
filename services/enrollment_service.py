@@ -1,4 +1,4 @@
-"""
+﻿"""
 Servicio de Inscripciones (Enrollments)
 =======================================
 
@@ -218,7 +218,7 @@ async def create_enrollment(
 
 
 async def enrich_enrollment_dates(enrollment: Enrollment) -> dict:
-    from core.timezone_utils import to_bolivia_time
+    from core.timezone_utils import utcnow_naive, to_bolivia_time
     enrollment_dict = enrollment.model_dump()
     enrollment_dict["fecha_inscripcion"] = to_bolivia_time(enrollment.fecha_inscripcion)
     enrollment_dict["created_at"] = to_bolivia_time(enrollment.created_at)
@@ -405,7 +405,7 @@ async def update_enrollment_descuento(
     # del primer save(); actualizar_saldo_enrollment recompone el definitivo
     # justo debajo a partir de los pagos históricos reales.
     enrollment.saldo_pendiente = round(max(0.0, total_final - enrollment.total_pagado), 2)
-    enrollment.updated_at = datetime.utcnow()
+    enrollment.updated_at = utcnow_naive()
     
     await enrollment.save()
 
@@ -447,7 +447,7 @@ async def cambiar_estado_enrollment(
         )
 
     enrollment.estado = nuevo_estado
-    enrollment.updated_at = datetime.utcnow()
+    enrollment.updated_at = utcnow_naive()
     
     await enrollment.save()
     return enrollment
@@ -544,7 +544,7 @@ async def actualizar_saldo_enrollment(
         # para reportes/caja); solo se desbloquea el estado académico.
         enrollment.estado = EstadoInscripcion.ACTIVO
     
-    enrollment.updated_at = datetime.utcnow()
+    enrollment.updated_at = utcnow_naive()
     await enrollment.save()
 
 
@@ -571,13 +571,13 @@ async def otorgar_matricula_exenta(enrollment_id: PydanticObjectId, otorgado_por
 
     enrollment.matricula_exenta = True
     enrollment.matricula_exenta_otorgada_por = otorgado_por
-    enrollment.matricula_exenta_fecha = datetime.utcnow()
+    enrollment.matricula_exenta_fecha = utcnow_naive()
 
     # Desbloqueo académico inmediato (no depende de que llegue un pago nuevo)
     if enrollment.estado == EstadoInscripcion.PENDIENTE_PAGO:
         enrollment.estado = EstadoInscripcion.ACTIVO
 
-    enrollment.updated_at = datetime.utcnow()
+    enrollment.updated_at = utcnow_naive()
     await enrollment.save()
     return enrollment
 
@@ -601,7 +601,7 @@ async def revocar_matricula_exenta(enrollment_id: PydanticObjectId) -> Enrollmen
     if not enrollment.matricula_pagada and enrollment.estado == EstadoInscripcion.ACTIVO:
         enrollment.estado = EstadoInscripcion.PENDIENTE_PAGO
 
-    enrollment.updated_at = datetime.utcnow()
+    enrollment.updated_at = utcnow_naive()
     await enrollment.save()
     return enrollment
 
@@ -658,7 +658,7 @@ async def actualizar_nota_modulo(
         )
         enrollment.saldo_pendiente = round(max(0.0, enrollment.total_a_pagar - enrollment.total_pagado), 2)
 
-    enrollment.updated_at = datetime.utcnow()
+    enrollment.updated_at = utcnow_naive()
     await enrollment.save()
 
     if recalculo_necesario:
@@ -692,7 +692,7 @@ async def subir_nota_borrador(
     modulo = enrollment.modulos[modulo_index]
     modulo.nota_borrador = round(nota_borrador, 2)
     modulo.estado_validacion_nota = "pendiente_validacion"
-    enrollment.updated_at = datetime.utcnow()
+    enrollment.updated_at = utcnow_naive()
     await enrollment.save()
     return enrollment
 
@@ -799,6 +799,6 @@ async def rechazar_nota_borrador(
 
     modulo.nota_borrador = None
     modulo.estado_validacion_nota = "sin_borrador"
-    enrollment.updated_at = datetime.utcnow()
+    enrollment.updated_at = utcnow_naive()
     await enrollment.save()
     return enrollment

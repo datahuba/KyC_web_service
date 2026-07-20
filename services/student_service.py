@@ -1,4 +1,4 @@
-"""
+﻿"""
 Servicio de Estudiantes
 =======================
 
@@ -79,11 +79,11 @@ async def accept_terms(student: Student) -> Student:
     Idempotente: si ya había aceptado antes, no pisa la fecha original
     de la primera aceptación (se conserva como evidencia histórica).
     """
-    from datetime import datetime
+    from core.timezone_utils import utcnow_naive
 
     if not student.terminos_aceptados:
         student.terminos_aceptados = True
-        student.fecha_aceptacion_terminos = datetime.utcnow()
+        student.fecha_aceptacion_terminos = utcnow_naive()
         await student.save()
 
     return student
@@ -315,6 +315,7 @@ def _parse_fecha_nacimiento(value):
     Devuelve un datetime o None si no se pudo parsear.
     """
     from datetime import datetime as _dt
+    from core.timezone_utils import utcnow_naive
 
     if value is None:
         return None
@@ -779,7 +780,7 @@ async def import_students_from_excel(
 
     if curso_id and inserted_ids:
         import asyncio
-        from datetime import datetime
+        from core.timezone_utils import utcnow_naive
         from models.course import Course
         from models.payment import Payment
         from models.enums import EstadoPago
@@ -862,7 +863,7 @@ async def import_students_from_excel(
                                 fecha_comprobante=None,
                                 cuenta_destino="Importación Masiva",
                                 estado_pago=EstadoPago.APROBADO,
-                                fecha_verificacion=datetime.utcnow(),
+                                fecha_verificacion=utcnow_naive(),
                                 verificado_por="import_masivo",
                             ))
 

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Servicio de Solicitudes de Cuenta (Account Requests)
 ====================================================
 
@@ -7,6 +7,7 @@ Flujo: solicitud pública -> notificación al CPD -> aprobación (crea Student) 
 
 from typing import List, Optional
 from datetime import datetime
+from core.timezone_utils import utcnow_naive
 from beanie import PydanticObjectId
 from beanie.operators import Or
 
@@ -143,7 +144,7 @@ async def approve_account_request(request_id: PydanticObjectId, admin_username: 
 
     solicitud.estado = "aprobado"
     solicitud.revisado_por = admin_username
-    solicitud.fecha_revision = datetime.utcnow()
+    solicitud.fecha_revision = utcnow_naive()
     solicitud.estudiante_id = student.id
     await solicitud.save()
 
@@ -180,6 +181,6 @@ async def reject_account_request(
     solicitud.estado = "rechazado"
     solicitud.motivo_rechazo = motivo
     solicitud.revisado_por = admin_username
-    solicitud.fecha_revision = datetime.utcnow()
+    solicitud.fecha_revision = utcnow_naive()
     await solicitud.save()
     return solicitud

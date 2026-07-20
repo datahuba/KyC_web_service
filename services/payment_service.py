@@ -1,4 +1,4 @@
-"""
+﻿"""
 Servicio de Pagos (Payments)
 ============================
 
@@ -19,6 +19,7 @@ from beanie import PydanticObjectId
 from beanie.operators import In, Or
 from beanie.exceptions import RevisionIdWasChanged
 from services import enrollment_service
+from core.timezone_utils import utcnow_naive, to_bolivia_time
 
 # ISSUE-P-REVERSION: ventana en la que el banco puede revertir una transferencia ya aprobada
 VENTANA_REVERSION_HORAS = 48
@@ -37,7 +38,7 @@ def _calcular_en_ventana_reversion(payment: Payment) -> bool:
     if not payment.fecha_verificacion:
         return False
     limite = payment.fecha_verificacion + timedelta(hours=VENTANA_REVERSION_HORAS)
-    return datetime.utcnow() < limite
+    return utcnow_naive() < limite
 
 # ========================================================================
 # MOTOR DE AUDITORÍA FINANCIERA
@@ -55,7 +56,7 @@ async def _registrar_auditoria_financiera(
     """
     try:
         print(
-            f"[AUDIT TRAIL] [{datetime.utcnow()}] ACCIÓN: {accion} | "
+            f"[AUDIT TRAIL] [{utcnow_naive()}] ACCIÓN: {accion} | "
             f"ADMIN: {admin_username} | PAGO_ID: {payment_id} | "
             f"ESTUDIANTE_ID: {estudiante_id} | MONTO: Bs. {monto} | "
             f"DETALLE: {detalles}"
@@ -66,11 +67,10 @@ async def _registrar_auditoria_financiera(
 
 async def enrich_payment_with_details(payment: Payment) -> dict:
     payment_dict = payment.model_dump(by_alias=True)
-    
+
     student = await Student.get(payment.estudiante_id)
     nombre_estudiante = student.nombre if student and student.nombre else "Sin nombre"
-    
-    from core.timezone_utils import to_bolivia_time
+
     fecha = to_bolivia_time(payment.fecha_subida)
     created_at_bolivia = to_bolivia_time(payment.created_at)
     updated_at_bolivia = to_bolivia_time(payment.updated_at)
@@ -112,8 +112,6 @@ async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dic
 
     students_map = {s.id: s for s in students}
     enrollments_map = {e.id: e for e in enrollments}
-
-    from core.timezone_utils import to_bolivia_time
 
     enriched_list = []
     for payment in payments:
@@ -359,26 +357,52 @@ async def get_all_payments(
             query_dict["concepto"] = {"$not": {"$regex": "matricula|matrícula", "$options": "i"}}
             
     if q:
-        regex_pattern = {"$regex": q, "$options": "i"}
-        
-        matching_students = await Student.find(
-            Or(
-                Student.nombre == regex_pattern,
-                Student.registro == regex_pattern,
-                Student.carnet == regex_pattern,
-                Student.email == regex_pattern
-            )
-        ).to_list()
-        
-        matching_student_ids = [s.id for s in matching_students]
+        # BUG 8 FIX: el Or de Beanie con `==` comparaba un dict de regex contra
+        # un string, por lo que NUNCA encontraba estudiantes (solo coincidía si
+        # el nombre era literalmente el dict, lo cual es imposible). Se reemplaza
+        # por RegEx de Beanie, que arma correctamente la consulta Mongo
+        # `{$regex: q, $options: "i"}` para los 4 campos del estudiante.
+        from beanie.operators import RegEx
+        regex_q = q.strip()
+        if not regex_q:
+            # cadena vacía tras trim: no aplicar filtro de búsqueda libre
+            pass
+        else:
+            matching_students = await Student.find(
+                Or(
+                    RegEx(Student.nombre, regex_q, "i"),
+                    RegEx(Student.registro, regex_q, "i"),
+                    RegEx(Student.carnet, regex_q, "i"),
+                    RegEx(Student.email, regex_q, "i"),
+                )
+            ).to_list()
 
-        query_dict["$or"] = [
-            {"numero_transaccion": regex_pattern},
-            {"concepto": regex_pattern},
-            {"remitente": regex_pattern},
-            {"banco": regex_pattern},
-            {"estudiante_id": {"$in": matching_student_ids}}
-        ]
+            matching_student_ids = [s.id for s in matching_students]
+
+            # $or ya no puede vivir en el mismo nivel si hay otros filtros
+            # restrictivos; Mongo lo rechaza con "already has $or" si se mete
+            # en query_dict después de haber establecido $and/u otras claves
+            # iguales. La forma correcta es $and a nivel raíz.
+            or_filters = [
+                {"numero_transaccion": {"$regex": regex_q, "$options": "i"}},
+                {"concepto": {"$regex": regex_q, "$options": "i"}},
+                {"remitente": {"$regex": regex_q, "$options": "i"}},
+                {"banco": {"$regex": regex_q, "$options": "i"}},
+                {"estudiante_id": {"$in": matching_student_ids}},
+            ]
+            # Combinar con cualquier $and previo (cursos_permitidos, etc.)
+            if "$and" in query_dict:
+                query_dict["$and"].append({"$or": or_filters})
+            elif any(k in query_dict for k in ("estado_pago", "estudiante_id", "inscripcion_id", "curso_id", "concepto")):
+                # Hay otros filtros: hay que envolverlos en $and para que convivan con $or
+                other_filters = {k: v for k, v in query_dict.items() if k != "$or"}
+                query_dict.clear()
+                query_dict["$and"] = [
+                    other_filters,
+                    {"$or": or_filters},
+                ]
+            else:
+                query_dict["$or"] = or_filters
     
     total_count = await Payment.find(query_dict).count()
     skip = (page - 1) * per_page
@@ -872,13 +896,13 @@ async def create_caja_directo_payment(
         remitente=remitente,
         banco="Caja Física",
         monto_comprobante=cantidad_pago,
-        fecha_comprobante=datetime.utcnow(),
+        fecha_comprobante=utcnow_naive(),
         cuenta_destino=cuenta_destino or f"Caja Física - {admin_username}",
         estado_pago=EstadoPago.APROBADO
     )
     
     # Sellar la verificación automática de caja
-    payment.fecha_verificacion = datetime.utcnow()
+    payment.fecha_verificacion = utcnow_naive()
     payment.verificado_por = admin_username
     
     await payment.insert()

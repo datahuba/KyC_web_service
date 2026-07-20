@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from api import students, courses, enrollments, payments, discounts, users, auth, payment_config, classroom, notifications, account_requests, passive_requests, bank_statements, enrollment_requests, dashboard
+from api import students, courses, enrollments, payments, discounts, users, auth, payment_config, classroom, notifications, account_requests, passive_requests, bank_statements, enrollment_requests, dashboard, pre_registrations
 
 api_router = APIRouter()
 
@@ -18,3 +18,5 @@ api_router.include_router(passive_requests.router, prefix="/passive-requests", t
 api_router.include_router(bank_statements.router, prefix="/bank-statements", tags=["bank-statements"])
 api_router.include_router(enrollment_requests.router, prefix="/enrollment-requests", tags=["enrollment-requests"])
 api_router.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
+# ISSUE-Q-PRE-REGISTRO-FORM (2026-07-17): formularios dinámicos de pre-inscripción.
+api_router.include_router(pre_registrations.router, prefix="/pre-registrations", tags=["pre-registrations"])

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Modelo de Requisito (Embedded Document)
 =======================================
 
@@ -9,6 +9,7 @@ Este modelo NO es un Document de MongoDB, es un subdocumento embebido.
 from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
+from core.timezone_utils import utcnow_naive
 from models.enums import EstadoRequisito
 
 
@@ -87,7 +88,7 @@ class Requisito(BaseModel):
         """
         self.url = url
         self.estado = EstadoRequisito.EN_PROCESO
-        self.fecha_subida = datetime.utcnow()
+        self.fecha_subida = utcnow_naive()
         self.motivo_rechazo = None  # Limpiar rechazo anterior
     
     def aprobar(self, admin_username: str) -> None:

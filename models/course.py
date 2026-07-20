@@ -1,4 +1,4 @@
-"""
+﻿"""
 Modelo de Curso
 ===============
 
@@ -250,7 +250,7 @@ class Course(MongoBaseModel):
 
     class Config:
         """Configuración y ejemplo de uso"""
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "codigo": "DIPL-2024-001",
                 "nombre_programa": "Diplomado en Ciencia de Datos",

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Utilidades Base y Tipos Personalizados
 ======================================
 
@@ -7,6 +7,7 @@ Ahora utiliza **Beanie ODM** para integración directa con MongoDB.
 """
 
 from datetime import datetime
+from core.timezone_utils import utcnow_naive
 from typing import Optional
 from pydantic import Field
 from beanie import Document, PydanticObjectId
@@ -40,7 +41,7 @@ class MongoBaseModel(Document):
     
     async def save(self, *args, **kwargs):
         """Sobrescribe save para actualizar updated_at"""
-        self.updated_at = datetime.utcnow()
+        self.updated_at = utcnow_naive()
         return await super().save(*args, **kwargs)
     
     class Settings:

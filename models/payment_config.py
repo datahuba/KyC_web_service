@@ -1,4 +1,4 @@
-"""
+﻿"""
 Modelo de Configuración de Pagos
 =================================
 
@@ -9,6 +9,7 @@ Colección MongoDB: payment_config
 """
 
 from datetime import datetime
+from core.timezone_utils import utcnow_naive
 from typing import Optional
 from pydantic import Field
 from .base import MongoBaseModel
@@ -128,7 +129,7 @@ class PaymentConfig(MongoBaseModel):
         if tipo_cuenta is not None:
             self.tipo_cuenta = tipo_cuenta
         self.actualizado_por = admin_username
-        self.updated_at = datetime.utcnow()
+        self.updated_at = utcnow_naive()
     
     def actualizar_qr(self, qr_url: str, admin_username: str):
         """
@@ -140,7 +141,7 @@ class PaymentConfig(MongoBaseModel):
         """
         self.qr_url = qr_url
         self.actualizado_por = admin_username
-        self.updated_at = datetime.utcnow()
+        self.updated_at = utcnow_naive()
     
     class Settings:
         name = "payment_config"

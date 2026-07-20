@@ -1,4 +1,4 @@
-"""
+﻿"""
 Modelo de Descuento
 ==================
 
@@ -98,9 +98,9 @@ class Discount(MongoBaseModel):
     
     porcentaje: float = Field(
         ...,
-        ge=0,
+        gt=0.0,
         le=100,
-        description="Porcentaje de descuento (0-100)"
+        description="Porcentaje de descuento (>0 y <=100). BUG 9: descuentos 0% eran inútiles, ahora se bloquean en validación Pydantic."
     )
     
     # ========================================================================
@@ -250,7 +250,7 @@ class Discount(MongoBaseModel):
 
     class Config:
         """Configuración y ejemplos de uso"""
-        schema_extra = {
+        json_schema_extra = {
             "examples": [
                 {
                     "nombre": "Beca Excelencia Académica",
