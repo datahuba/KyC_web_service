@@ -138,15 +138,22 @@ async def get_form_by_id(form_id: PydanticObjectId) -> Optional[PreRegistrationF
 
 
 async def delete_form(form_id: PydanticObjectId) -> None:
-    """Eliminar un formulario. Solo super admin. Falla si tiene submissions."""
+    """Eliminar un formulario. Solo super admin. Falla si tiene submissions activas.
+
+    BUG-PRE-001: solo cuentan las submissions con estado != 'rechazado'.
+    Las rechazadas se mantienen por trazabilidad pero no bloquean el delete.
+    """
     form = await PreRegistrationForm.get(form_id)
     if not form:
         raise ValueError("Formulario no encontrado.")
-    submissions_count = await PreRegistration.find(PreRegistration.form_id == form_id).count()
-    if submissions_count > 0:
+    active_submissions_count = await PreRegistration.find(
+        PreRegistration.form_id == form_id,
+        PreRegistration.estado != "rechazado",
+    ).count()
+    if active_submissions_count > 0:
         raise ValueError(
-            f"No se puede eliminar: el formulario tiene {submissions_count} respuesta(s). "
-            "Cerralo en vez de eliminarlo, o rechazá/archivá las submissions primero."
+            f"No se puede eliminar: el formulario tiene {active_submissions_count} respuesta(s) activa(s). "
+            "Rechazá las submissions pendientes/aprobadas primero, o cerralo en vez de eliminarlo."
         )
     await form.delete()
 
