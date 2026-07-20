@@ -26,7 +26,7 @@ docs/muestras/
 # Scripts de debugging/auditoria efimeros (raiz del repo). Si necesitas
 # uno persistente, moverlo a scripts/ y darle nombre descriptivo.
 check_*.py
-test_*.py
+/test_*.py
 cleanup_*.py
 create_ui_*.py
 get_token.py
