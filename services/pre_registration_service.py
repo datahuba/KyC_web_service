@@ -138,23 +138,43 @@ async def get_form_by_id(form_id: PydanticObjectId) -> Optional[PreRegistrationF
 
 
 async def delete_form(form_id: PydanticObjectId) -> None:
-    """Eliminar un formulario. Solo super admin. Falla si tiene submissions activas.
+    """Eliminar un formulario. Solo super admin.
 
-    BUG-PRE-001: solo cuentan las submissions con estado != 'rechazado'.
-    Las rechazadas se mantienen por trazabilidad pero no bloquean el delete.
+    BUG-PRE-002: solo bloquea si hay submissions con estado='pendiente'
+    (las únicas que aún esperan revisión). Las aprobadas y rechazadas son
+    data histórica — al eliminar el form, se eliminan en cascada.
+
+    Pendientes → BLOQUEAN (probablemente data importante, esperar revisión)
+    Aprobadas   → NO bloquean, se eliminan en cascada
+    Rechazadas  → NO bloquean, se eliminan en cascada
     """
     form = await PreRegistrationForm.get(form_id)
     if not form:
         raise ValueError("Formulario no encontrado.")
-    active_submissions_count = await PreRegistration.find(
+
+    # Contar pendientes (las únicas que bloquean)
+    pending_count = await PreRegistration.find(
         PreRegistration.form_id == form_id,
-        PreRegistration.estado != "rechazado",
+        PreRegistration.estado == "pendiente",
     ).count()
-    if active_submissions_count > 0:
+    if pending_count > 0:
         raise ValueError(
-            f"No se puede eliminar: el formulario tiene {active_submissions_count} respuesta(s) activa(s). "
-            "Rechazá las submissions pendientes/aprobadas primero, o cerralo en vez de eliminarlo."
+            f"No se puede eliminar: el formulario tiene {pending_count} submission(s) pendiente(s) de revisar. "
+            "Aprobá o rechazá esas submissions primero, o cerrá el formulario en vez de eliminarlo."
         )
+
+    # Contar submissions históricas (aprobadas + rechazadas) — se eliminarán en cascada
+    historical_count = await PreRegistration.find(
+        PreRegistration.form_id == form_id,
+        PreRegistration.estado != "pendiente",
+    ).count()
+
+    # Eliminar submissions históricas en cascada
+    if historical_count > 0:
+        await PreRegistration.find(
+            PreRegistration.form_id == form_id,
+        ).delete()
+
     await form.delete()
 
 
