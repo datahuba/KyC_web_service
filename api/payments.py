@@ -715,6 +715,7 @@ async def get_reporte_caja_endpoint(
     fecha_desde: Optional[str] = Query(None, description="Fecha inicio (YYYY-MM-DD)"),
     fecha_hasta: Optional[str] = Query(None, description="Fecha fin (YYYY-MM-DD)"),
     curso_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por curso"),
+    estudiante_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por estudiante (F-COBRANZA-003)"),
     estado: Optional[str] = Query(None, description="Filtrar por estado del pago"),
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=200),
@@ -725,6 +726,9 @@ async def get_reporte_caja_endpoint(
     fechas (fecha real del pago), curso y edición de programa. Devuelve la
     página solicitada + totales agregados de TODO el rango filtrado (no solo
     la página actual) para el resumen visual encima de la tabla.
+
+    F-COBRANZA-003 (2026-07-21): filtro opcional por estudiante_id.
+    Permite ver todos los pagos de un estudiante específico en el rango.
     """
     # CPD excluido: los reportes de caja son económicos (regla del usuario:
     # "económico solo cobranza y el coordinador financiero"; CPD solo audita la
@@ -748,6 +752,7 @@ async def get_reporte_caja_endpoint(
         page=page,
         per_page=per_page,
         curso_id=curso_id,
+        estudiante_id=estudiante_id,  # F-COBRANZA-003
         estado=estado,
         concepto_regex=concepto_regex,
         cursos_permitidos=cursos_permitidos
@@ -783,6 +788,7 @@ async def generar_reporte_excel_pagos(
     fecha_desde: Optional[str] = Query(None, description="Fecha inicio (YYYY-MM-DD)"),
     fecha_hasta: Optional[str] = Query(None, description="Fecha fin (YYYY-MM-DD)"),
     curso_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por curso"),
+    estudiante_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por estudiante (F-COBRANZA-003)"),
     estado: Optional[str] = Query(None, description="Filtrar por estado del pago"),
     current_user: User = Depends(require_staff)
 ):
@@ -791,7 +797,7 @@ async def generar_reporte_excel_pagos(
     from openpyxl.styles import Font, Alignment, PatternFill
     from io import BytesIO
     from models.enrollment import Enrollment
-    
+
     if not puede_ver_economico(current_user):
         raise HTTPException(status_code=403, detail="No autorizado para generar reportes")
 
@@ -806,7 +812,7 @@ async def generar_reporte_excel_pagos(
     cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
 
     criteria = payment_service._construir_filtro_reporte_caja(
-        fecha_desde_dt, fecha_hasta_dt, curso_id=curso_id, estado=estado, cursos_permitidos=cursos_permitidos
+        fecha_desde_dt, fecha_hasta_dt, curso_id=curso_id, estudiante_id=estudiante_id, estado=estado, cursos_permitidos=cursos_permitidos
     )
     if concepto_regex:
         criteria.update(concepto_regex)

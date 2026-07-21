@@ -826,6 +826,7 @@ def _construir_filtro_reporte_caja(
     curso_id: Optional[PydanticObjectId] = None,
     estado: Optional[str] = None,
     cursos_permitidos: Optional[List[PydanticObjectId]] = None,
+    estudiante_id: Optional[PydanticObjectId] = None,
 ) -> dict:
     """
     ISSUE-P-REPORTE: filtro compartido entre la tabla interactiva y el export
@@ -840,6 +841,9 @@ def _construir_filtro_reporte_caja(
     no por la fecha de aprobación/verificación en el panel"
     (steering/structure.md). El endpoint de Excel anterior filtraba solo por
     fecha_subida; se corrige aquí para ambos casos (tabla y export).
+
+    F-COBRANZA-003 (2026-07-21): filtro opcional por estudiante_id.
+    Permite ver todos los pagos de un estudiante específico.
     """
     criteria: dict = {
         "$or": [
@@ -849,6 +853,8 @@ def _construir_filtro_reporte_caja(
     }
     if curso_id:
         criteria["curso_id"] = curso_id
+    if estudiante_id:
+        criteria["estudiante_id"] = estudiante_id
     if estado and estado != "Todos los estados":
         criteria["estado_pago"] = estado
     if cursos_permitidos is not None:
@@ -873,6 +879,7 @@ async def get_reporte_caja(
     estado: Optional[str] = None,
     concepto_regex: Optional[dict] = None,
     cursos_permitidos: Optional[List[PydanticObjectId]] = None,
+    estudiante_id: Optional[PydanticObjectId] = None,
 ) -> dict:
     """
     ISSUE-P-REPORTE: tabla interactiva de ingresos por rango de fechas (fecha
@@ -880,7 +887,7 @@ async def get_reporte_caja(
     visual (no solo la lista paginada).
     """
     criteria = _construir_filtro_reporte_caja(
-        fecha_desde_dt, fecha_hasta_dt, curso_id=curso_id, estado=estado, cursos_permitidos=cursos_permitidos
+        fecha_desde_dt, fecha_hasta_dt, curso_id=curso_id, estado=estado, cursos_permitidos=cursos_permitidos, estudiante_id=estudiante_id
     )
     if concepto_regex:
         criteria.update(concepto_regex)
