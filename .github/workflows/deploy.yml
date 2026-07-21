@@ -16,8 +16,11 @@ jobs:
           # F-ACTIONS-FIX (2026-07-21): migrado de password a SSH key.
           # El VPS fue endurecido (sesión 18-19 julio) y ya no acepta password.
           # Nuevas secret keys en GitHub: VPS_SSH_HOST, VPS_SSH_USER, VPS_SSH_KEY.
-          # VPS_SSH_HOST contiene IP:puerto (ej: 84.247.181.176:2222).
+          # VPS_SSH_HOST contiene la IP (ej: 84.247.181.176).
           host: ${{ secrets.VPS_SSH_HOST }}
+          # F-ACTIONS-FIX: el VPS está en puerto 2222 (cerramos el 22).
+          # Sin este param, el action usa default 22 → connection refused.
+          port: 2222
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           # El user 'deploy' tiene sudo NOPASSWD para docker (verificado 2026-07-21).
