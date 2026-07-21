@@ -231,12 +231,12 @@ async def create_payment(
         inscripcion_id=payment_in.inscripcion_id,
         estudiante_id=enrollment.estudiante_id,
         curso_id=enrollment.curso_id,
-        
+
         metodo_pago=payment_in.metodo_pago,
         concepto=concepto_final,
         cantidad_pago=monto_real,
         numero_cuota=cuota_final,
-        
+
         numero_transaccion=payment_in.numero_transaccion,
         comprobante_url=payment_in.comprobante_url,
         remitente=payment_in.remitente,
@@ -244,61 +244,120 @@ async def create_payment(
         monto_comprobante=monto_real,
         fecha_comprobante=payment_in.fecha_comprobante,
         cuenta_destino=payment_in.cuenta_destino,
-        
-        estado_pago=EstadoPago.PENDIENTE
+
+        # F-COBRANZA-004 (2026-07-21): aprobación automática al subir comprobante.
+        # Ya no hay estado "pendiente" en el flujo principal. El coord. financiero
+        # puede RECHAZAR después si el comprobante es inválido (con reversión de
+        # saldo). Esto reduce la fricción operativa: en producción las 48h de
+        # espera generaban desconfianza en los estudiantes y retrasaban la
+        # conciliación con el extracto bancario.
+        estado_pago=EstadoPago.APROBADO,
+        verificado_por=None,  # se setea más abajo
     )
-    
+    # Setear fecha_verificacion y verificado_por manualmente porque aprobar_pago()
+    # es un método de instancia que asume que ya está insertado.
+    from core.timezone_utils import utcnow_naive
+    payment.fecha_verificacion = utcnow_naive()
+    payment.verificado_por = "SISTEMA (auto-aprobación)"
+
     await payment.insert()
-    
-    # [NOTIFICACIONES - ISSUE-U-BUZON]
-    # BUG CORREGIDO (reportado por el usuario: pagos/inscripciones no llegaban
-    # a las notificaciones correctas): esto SIEMPRE notificaba solo a
-    # COBRANZA, sin importar el concepto. Pero el propio sistema bloquea a
-    # Cobranza de aprobar pagos con concepto "Matrícula" (solo CPD puede,
-    # ver aprobar_pago en api/payments.py) -- un pago de Matrícula pendiente
-    # nunca le llegaba a quien realmente debía aprobarlo (CPD), y Cobranza
-    # recibía una notificación de un pago que ni siquiera podía gestionar.
-    # Ahora se notifica al rol correcto según el concepto, con el mismo
-    # criterio (regex "matr[ií]cula") usado en el resto de endpoints de
-    # pagos para mantener consistencia.
+
+    # ========================================================================
+    # F-COBRANZA-004: Efectos colaterales de la aprobación automática
+    # (los mismos que tendría aprobar_pago manualmente)
+    # ========================================================================
+
+    # 1) Actualizar saldo de la inscripción
+    try:
+        await enrollment_service.actualizar_saldo_enrollment(
+            enrollment_id=payment.inscripcion_id,
+            monto_pago_aprobado=payment.cantidad_pago
+        )
+    except Exception as e:
+        print(f"Error al actualizar saldo del enrollment tras auto-aprobación: {str(e)}")
+
+    # 2) Auditoría financiera (inmutable, obligatoria para todo movimiento)
+    await _registrar_auditoria_financiera(
+        accion="APROBACION AUTOMATICA",
+        payment_id=payment.id,
+        estudiante_id=payment.estudiante_id,
+        monto=payment.cantidad_pago,
+        admin_username="SISTEMA",
+        detalles=f"Pago auto-aprobado al subir comprobante. Concepto: {payment.concepto}, método: {payment.metodo_pago}"
+    )
+
+    # 3) Notificación al estudiante (pago aprobado)
+    try:
+        from services.notification_service import create_notification
+        await create_notification(
+            destinatario_id=payment.estudiante_id,
+            tipo_destinatario="student",
+            titulo="Pago Aprobado",
+            mensaje=f"Tu pago de Bs. {payment.cantidad_pago} por el concepto '{payment.concepto}' ha sido conciliado y aprobado de forma exitosa.",
+            tipo_alerta="success",
+            ruta="/app/payments",
+            referencia_tipo="payment",
+            referencia_id=payment.id
+        )
+    except Exception as e:
+        print(f"Error al enviar notificación de pago aprobado: {str(e)}")
+
+    # 4) Email real al estudiante (no bloqueante)
+    try:
+        from models.student import Student as _Student
+        from core.email_utils import send_email, build_pago_aprobado_email
+        from core.config import settings
+
+        _est = await _Student.get(payment.estudiante_id)
+        if _est and _est.email:
+            portal_link = f"{settings.FRONTEND_URL.rstrip('/')}/app/payments"
+            html = build_pago_aprobado_email(
+                nombre=_est.nombre or _est.registro,
+                concepto=payment.concepto,
+                monto=payment.cantidad_pago,
+                portal_link=portal_link
+            )
+            await send_email(_est.email, "Pago Aprobado · Posgrado UAGRM", html)
+    except Exception as e:
+        print(f"Error al enviar correo de pago aprobado: {str(e)}")
+
+    # 5) [NOTIFICACIONES - ISSUE-U-BUZON]
+    # Antes: "Nuevo Pago Pendiente" → ahora: "Nuevo Pago Registrado" (INFO, sin
+    # acción requerida). El coord. financiero puede RECHAZAR si detecta
+    # inconsistencia, pero la conciliación se hizo al subir el comprobante.
     try:
         from models.user import User
         from models.enums import UserRole
         from services.notification_service import create_notification
-        
+
         student_obj = await Student.get(student_id)
         student_name = student_obj.nombre if student_obj and student_obj.nombre else "Estudiante registrado"
 
-        concepto_lower = (concepto_final or "").lower().strip()
-        is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
-        rol_revisor = UserRole.CPD if is_matricula else UserRole.COBRANZA
-
         from beanie.operators import Or
-        revisores = await User.find(
+        observadores = await User.find(
             User.activo == True,
             Or(
-                User.rol == rol_revisor,
-                # Admin/Superadmin pueden aprobar cualquier pago sin importar
-                # el concepto (ver aprobar_pago en api/payments.py), así que
-                # también deben enterarse siempre, no solo el rol específico.
+                User.rol == UserRole.COBRANZA,
+                User.rol == UserRole.CPD,
+                # Admin/Superadmin ven todo
                 User.rol == UserRole.ADMIN,
                 User.rol == UserRole.SUPERADMIN
             )
         ).to_list()
-        
-        for revisor in revisores:
+
+        for obs in observadores:
             await create_notification(
-                destinatario_id=revisor.id,
+                destinatario_id=obs.id,
                 tipo_destinatario="user",
-                titulo="Nuevo Pago Pendiente",
-                mensaje=f"El estudiante {student_name} ({student_obj.registro if student_obj else ''}) ha subido un comprobante de Bs. {monto_real} por el concepto '{concepto_final}'.",
+                titulo="Nuevo Pago Registrado",
+                mensaje=f"El estudiante {student_name} ({student_obj.registro if student_obj else ''}) registró un pago de Bs. {monto_real} por el concepto '{concepto_final}'. Ya fue conciliado automáticamente.",
                 tipo_alerta="info",
                 ruta="/app/payments",
                 referencia_tipo="payment",
                 referencia_id=payment.id
             )
     except Exception as e:
-        print(f"Error al enviar notificación de pago pendiente: {str(e)}")
+        print(f"Error al enviar notificación de nuevo pago: {str(e)}")
 
     return payment
 
@@ -510,12 +569,21 @@ async def rechazar_pago(
     payment = await Payment.get(payment_id)
     if not payment:
         raise ValueError(f"Pago {payment_id} no encontrado")
-    
-    if payment.estado_pago != EstadoPago.PENDIENTE:
+
+    # F-COBRANZA-004 (2026-07-21): desde la aprobación automática, los pagos
+    # nacen en APROBADO. Por lo tanto el rechazo puede operar sobre APROBADO
+    # (caso normal) o PENDIENTE (legacy, datos anteriores al deploy). En ambos
+    # casos se rechaza con motivo, pero solo se reversa el saldo si estaba
+    # APROBADO (porque solo entonces se había acreditado al enrollment).
+    if payment.estado_pago not in (EstadoPago.APROBADO, EstadoPago.PENDIENTE):
         raise ValueError(
-            f"No se puede rechazar un pago que está en estado {payment.estado_pago}"
+            f"No se puede rechazar un pago que está en estado {payment.estado_pago}. "
+            "Solo se rechazan pagos APROBADOS o PENDIENTES (legacy)."
         )
-    
+
+    # Si estaba APROBADO, recordar para reversar el saldo después.
+    estaba_aprobado = payment.estado_pago == EstadoPago.APROBADO
+
     payment.rechazar_pago(admin_username, motivo)
     try:
         await payment.save()
@@ -526,13 +594,24 @@ async def rechazar_pago(
             "Actualiza la página e intenta de nuevo."
         )
 
+    # F-COBRANZA-004: si el pago estaba APROBADO, reversar el saldo del
+    # enrollment para mantener la consistencia contable.
+    if estaba_aprobado:
+        try:
+            await enrollment_service.actualizar_saldo_enrollment(
+                enrollment_id=payment.inscripcion_id,
+                monto_pago_aprobado=0.0  # el método recalcula desde cero
+            )
+        except Exception as e:
+            print(f"Error al reversar saldo tras rechazo de pago aprobado: {str(e)}")
+
     await _registrar_auditoria_financiera(
         accion="RECHAZAR PAGO",
         payment_id=payment.id,
         estudiante_id=payment.estudiante_id,
         monto=payment.cantidad_pago,
         admin_username=admin_username,
-        detalles=f"Rechazado. Motivo: {motivo}"
+        detalles=f"Rechazado. Motivo: {motivo}. {'(Pago estaba APROBADO — saldo reversado)' if estaba_aprobado else '(Pago estaba PENDIENTE — sin reversión de saldo)'}"
     )
     
     # [NOTIFICACIONES - ISSUE-U-BUZON]
