@@ -887,13 +887,31 @@ async def get_reporte_caja(
 
     total_count = await Payment.find(criteria).count()
     skip = (page - 1) * per_page
-    payments = await Payment.find(criteria).sort("-fecha_comprobante").skip(skip).limit(per_page).to_list()
+    payments_raw = await Payment.find(criteria).sort("-fecha_comprobante").skip(skip).limit(per_page).to_list()
 
     # Totales agregados sobre TODO el rango filtrado (no solo la página actual)
     todos_los_pagos_del_rango = await Payment.find(criteria).to_list()
     total_aprobado = sum(p.cantidad_pago for p in todos_los_pagos_del_rango if p.estado_pago == EstadoPago.APROBADO)
     total_pendiente = sum(p.cantidad_pago for p in todos_los_pagos_del_rango if p.estado_pago == EstadoPago.PENDIENTE)
     total_anulado = sum(p.cantidad_pago for p in todos_los_pagos_del_rango if p.estado_pago == EstadoPago.ANULADO)
+
+    # F-COBRANZA-005 (2026-07-21): los pagos ANULADOS ahora se reportan con
+    # monto negativo (en la lista) y se restan del total. Esto hace que el
+    # reporte cuadre con el extracto bancario sin que el usuario tenga que
+    # hacer la resta mentalmente. Auditoría: se mantienen los campos
+    # `total_aprobado`, `total_anulado` y el nuevo `total_neto` para que el
+    # contable pueda ver el desglose.
+    total_neto = round(total_aprobado - total_anulado, 2)
+
+    # En la lista de payments, los anulados se serializan con cantidad_pago
+    # en negativo. El frontend los muestra como "-X" automáticamente.
+    payments = []
+    for p in payments_raw:
+        # to_dict para no mutar el documento persistido
+        p_dict = p.model_dump(by_alias=True)
+        if p.estado_pago == EstadoPago.ANULADO and p.cantidad_pago > 0:
+            p_dict["cantidad_pago"] = -float(p.cantidad_pago)
+        payments.append(p_dict)
 
     return {
         "payments": payments,
@@ -903,6 +921,7 @@ async def get_reporte_caja(
             "total_aprobado": round(total_aprobado, 2),
             "total_pendiente": round(total_pendiente, 2),
             "total_anulado": round(total_anulado, 2),
+            "total_neto": total_neto,  # F-COBRANZA-005: cuadra con extracto bancario
         }
     }
 

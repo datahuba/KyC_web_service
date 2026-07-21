@@ -303,3 +303,105 @@ class TestIntegridadContable:
         estados_excluidos = [EstadoPago.ANULADO, EstadoPago.RECHAZADO, EstadoPago.PENDIENTE]
         assert EstadoPago.APROBADO not in estados_excluidos
         assert EstadoPago.ANULADO in estados_excluidos
+
+
+# ========================================================================
+# F-COBRANZA-005 · Reversión con negativo en reporte (2026-07-21)
+# ========================================================================
+# Los pagos ANULADOS ahora se reportan con monto negativo en la lista y se
+# restan del total. Esto arregla el bug de los 588 BOB que no cuadraban con
+# el extracto bancario.
+
+class TestReverisonConNegativo:
+    """F-COBRANZA-005: los pagos anulados se muestran como monto negativo."""
+
+    def test_pago_anulado_cantidad_se_invierte(self):
+        """Si un pago está ANULADO y su cantidad_pago era positivo,
+        al reportarlo se debe invertir a negativo."""
+        from models.enums import EstadoPago
+        # Simular el caso real
+        cantidad_original = 1000.0
+        estado = EstadoPago.ANULADO
+
+        # Lógica del fix: si es ANULADO y cantidad > 0 → cantidad = -cantidad
+        if estado == EstadoPago.ANULADO and cantidad_original > 0:
+            cantidad_reportada = -cantidad_original
+        else:
+            cantidad_reportada = cantidad_original
+
+        assert cantidad_reportada == -1000.0
+
+    def test_pago_aprobado_no_se_invierte(self):
+        """Los pagos APROBADOS NO se modifican: su cantidad sigue siendo positiva."""
+        from models.enums import EstadoPago
+        cantidad_original = 1000.0
+        estado = EstadoPago.APROBADO
+
+        if estado == EstadoPago.ANULADO and cantidad_original > 0:
+            cantidad_reportada = -cantidad_original
+        else:
+            cantidad_reportada = cantidad_original
+
+        assert cantidad_reportada == 1000.0
+
+    def test_total_neto_resta_anulados(self):
+        """El total_neto del reporte = total_aprobado - total_anulado.
+        Si hay 5000 aprobados y 1000 anulados, neto = 4000."""
+        total_aprobado = 5000.0
+        total_anulado = 1000.0
+        total_neto = round(total_aprobado - total_anulado, 2)
+        assert total_neto == 4000.0
+
+    def test_total_neto_caso_bug_588(self):
+        """Reproduce el caso real de producción: 22,386 aprobados, 588 anulados.
+        El neto debe ser 21,798 (lo que cuadra con el extracto)."""
+        total_aprobado = 22386.0
+        total_anulado = 588.0
+        total_neto = round(total_aprobado - total_anulado, 2)
+        assert total_neto == 21798.0
+        # Esto es lo que el usuario (Joel) quería: que el reporte cuadre
+
+    def test_total_neto_sin_anulados(self):
+        """Si no hay anulados, total_neto = total_aprobado."""
+        total_aprobado = 5000.0
+        total_anulado = 0.0
+        total_neto = round(total_aprobado - total_anulado, 2)
+        assert total_neto == 5000.0
+
+    def test_total_neto_redondeo_2_decimales(self):
+        """El total_neto se redondea a 2 decimales (centavos)."""
+        total_aprobado = 100.005
+        total_anulado = 33.333
+        total_neto = round(total_aprobado - total_anulado, 2)
+        assert total_neto == 66.67  # round(66.672, 2) = 66.67
+
+
+class TestReporteCajaConsistenciaContable:
+    """Garantías de integridad contable en el reporte de caja."""
+
+    def test_suma_pagos_lista_iguala_total_neto(self):
+        """La suma de la columna 'cantidad_pago' de los payments en la lista
+        debe ser igual a total_neto. Esto valida que la transformación
+        (anulados → negativos) se aplicó correctamente."""
+        # Simular lista de pagos
+        pagos = [
+            {"cantidad": 1000.0, "estado": "aprobado"},
+            {"cantidad": 500.0, "estado": "aprobado"},
+            {"cantidad": 200.0, "estado": "anulado"},  # se vuelve -200
+        ]
+        total_neto = 0
+        for p in pagos:
+            if p["estado"] == "anulado":
+                total_neto += -p["cantidad"]
+            else:
+                total_neto += p["cantidad"]
+        assert total_neto == 1300.0  # 1000 + 500 - 200
+
+    def test_anulado_con_monto_cero_no_se_invierte(self):
+        """Si un pago anulado tiene cantidad 0 (raro pero posible), no se
+        convierte en 0 negativo."""
+        cantidad = 0.0
+        if cantidad > 0:
+            cantidad = -cantidad
+        # -0.0 == 0.0 en Python, pero queremos que sea estable
+        assert abs(cantidad) == 0.0

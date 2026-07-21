@@ -707,14 +707,22 @@ async def generar_reporte_excel_pagos(
 
         course = courses_map.get(payment.curso_id)
         nombre_curso = course.nombre_programa if course else "Sin curso"
-        
+
         total_cuotas = 0
         enrollment = enrollments_map.get(payment.inscripcion_id)
         if enrollment:
             total_cuotas = enrollment.cantidad_cuotas
-        
+
         fecha_comprobante_bolivia = to_bolivia_time(payment.fecha_comprobante) if payment.fecha_comprobante else "Sin registrar"
         fecha_registro_bolivia = to_bolivia_time(payment.fecha_subida)
+
+        # F-COBRANZA-005 (2026-07-21): los pagos anulados se exportan con monto
+        # negativo en la columna "Monto", de modo que la SUMA al pie del Excel
+        # (o la fórmula SUM del usuario) coincida con el extracto bancario
+        # sin necesidad de restar manualmente.
+        monto_exportar = payment.cantidad_pago
+        if payment.estado_pago == EstadoPago.ANULADO and monto_exportar > 0:
+            monto_exportar = -monto_exportar
 
         row = [
             nombre_estudiante,
@@ -723,7 +731,7 @@ async def generar_reporte_excel_pagos(
             fecha_comprobante_bolivia,
             fecha_registro_bolivia,
             "Bs",
-            payment.cantidad_pago,
+            monto_exportar,
             payment.concepto or "",
             total_cuotas,
             payment.numero_transaccion or "Caja / S/N",
