@@ -405,3 +405,168 @@ class TestReporteCajaConsistenciaContable:
             cantidad = -cantidad
         # -0.0 == 0.0 en Python, pero queremos que sea estable
         assert abs(cantidad) == 0.0
+
+
+# ========================================================================
+# F-COBRANZA-003 · Filtro "estudiante" en reporte de caja (2026-07-21)
+# ========================================================================
+# Permite ver los pagos de un estudiante específico en el reporte de caja,
+# combinable con los demás filtros (fechas, curso, estado). El usuario pega el
+# ID del estudiante y la tabla + Excel se filtran.
+
+from beanie import PydanticObjectId
+
+
+class TestFiltroEstudianteReporteCaja:
+    """F-COBRANZA-003: filtro opcional por estudiante en el reporte de caja."""
+
+    def test_estudiante_filtro_aplicado(self):
+        """Cuando se pasa estudiante_id, el criterio de búsqueda lo incluye."""
+        from services.payment_service import _construir_filtro_reporte_caja
+        from datetime import datetime
+
+        fecha_desde = datetime(2026, 7, 1, 0, 0, 0)
+        fecha_hasta = datetime(2026, 7, 31, 23, 59, 59)
+        estudiante_id = PydanticObjectId("507f1f77bcf86cd799439011")
+
+        criterios = _construir_filtro_reporte_caja(
+            fecha_desde_dt=fecha_desde,
+            fecha_hasta_dt=fecha_hasta,
+            estudiante_id=estudiante_id,
+        )
+
+        # El filtro de estudiante debe estar presente
+        assert "estudiante_id" in criterios
+        assert criterios["estudiante_id"] == estudiante_id
+        # El filtro de fecha debe estar presente (es el $or principal)
+        assert "$or" in criterios
+
+    def test_sin_estudiante_id_no_filtra(self):
+        """Si NO se pasa estudiante_id, el filtro de estudiante NO aparece
+        en los criterios (el reporte devuelve pagos de todos)."""
+        from services.payment_service import _construir_filtro_reporte_caja
+        from datetime import datetime
+
+        fecha_desde = datetime(2026, 7, 1, 0, 0, 0)
+        fecha_hasta = datetime(2026, 7, 31, 23, 59, 59)
+
+        criterios = _construir_filtro_reporte_caja(
+            fecha_desde_dt=fecha_desde,
+            fecha_hasta_dt=fecha_hasta,
+            # sin estudiante_id
+        )
+
+        # El filtro de estudiante NO debe estar presente
+        assert "estudiante_id" not in criterios
+
+    def test_combinacion_filtros(self):
+        """Los filtros se combinan correctamente: estudiante + curso + estado."""
+        from services.payment_service import _construir_filtro_reporte_caja
+        from datetime import datetime
+
+        fecha_desde = datetime(2026, 7, 1, 0, 0, 0)
+        fecha_hasta = datetime(2026, 7, 31, 23, 59, 59)
+        estudiante_id = PydanticObjectId("507f1f77bcf86cd799439011")
+        curso_id = PydanticObjectId("507f1f77bcf86cd799439012")
+
+        criterios = _construir_filtro_reporte_caja(
+            fecha_desde_dt=fecha_desde,
+            fecha_hasta_dt=fecha_hasta,
+            curso_id=curso_id,
+            estudiante_id=estudiante_id,
+            estado="aprobado",
+        )
+
+        # Todos los filtros deben estar presentes
+        assert criterios["estudiante_id"] == estudiante_id
+        assert criterios["curso_id"] == curso_id
+        assert criterios["estado_pago"] == "aprobado"
+        # Y el filtro de fecha
+        assert "$or" in criterios
+
+    def test_estudiante_con_cursos_permitidos(self):
+        """Si el usuario tiene cursos_permitidos (Cobranza segmentada) y NO
+        se pasa curso_id específico, se filtran solo esos cursos."""
+        from services.payment_service import _construir_filtro_reporte_caja
+        from datetime import datetime
+
+        fecha_desde = datetime(2026, 7, 1, 0, 0, 0)
+        fecha_hasta = datetime(2026, 7, 31, 23, 59, 59)
+        estudiante_id = PydanticObjectId("507f1f77bcf86cd799439011")
+        curso_permitido_1 = PydanticObjectId("507f1f77bcf86cd799439012")
+        curso_permitido_2 = PydanticObjectId("507f1f77bcf86cd799439013")
+
+        criterios = _construir_filtro_reporte_caja(
+            fecha_desde_dt=fecha_desde,
+            fecha_hasta_dt=fecha_hasta,
+            estudiante_id=estudiante_id,
+            cursos_permitidos=[curso_permitido_1, curso_permitido_2],
+        )
+
+        # El filtro de estudiante está
+        assert criterios["estudiante_id"] == estudiante_id
+        # Y el de cursos permitidos
+        assert criterios["curso_id"] == {"$in": [curso_permitido_1, curso_permitido_2]}
+
+    def test_estudiante_curso_fuera_de_permitidos_retorna_vacio(self):
+        """Si se pasa un curso_id que NO está en cursos_permitidos, los
+        criterios deben forzar 0 resultados (curso_id = {"$in": []})."""
+        from services.payment_service import _construir_filtro_reporte_caja
+        from datetime import datetime
+
+        fecha_desde = datetime(2026, 7, 1, 0, 0, 0)
+        fecha_hasta = datetime(2026, 7, 31, 23, 59, 59)
+        estudiante_id = PydanticObjectId("507f1f77bcf86cd799439011")
+        curso_solicitado = PydanticObjectId("507f1f77bcf86cd799439012")
+        curso_permitido = PydanticObjectId("507f1f77bcf86cd799439099")  # otro
+
+        criterios = _construir_filtro_reporte_caja(
+            fecha_desde_dt=fecha_desde,
+            fecha_hasta_dt=fecha_hasta,
+            curso_id=curso_solicitado,
+            estudiante_id=estudiante_id,
+            cursos_permitidos=[curso_permitido],  # solo este
+        )
+
+        # El curso solicitado NO está en los permitidos → forzar 0 resultados
+        assert criterios["curso_id"] == {"$in": []}
+        # El estudiante sigue filtrando
+        assert criterios["estudiante_id"] == estudiante_id
+
+    def test_filtro_estudiante_en_endpoint_excel(self):
+        """El endpoint de Excel también acepta estudiante_id como Query param.
+        Defensa contra refactors accidentales: parseamos el código fuente
+        del router para confirmar que el param está declarado en la firma."""
+        import re
+        from pathlib import Path
+
+        api_file = Path(__file__).parent.parent / "api" / "payments.py"
+        contenido = api_file.read_text(encoding="utf-8")
+
+        # Buscar la firma de generar_reporte_excel_pagos y la siguiente Query
+        # de estudiante_id. Patrón tolerante a espacios/saltos de línea.
+        patron = (
+            r"async\s+def\s+generar_reporte_excel_pagos.*?"
+            r"estudiante_id\s*:\s*Optional\[PydanticObjectId\]\s*=\s*Query"
+        )
+        assert re.search(patron, contenido, re.DOTALL), (
+            "F-COBRANZA-003: el endpoint generar_reporte_excel_pagos debe "
+            "aceptar estudiante_id como Query param."
+        )
+
+    def test_filtro_estudiante_en_endpoint_tabla(self):
+        """El endpoint de la tabla (reporte de caja) también acepta estudiante_id."""
+        import re
+        from pathlib import Path
+
+        api_file = Path(__file__).parent.parent / "api" / "payments.py"
+        contenido = api_file.read_text(encoding="utf-8")
+
+        patron = (
+            r"async\s+def\s+get_reporte_caja_endpoint.*?"
+            r"estudiante_id\s*:\s*Optional\[PydanticObjectId\]\s*=\s*Query"
+        )
+        assert re.search(patron, contenido, re.DOTALL), (
+            "F-COBRANZA-003: el endpoint get_reporte_caja_endpoint debe "
+            "aceptar estudiante_id como Query param."
+        )
