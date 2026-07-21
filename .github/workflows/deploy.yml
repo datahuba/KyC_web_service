@@ -27,6 +27,10 @@ jobs:
           # El host de la key es el de deploy_user; el de 'root' no acepta key-based.
           command_timeout: 15m
           script: |
+            # F-ACTIONS-FIX (2026-07-21): todo el script se ejecuta con sudo.
+            # El user 'deploy' tiene sudo NOPASSWD pero no puede acceder
+            # directamente a /root/ (permisos del filesystem).
+            sudo -n bash << 'REMOTE_EOF'
             set -e
             echo "📥 === SINCRONIZACIÓN NUCLEAR BACKEND === 📥"
             # ISSUE-MIGRACION (2026-07-17): movido de /var/www/backend a /root/postgrado/backend
@@ -51,16 +55,17 @@ jobs:
 
             echo "🚀 === RECONSTRUYENDO DOCKER === 🚀"
             cd /root/postgrado
-            sudo docker compose build --no-cache backend
+            docker compose build --no-cache backend
 
             echo "🔄 === REINICIANDO BACKEND === 🔄"
-            sudo docker compose up -d --no-deps --force-recreate backend
+            docker compose up -d --no-deps --force-recreate backend
             sleep 3
-            sudo docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.CreatedAt}}' | grep -E 'kyc-backend|postgrado-backend' || echo "WARN: kyc-backend no encontrado en docker ps"
+            docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.CreatedAt}}' | grep -E 'kyc-backend|postgrado-backend' || echo "WARN: kyc-backend no encontrado en docker ps"
 
             echo "🧹 === LIMPIEZA DE IMÁGENES HUÉRFANAS === 🧹"
             # Elimina de forma segura imágenes colgantes (<none>:<none>) creadas en la compilación para liberar espacio
-            sudo docker image prune -f
+            docker image prune -f
 
             echo "✅ DEPLOY COMPLETADO"
-            sudo docker logs kyc-backend --tail 5
+            docker logs kyc-backend --tail 5
+            REMOTE_EOF
