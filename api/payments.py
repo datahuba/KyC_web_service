@@ -385,6 +385,150 @@ async def anular_pago(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.post(
+    "/{id}/upload-by-encargado",
+    response_model=PaymentResponse,
+    summary="Subir Comprobante de Pago (Encargado de Programa)"
+)
+async def upload_comprobante_by_encargado(
+    *,
+    id: PydanticObjectId,
+    file: UploadFile = File(..., description="Comprobante de pago (imagen o PDF)"),
+    numero_transaccion: Optional[str] = Form(None, description="Número de transacción (opcional)"),
+    remitente: Optional[str] = Form(None, description="Remitente del pago (opcional)"),
+    fecha_comprobante: Optional[str] = Form(None, description="Fecha del comprobante (YYYY-MM-DD, opcional)"),
+    current_user: User = Depends(require_staff)
+) -> Any:
+    """
+    F-COBRANZA-011 (2026-07-21): el encargado del programa puede subir el
+    comprobante de pago del estudiante cuando este no puede hacerlo por
+    sí mismo (problemas técnicos, falta de acceso, etc.).
+
+    Roles permitidos: SUPERADMIN, ADMIN, COORDINADOR, ENCARGADO_CURSO, CPD, COBRANZA.
+    Roles NO permitidos: DOCENTE, ESTUDIANTE.
+
+    Diferencias vs `create_payment`:
+    - El pago YA EXISTE (creado por el estudiante con o sin comprobante).
+    - Solo se actualiza el comprobante_url y datos opcionales.
+    - Se registra en auditoría con `subido_por=encargado_id`.
+    - El estudiante ve en su perfil quién subió el comprobante.
+    """
+    # 1. Validar rol: encargado, coordinador, o staff financiero.
+    roles_permitidos = ["superadmin", "admin", "cobranza", "cpd", "encargado_curso", "coordinador"]
+    if current_user.rol not in roles_permitidos:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Su rol ({current_user.rol}) no puede subir comprobantes en nombre de estudiantes."
+        )
+
+    # 2. Obtener el pago
+    payment = await payment_service.get_payment(id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+
+    # 3. ISSUE-P-SEGMENTACION: encargado con cursos_asignados solo puede
+    #    subir comprobantes de SUS cursos asignados.
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    if filtro_rol and payment.curso_id not in filtro_rol["curso_id"]["$in"]:
+        raise HTTPException(
+            status_code=403,
+            detail="No tienes asignado el curso de este pago"
+        )
+
+    # 4. Validar que el pago no esté anulado
+    if payment.estado_pago == EstadoPago.ANULADO:
+        raise HTTPException(
+            status_code=400,
+            detail="No se puede subir comprobante a un pago anulado."
+        )
+
+    # 5. Subir el archivo a Cloudinary
+    from core.cloudinary_utils import upload_image, upload_pdf
+    folder = f"payments/{payment.estudiante_id}"
+    safe_transaction = (numero_transaccion or f"encargado_{current_user.id}").replace(' ', '_').replace('/', '_')
+    public_id = f"voucher_{safe_transaction}"
+
+    image_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
+    pdf_type = "application/pdf"
+
+    try:
+        if file.content_type in image_types:
+            comprobante_url = await upload_image(file, folder, public_id)
+        elif file.content_type == pdf_type:
+            from core.cloudinary_utils import upload_pdf
+            comprobante_url = await upload_pdf(file, folder, public_id)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tipo de archivo no soportado: {file.content_type}. Use JPEG, PNG, WEBP o PDF."
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al subir el archivo: {str(e)}"
+        )
+
+    # 6. Actualizar el pago
+    from datetime import datetime
+    from core.timezone_utils import utcnow_naive
+    try:
+        update_dict = {
+            "comprobante_url": comprobante_url,
+            "updated_at": utcnow_naive()
+        }
+        if numero_transaccion:
+            update_dict["numero_transaccion"] = numero_transaccion
+        if remitente:
+            update_dict["remitente"] = remitente
+        if fecha_comprobante:
+            try:
+                update_dict["fecha_comprobante"] = datetime.strptime(fecha_comprobante, "%Y-%m-%d")
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="fecha_comprobante debe tener formato YYYY-MM-DD"
+                )
+
+        await Payment.find_one({"_id": id}).update({"$set": update_dict})
+
+        # Re-leer el pago actualizado
+        payment = await payment_service.get_payment(id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al actualizar el pago: {str(e)}")
+
+    # 7. Audit log
+    await payment_service._registrar_auditoria_financiera(
+        accion="UPLOAD COMPROBANTE BY ENCARGADO",
+        payment_id=payment.id,
+        estudiante_id=payment.estudiante_id,
+        monto=payment.cantidad_pago,
+        admin_username=current_user.nombre_visible,
+        detalles=f"Comprobante subido por {current_user.nombre_visible} (rol={current_user.rol}) en nombre del estudiante. URL={comprobante_url[:80]}..."
+    )
+
+    # 8. Notificar al estudiante
+    try:
+        from services.notification_service import create_notification
+        await create_notification(
+            destinatario_id=payment.estudiante_id,
+            tipo_destinatario="student",
+            titulo="Comprobante subido por tu encargado",
+            mensaje=f"El encargado {current_user.nombre_visible} subió el comprobante de tu pago de Bs. {payment.cantidad_pago} por el concepto '{payment.concepto}'.",
+            tipo_alerta="info",
+            ruta="/app/payments",
+            referencia_tipo="payment",
+            referencia_id=payment.id
+        )
+    except Exception as e:
+        print(f"Error al enviar notificación de comprobante subido: {str(e)}")
+
+    return await payment_service.enrich_payment_with_details(payment)
+
+
 @router.delete(
     "/{id}",
     summary="Eliminar Pago (Borrado Definitivo)"
