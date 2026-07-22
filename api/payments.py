@@ -1216,8 +1216,13 @@ async def generar_reporte_pdf_caja(
         student = _g2("estudiante") or {}
         course = _g2("course") or {}
         ci = (student.get("carnet_identidad") or student.get("registro") or "").strip()
-        fecha = to_bolivia_time(_g2("fecha_subida"))
-        fecha_str = fecha.strftime("%d/%m/%Y") if fecha else "Sin fecha"
+        # to_bolivia_time retorna STRING ya formateado (ej "22/07/2026 14:30").
+        # Si retorna None (no hay fecha), mostrar "Sin fecha".
+        fecha = _g2("fecha_subida")
+        if fecha:
+            fecha_str = to_bolivia_time(fecha) if hasattr(fecha, 'isoformat') else str(fecha)
+        else:
+            fecha_str = "Sin fecha"
         monto = float(_g2("cantidad_pago", 0))
         estado_pago = _g2("estado_pago", "")
         # Anulados: mostrar como negativo (mismo criterio que el XLSX)
