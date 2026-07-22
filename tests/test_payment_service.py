@@ -1371,3 +1371,82 @@ class TestF031EnrichAceptaDicts:
         # Asi que el endpoint puede pasar la lista de dicts directamente
 
 
+class TestF034ByStaffSkipOwnershipCheck:
+    """
+    F-COBRANZA-034 (2026-07-22): bug reportado por Lic. Sandra Zabala.
+    El endpoint POST /payments/by-staff fallaba con 400 + mensaje
+    "No puedes crear un pago para una inscripcion que no te pertenece"
+    porque:
+      1) estudiante_id llega como STRING del Form
+      2) enrollment.estudiante_id es PydanticObjectId
+      3) La comparacion str != PydanticObjectId siempre es True
+      4) El check bloqueaba a cobranza/admin/superadmin de registrar
+         pagos en nombre de cualquier estudiante.
+
+    Fix: agregar parametro skip_ownership_check a create_payment
+    (default False, para que el endpoint del estudiante siga validando)
+    y pasarlo como True desde el endpoint by-staff.
+    """
+
+    @pytest.fixture
+    def service_src(self):
+        from pathlib import Path
+        return Path("services/payment_service.py")
+
+    @pytest.fixture
+    def payments_src(self):
+        from pathlib import Path
+        return Path("api/payments.py")
+
+    def test_create_payment_signature_has_skip_ownership_check(self, service_src):
+        """create_payment debe aceptar el parametro skip_ownership_check."""
+        idx = service_src.read_text(encoding="utf-8").find("async def create_payment")
+        bloque = service_src.read_text(encoding="utf-8")[idx:idx + 800]
+        assert "skip_ownership_check" in bloque, (
+            "create_payment debe tener el parametro skip_ownership_check "
+            "para que el endpoint /payments/by-staff pueda saltar el check "
+            "de 'la inscripcion pertenece al estudiante'"
+        )
+
+    def test_create_payment_skip_ownership_check_default_false(self, service_src):
+        """skip_ownership_check debe tener default False (el endpoint del estudiante sigue validando)."""
+        idx = service_src.read_text(encoding="utf-8").find("async def create_payment")
+        bloque = service_src.read_text(encoding="utf-8")[idx:idx + 800]
+        assert "skip_ownership_check: bool = False" in bloque, (
+            "skip_ownership_check debe ser opcional con default False para "
+            "que el endpoint del estudiante siga rechazando pagos a inscripciones ajenas"
+        )
+
+    def test_create_payment_check_envuelve_con_skip(self, service_src):
+        """El check enrollment.estudiante_id != student_id debe estar envuelto en `if not skip_ownership_check`."""
+        idx = service_src.read_text(encoding="utf-8").find("async def create_payment")
+        bloque = service_src.read_text(encoding="utf-8")[idx:idx + 2000]
+        # Verificar que el check esta dentro de un `if not skip_ownership_check`
+        assert "if not skip_ownership_check" in bloque, (
+            "El check debe estar condicionado a skip_ownership_check=False. "
+            "Si no, el endpoint by-staff seguira fallando con 'no te pertenece'."
+        )
+
+    def test_by_staff_endpoint_pasa_skip_true(self, payments_src):
+        """El endpoint by-staff debe pasar skip_ownership_check=True."""
+        idx = payments_src.read_text(encoding="utf-8").find("async def create_payment_by_staff")
+        bloque = payments_src.read_text(encoding="utf-8")[idx:idx + 6000]
+        assert "skip_ownership_check=True" in bloque, (
+            "El endpoint /payments/by-staff debe pasar skip_ownership_check=True "
+            "porque el staff (cobranza/admin/superadmin) esta autorizado a "
+            "registrar pagos en nombre de cualquier estudiante."
+        )
+
+    def test_by_staff_endpoint_convierte_estudiante_id_a_objectid(self, payments_src):
+        """El endpoint by-staff debe convertir estudiante_id (str del Form) a PydanticObjectId."""
+        idx = payments_src.read_text(encoding="utf-8").find("async def create_payment_by_staff")
+        bloque = payments_src.read_text(encoding="utf-8")[idx:idx + 6000]
+        # Verificar que hace la conversion con PydanticObjectId(estudiante_id)
+        assert "PydanticObjectId(estudiante_id)" in bloque or "_POI(estudiante_id)" in bloque, (
+            "El endpoint /payments/by-staff debe convertir estudiante_id (string) "
+            "a PydanticObjectId antes de pasarlo a create_payment. "
+            "Sin esta conversion, el check enrollment.estudiante_id != student_id "
+            "siempre falla porque compara PydanticObjectId contra str."
+        )
+
+

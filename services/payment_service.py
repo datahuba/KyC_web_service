@@ -408,7 +408,8 @@ async def create_payment(
     payment_in: PaymentCreate,
     student_id: PydanticObjectId,
     auto_approve: bool = True,
-    approved_by: Optional[str] = None
+    approved_by: Optional[str] = None,
+    skip_ownership_check: bool = False
 ) -> Payment:
     """
     Crear un nuevo pago. Soporta pagos digitales o pagos físicos en CAJA (sin voucher).
@@ -422,12 +423,25 @@ async def create_payment(
         approved_by: si se provee (caso staff via by-staff endpoint), se usa como
             `verificado_por` en lugar del genérico "SISTEMA (auto-aprobación)".
             Útil para auditoría: deja claro quién aprobó el pago.
+        skip_ownership_check: si True, NO valida que la inscripción pertenezca al
+            estudiante. Solo debe pasarse True cuando el caller es STAFF autorizado
+            (cobranza/admin/superadmin) que registra un pago en nombre de un
+            estudiante. F-COBRANZA-034 (2026-07-22): bug encontrado por Lic. Sandra
+            Zabala — el check enrollment.estudiante_id != student_id fallaba siempre
+            en el endpoint /payments/by-staff porque estudiante_id llegaba como
+            string del Form, mientras enrollment.estudiante_id es PydanticObjectId.
+            La comparación siempre era True, bloqueando a cobranza para registrar
+            pagos en nombre de cualquier estudiante.
+
+    Raises:
+        ValueError: si la inscripción no existe, o si skip_ownership_check=False
+            y la inscripción no pertenece al estudiante.
     """
     enrollment = await Enrollment.get(payment_in.inscripcion_id)
     if not enrollment:
         raise ValueError(f"Inscripción {payment_in.inscripcion_id} no encontrada")
-    
-    if enrollment.estudiante_id != student_id:
+
+    if not skip_ownership_check and enrollment.estudiante_id != student_id:
         raise ValueError(
             "No puedes crear un pago para una inscripción que no te pertenece"
         )

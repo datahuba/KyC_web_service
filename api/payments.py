@@ -244,11 +244,24 @@ async def create_payment_by_staff(
         # Esto es consistente con F-COBRANZA-004 (auto-aprobación cuando
         # el estudiante sube su comprobante). Joel decidió 22:25 que sea
         # automático para no demorar al estudiante.
+        #
+        # F-COBRANZA-034 (2026-07-22): skip_ownership_check=True porque el
+        # check de "la inscripcion pertenece al estudiante" es solo para
+        # el endpoint del estudiante (evitar que un estudiante pague la
+        # inscripcion de otro). El staff (cobranza/admin/superadmin) está
+        # autorizado a registrar pagos en nombre de cualquier estudiante
+        # del sistema. Bug reportado por Lic. Sandra Zabala: el check
+        # enrollment.estudiante_id != student_id siempre fallaba porque
+        # estudiante_id llega como string del Form y enrollment.estudiante_id
+        # es PydanticObjectId.
+        from beanie import PydanticObjectId as _POI
+        student_oid = estudiante_id if isinstance(estudiante_id, _POI) else _POI(estudiante_id)
         payment = await payment_service.create_payment(
             payment_in=payment_in,
-            student_id=estudiante_id,
+            student_id=student_oid,
             auto_approve=True,
             approved_by=current_user.username,
+            skip_ownership_check=True,
         )
 
         # F-COBRANZA-014: el saldo del enrollment se actualiza dentro de
