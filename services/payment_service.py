@@ -151,11 +151,11 @@ async def get_next_pending_payment(enrollment_id: PydanticObjectId) -> dict:
             Payment.estado_pago == EstadoPago.APROBADO
         )
     ).to_list()
-    
+
     conceptos_cubiertos = {
         (p.concepto, p.numero_cuota) for p in pagos_activos
     }
-    
+
     if enrollment.costo_matricula > 0:
         if ("Matrícula", None) not in conceptos_cubiertos:
             return {
@@ -163,7 +163,7 @@ async def get_next_pending_payment(enrollment_id: PydanticObjectId) -> dict:
                 "numero_cuota": None,
                 "monto_sugerido": enrollment.costo_matricula
             }
-    
+
     if enrollment.cantidad_cuotas > 0:
         monto_cuota = enrollment.calcular_monto_cuota()
         for i in range(1, enrollment.cantidad_cuotas + 1):
@@ -173,8 +173,127 @@ async def get_next_pending_payment(enrollment_id: PydanticObjectId) -> dict:
                     "numero_cuota": i,
                     "monto_sugerido": monto_cuota
                 }
-                
+
     return None
+
+
+# ========================================================================
+# F-COBRANZA-015 (2026-07-21): Glosa detallada por módulo(s) específico(s)
+# ========================================================================
+# Joel: "los pagos deben ser detallados, tipo 'Pago Módulo 1' o 'Módulo 1, 2, 3'".
+# Antes, el `concepto` decía "Cuota 5" (genérico). Ahora previsualiza el cascading
+# del pago actual y construye una glosa que nombra los módulos específicos:
+#   - Solo matrícula              -> "Matrícula"
+#   - Solo un módulo completo     -> "Pago Módulo 1"
+#   - Varios módulos completos    -> "Pago Módulos 1, 2, 3"
+#   - Matrícula + módulos         -> "Matrícula + Pago Módulos 1, 2"
+#   - Un módulo parcial           -> "Pago Módulo 3 (parcial, Bs X de Bs Y)"
+#   - Pago excesivo sobre saldo   -> "Pago completo: Matrícula + Módulos 1, 2, 3 (sobrante Bs Z)"
+
+def _generar_glosa_detalle(
+    enrollment,
+    monto_pago: float,
+    pagos_aprobados_existentes: list,
+) -> tuple:
+    """
+    Previsualiza el cascading del pago en memoria y construye la glosa detallada.
+
+    Returns:
+        tuple (concepto, numero_cuota) listo para asignar al Payment.
+    """
+    # 1. Calcular dinero aprobado histórico (lo que ya se acreditó)
+    dinero_antes = sum(p.cantidad_pago for p in pagos_aprobados_existentes)
+    tanque = round(dinero_antes + monto_pago, 2)
+
+    # 2. Determinar si cubre matrícula y a partir de qué módulo
+    matricula_ya_pagada = enrollment.matricula_pagada
+    matricula_cubierta_por_este_pago = False
+    modulos_cubiertos: list = []  # cada item: (numero_o_nombre, tipo='completo'|'parcial', monto_pagado, costo_total)
+    sobrante = 0.0
+
+    if not matricula_ya_pagada:
+        if tanque >= enrollment.costo_matricula:
+            tanque = round(tanque - enrollment.costo_matricula, 2)
+            matricula_cubierta_por_este_pago = True
+        else:
+            # No alcanza para matrícula → no se computa
+            return ("Matrícula (pago parcial)", None)
+
+    # 3. Cascada sobre los módulos
+    for idx, mod in enumerate(enrollment.modulos, start=1):
+        if tanque <= 0.01:
+            break
+        costo_modulo = round(mod.costo, 2)
+        if tanque >= costo_modulo:
+            modulos_cubiertos.append((idx, "completo", costo_modulo, costo_modulo))
+            tanque = round(tanque - costo_modulo, 2)
+        else:
+            # Pago parcial: se vierte el remanente en este módulo
+            modulos_cubiertos.append((idx, "parcial", tanque, costo_modulo))
+            tanque = 0.0
+
+    # 4. Si queda dinero después de todo, es sobrante (no debería pasar, pero por si acaso)
+    if tanque > 0.01:
+        sobrante = tanque
+
+    # 5. Construir la glosa
+    partes = []
+    numero_cuota_final = None
+
+    # Solo agregar "Matrícula" si este PAGO la cubrió (no si ya estaba pagada antes)
+    if matricula_cubierta_por_este_pago and not modulos_cubiertos:
+        partes.append("Matrícula")
+    elif matricula_cubierta_por_este_pago and modulos_cubiertos:
+        partes.append("Matrícula")
+
+    if modulos_cubiertos:
+        # Construir el detalle de módulos
+        # Caso simple: un solo módulo completo → "Módulo 1"
+        # Caso varios: "Módulos 1, 2, 3"
+        # Caso parcial: "Módulo 3 (parcial, Bs X de Bs Y)"
+        indices_completos = [m[0] for m in modulos_cubiertos if m[1] == "completo"]
+        indices_parciales = [m for m in modulos_cubiertos if m[1] == "parcial"]
+
+        if indices_completos and not indices_parciales:
+            if len(indices_completos) == 1:
+                partes.append(f"Pago Módulo {indices_completos[0]}")
+            else:
+                partes.append(f"Pago Módulos {', '.join(str(i) for i in indices_completos)}")
+        elif indices_parciales and not indices_completos:
+            # Solo parcial(es)
+            if len(indices_parciales) == 1:
+                idx, _, monto_p, costo = indices_parciales[0]
+                partes.append(f"Pago Módulo {idx} (parcial, Bs {monto_p:.0f} de Bs {costo:.0f})")
+            else:
+                detalle = ", ".join(
+                    f"M{m[0]} (Bs {m[2]:.0f} de Bs {m[3]:.0f})"
+                    for m in indices_parciales
+                )
+                partes.append(f"Pago parcial {detalle}")
+        else:
+            # Mixto: completos + parciales
+            detalle_completos = (
+                f"Módulo {indices_completos[0]}"
+                if len(indices_completos) == 1
+                else f"Módulos {', '.join(str(i) for i in indices_completos)}"
+            )
+            partes.append(f"Pago {detalle_completos}")
+            for idx, _, monto_p, costo in indices_parciales:
+                partes.append(f" + Módulo {idx} parcial (Bs {monto_p:.0f} de Bs {costo:.0f})")
+
+    glosa = " + ".join(partes) if partes else "Pago sin detalle"
+    if sobrante > 0.01:
+        glosa += f" (sobrante Bs {sobrante:.0f})"
+
+    # numero_cuota: el primer módulo cubierto completo (si hay), si no None
+    if modulos_cubiertos:
+        completos = [m[0] for m in modulos_cubiertos if m[1] == "completo"]
+        if completos:
+            numero_cuota_final = completos[0]
+    elif matricula_cubierta_por_este_pago and not modulos_cubiertos:
+        numero_cuota_final = None  # solo matrícula
+
+    return (glosa, numero_cuota_final)
 
 
 async def create_payment(
@@ -210,9 +329,25 @@ async def create_payment(
     if not next_payment:
          raise ValueError("Esta inscripción ya tiene todos los pagos en proceso o aprobados.")
 
-    concepto_final = payment_in.concepto if payment_in.concepto else next_payment["concepto"]
-    cuota_final = payment_in.numero_cuota if payment_in.numero_cuota else next_payment["numero_cuota"]
     monto_real = payment_in.monto_comprobante if payment_in.monto_comprobante else payment_in.cantidad_pago
+
+    # F-COBRANZA-015 (2026-07-21): generar glosa DETALLADA por módulo(s) en vez
+    # de "Cuota N" genérico. Joel: "los pagos deben ser detallados, tipo
+    # 'Pago Módulo 1' o 'Módulo 1, 2, 3'". Previsualizamos el cascading para
+    # saber qué módulos cubre este pago.
+    if payment_in.concepto:
+        # El usuario forzó un concepto (caso de "Caja" o frontends viejos)
+        concepto_final = payment_in.concepto
+        cuota_final = payment_in.numero_cuota if payment_in.numero_cuota else next_payment["numero_cuota"]
+    else:
+        # Generar glosa automática
+        pagos_aprobados_pre = await Payment.find(
+            Payment.inscripcion_id == payment_in.inscripcion_id,
+            Payment.estado_pago == EstadoPago.APROBADO
+        ).to_list()
+        concepto_final, cuota_final = _generar_glosa_detalle(
+            enrollment, monto_real, pagos_aprobados_pre
+        )
 
     # AUDITORÍA (ALTO #4): sin este control, un pago (aún PENDIENTE, antes de
     # que cobranza lo apruebe) podía exceder por completo el saldo pendiente
@@ -975,8 +1110,18 @@ async def create_caja_directo_payment(
     if not next_payment:
          raise ValueError("Esta inscripción ya tiene todos los pagos en proceso o aprobados.")
 
-    concepto_final = concepto if concepto else next_payment["concepto"]
-    cuota_final = numero_cuota if numero_cuota else next_payment["numero_cuota"]
+    # F-COBRANZA-015 (2026-07-21): glosa detallada por módulo(s) específico(s).
+    if concepto:
+        concepto_final = concepto
+        cuota_final = numero_cuota if numero_cuota else next_payment["numero_cuota"]
+    else:
+        pagos_aprobados_pre = await Payment.find(
+            Payment.inscripcion_id == inscripcion_id,
+            Payment.estado_pago == EstadoPago.APROBADO
+        ).to_list()
+        concepto_final, cuota_final = _generar_glosa_detalle(
+            enrollment, cantidad_pago, pagos_aprobados_pre
+        )
 
     # AUDITORÍA (ALTO #4): mismo control de sobrepago que create_payment. El
     # cobro en Caja se crea directamente APROBADO, así que aquí el riesgo es

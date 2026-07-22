@@ -750,3 +750,126 @@ class TestF014ActualizarSaldoRestaAnulados:
         total_pagado_neto_con_anulado = 6.0  # 594 - 588
         saldo_con_anulado = max(0.0, round(total_a_pagar - total_pagado_neto_con_anulado, 2))
         assert saldo_con_anulado == 1764.0  # 1770 - 6
+
+
+# ========================================================================
+# F-COBRANZA-015 · Glosa detallada por módulo(s) específico(s) (2026-07-21)
+# ========================================================================
+# Joel pidió: "los pagos deben ser detallados, tipo 'Pago Módulo 1' o 'Módulo 1, 2, 3'".
+# La función _generar_glosa_detalle hace un preview del cascading en memoria
+# y construye la glosa que nombra los módulos específicos cubiertos.
+
+class TestF015GlosaDetallada:
+    """F-COBRANZA-015: glosa con módulos específicos, no 'Cuota N' genérico."""
+
+    def test_solo_matricula(self):
+        """Pago que solo cubre matrícula → 'Matrícula'."""
+        from types import SimpleNamespace
+        enrollment = SimpleNamespace(
+            costo_matricula=300.0,
+            matricula_pagada=False,
+            modulos=[],
+        )
+        from services.payment_service import _generar_glosa_detalle
+        glosa, cuota = _generar_glosa_detalle(enrollment, 300.0, [])
+        assert glosa == "Matrícula"
+        assert cuota is None
+
+    def test_matricula_pagada_solo(self):
+        """Si la matrícula ya está pagada y el pago es solo del primer módulo
+        pero no alcanza para un módulo completo, debe decir 'Pago Módulo 1
+        (parcial, Bs X de Bs Y)'."""
+        from types import SimpleNamespace
+        enrollment = SimpleNamespace(
+            costo_matricula=300.0,
+            matricula_pagada=True,  # ya pagada
+            modulos=[
+                SimpleNamespace(costo=200.0, estado="Pendiente", monto_pagado=0.0),
+            ],
+        )
+        from services.payment_service import _generar_glosa_detalle
+        glosa, cuota = _generar_glosa_detalle(enrollment, 150.0, [])
+        assert "Módulo 1" in glosa
+        assert "parcial" in glosa
+        assert "150" in glosa  # Bs 150 de Bs 200
+        assert "200" in glosa
+
+    def test_modulo_completo_unico(self):
+        """Pago que cubre exactamente 1 módulo completo → 'Pago Módulo 1'."""
+        from types import SimpleNamespace
+        enrollment = SimpleNamespace(
+            costo_matricula=300.0,
+            matricula_pagada=True,
+            modulos=[
+                SimpleNamespace(costo=200.0, estado="Pendiente", monto_pagado=0.0),
+            ],
+        )
+        from services.payment_service import _generar_glosa_detalle
+        glosa, cuota = _generar_glosa_detalle(enrollment, 200.0, [])
+        assert glosa == "Pago Módulo 1"
+        assert cuota == 1
+
+    def test_varios_modulos_completos(self):
+        """Pago que cubre 3 módulos → 'Pago Módulos 1, 2, 3'."""
+        from types import SimpleNamespace
+        enrollment = SimpleNamespace(
+            costo_matricula=300.0,
+            matricula_pagada=True,
+            modulos=[
+                SimpleNamespace(costo=200.0, estado="Pendiente", monto_pagado=0.0),
+                SimpleNamespace(costo=200.0, estado="Pendiente", monto_pagado=0.0),
+                SimpleNamespace(costo=200.0, estado="Pendiente", monto_pagado=0.0),
+            ],
+        )
+        from services.payment_service import _generar_glosa_detalle
+        glosa, cuota = _generar_glosa_detalle(enrollment, 600.0, [])
+        assert glosa == "Pago Módulos 1, 2, 3"
+        assert cuota == 1  # primer módulo cubierto
+
+    def test_matricula_y_modulos(self):
+        """Pago que cubre matrícula + 2 módulos → 'Matrícula + Pago Módulos 1, 2'."""
+        from types import SimpleNamespace
+        enrollment = SimpleNamespace(
+            costo_matricula=300.0,
+            matricula_pagada=False,
+            modulos=[
+                SimpleNamespace(costo=200.0, estado="Pendiente", monto_pagado=0.0),
+                SimpleNamespace(costo=200.0, estado="Pendiente", monto_pagado=0.0),
+            ],
+        )
+        from services.payment_service import _generar_glosa_detalle
+        glosa, cuota = _generar_glosa_detalle(enrollment, 700.0, [])
+        # 700 - 300 matricula = 400 → cubre módulos 1 y 2 completos
+        assert "Matrícula" in glosa
+        assert "Módulos 1, 2" in glosa
+        assert glosa == "Matrícula + Pago Módulos 1, 2"
+
+    def test_pago_no_alcanza_matricula(self):
+        """Pago que no alcanza ni para matrícula → 'Matrícula (pago parcial)'."""
+        from types import SimpleNamespace
+        enrollment = SimpleNamespace(
+            costo_matricula=300.0,
+            matricula_pagada=False,
+            modulos=[],
+        )
+        from services.payment_service import _generar_glosa_detalle
+        glosa, cuota = _generar_glosa_detalle(enrollment, 100.0, [])
+        assert "parcial" in glosa.lower()
+
+    def test_pago_exacto_un_modulo(self):
+        """Pago exacto de un módulo cuando ya se pagó la matrícula antes."""
+        from types import SimpleNamespace
+        # Supongamos que la matrícula ya está pagada
+        # y hay pagos aprobados previos que totalizan 0 (caso fresh start)
+        enrollment = SimpleNamespace(
+            costo_matricula=300.0,
+            matricula_pagada=True,
+            modulos=[
+                SimpleNamespace(costo=150.0, estado="Pendiente", monto_pagado=0.0),
+                SimpleNamespace(costo=150.0, estado="Pendiente", monto_pagado=0.0),
+            ],
+        )
+        from services.payment_service import _generar_glosa_detalle
+        glosa, cuota = _generar_glosa_detalle(enrollment, 150.0, [])
+        assert glosa == "Pago Módulo 1"
+        assert cuota == 1
