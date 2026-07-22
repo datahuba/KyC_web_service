@@ -1053,7 +1053,10 @@ class TestF022CodigoProgramaEnXLSX:
         src = payments_src.read_text(encoding="utf-8")
         idx = src.find('"/reportes/excel"')
         assert idx > 0
-        bloque = src[idx:idx + 4000]
+        # F-COBRANZA-042 (2026-07-22): se anadio C.I. como columna extra en el
+        # XLSX, lo que movio course.codigo mas abajo. Ampliamos la ventana a
+        # 5000 chars para cubrir el header + el loop que arma las filas.
+        bloque = src[idx:idx + 5000]
         assert "course.codigo" in bloque, "El endpoint /reportes/excel no usa course.codigo"
         # Y debe tener el fallback al nombre_programa por si codigo es None
         assert "nombre_programa" in bloque, "Falta fallback a nombre_programa"
@@ -1448,5 +1451,127 @@ class TestF034ByStaffSkipOwnershipCheck:
             "Sin esta conversion, el check enrollment.estudiante_id != student_id "
             "siempre falla porque compara PydanticObjectId contra str."
         )
+
+
+class TestF042CIEnXLSXReportePagos:
+    """
+    F-COBRANZA-042 (2026-07-22): Kevin pidio que el XLSX del reporte de pagos
+    (F-016, /payments/reportes/excel) tenga la columna C.I. del estudiante.
+    Sin esto, el XLSX no tiene el carnet del estudiante (solo en el reporte
+    de caja web lo agregamos con F-036, pero faltaba en el XLSX).
+    Verificamos:
+    - El header incluye "C.I." como segunda columna
+    - El loop incluye la lectura de carnet_identidad o registro
+    """
+
+    @pytest.fixture
+    def payments_src(self):
+        from pathlib import Path
+        return Path("api/payments.py")
+
+    def test_xlsx_reporte_pagos_header_incluye_ci(self, payments_src):
+        """Header del XLSX incluye 'C.I.' como columna."""
+        src = payments_src.read_text(encoding="utf-8")
+        idx = src.find('"/reportes/excel"')
+        assert idx > 0
+        bloque = src[idx:idx + 5000]
+        # El header de headers debe incluir "C.I." justo despues del nombre
+        assert '"C.I."' in bloque or "'C.I.'" in bloque, (
+            "El XLSX de reporte de pagos debe tener columna 'C.I.' (F-042)."
+        )
+
+    def test_xlsx_reporte_pagos_lee_carnet_o_registro(self, payments_src):
+        """El loop del XLSX lee carnet_identidad o registro del estudiante."""
+        src = payments_src.read_text(encoding="utf-8")
+        idx = src.find('"/reportes/excel"')
+        assert idx > 0
+        bloque = src[idx:idx + 5000]
+        # Debe leer carnet_identidad con fallback a registro
+        assert "carnet_identidad" in bloque, (
+            "El XLSX debe leer carnet_identidad del estudiante (F-042)."
+        )
+        assert "registro" in bloque, (
+            "El XLSX debe tener fallback a registro si carnet_identidad es None (F-042)."
+        )
+
+
+class TestF043PDFReporteCaja:
+    """
+    F-COBRANZA-043 (2026-07-22): Kevin pidio boton "Exportar PDF" en el
+    reporte de caja, con los mismos datos que el XLSX + las 4 tarjetas KPI
+    (Cantidad, Total Aprobado, Total Pendiente, Total Anulado).
+    Verificamos:
+    - Existe el endpoint /payments/reportes/caja/pdf
+    - Usa reportlab
+    - Retorna application/pdf
+    - Calcula los 4 KPIs (cantidad_pagos, total_aprobado, total_pendiente, total_anulado)
+    """
+
+    @pytest.fixture
+    def payments_src(self):
+        from pathlib import Path
+        return Path("api/payments.py")
+
+    def test_pdf_endpoint_existe(self, payments_src):
+        """Existe endpoint GET /payments/reportes/caja/pdf."""
+        src = payments_src.read_text(encoding="utf-8")
+        assert '"/reportes/caja/pdf"' in src, (
+            "Falta endpoint GET /payments/reportes/caja/pdf (F-043)."
+        )
+
+    def test_pdf_endpoint_usa_reportlab(self, payments_src):
+        """El endpoint PDF importa reportlab."""
+        src = payments_src.read_text(encoding="utf-8")
+        idx = src.find('"/reportes/caja/pdf"')
+        assert idx > 0
+        bloque = src[idx:idx + 5000]
+        assert "reportlab" in bloque, (
+            "El endpoint PDF debe importar reportlab (F-043)."
+        )
+
+    def test_pdf_endpoint_retorna_application_pdf(self, payments_src):
+        """El endpoint retorna media_type=application/pdf."""
+        src = payments_src.read_text(encoding="utf-8")
+        # El path tiene /reportes/caja/pdf con / adelante
+        idx = src.find('"/reportes/caja/pdf"')
+        assert idx > 0
+        # Buscar el SIGUIENTE application/pdf despues del inicio del endpoint
+        # (no el primero del archivo, que esta en otro endpoint).
+        pdf_idx = src.find("application/pdf", idx)
+        assert pdf_idx > idx, (
+            "El endpoint PDF debe retornar media_type='application/pdf' (F-043). "
+            f"No se encontro 'application/pdf' despues del path /reportes/caja/pdf (idx={idx})."
+        )
+
+    def test_pdf_endpoint_calcula_4_kpis(self, payments_src):
+        """El endpoint calcula los 4 KPIs: cantidad, aprobado, pendiente, anulado."""
+        src = payments_src.read_text(encoding="utf-8")
+        idx = src.find('"/reportes/caja/pdf"')
+        bloque = src[idx:idx + 5000]
+        for kpi in ["cantidad_pagos", "total_aprobado", "total_pendiente", "total_anulado"]:
+            assert kpi in bloque, f"El endpoint PDF debe calcular {kpi} (F-043)."
+
+    def test_pdf_endpoint_incluye_columna_ci(self, payments_src):
+        """El PDF incluye la columna C.I. (igual que el XLSX de F-042)."""
+        src = payments_src.read_text(encoding="utf-8")
+        idx = src.find('"/reportes/caja/pdf"')
+        bloque = src[idx:idx + 8000]
+        assert "C.I." in bloque, (
+            "El PDF debe incluir columna C.I. (F-043, consistente con F-042)."
+        )
+        assert "carnet_identidad" in bloque, (
+            "El PDF debe leer carnet_identidad del estudiante (F-043)."
+        )
+
+    def test_pdf_endpoint_genera_kpi_visual(self, payments_src):
+        """El PDF tiene una seccion visual con las 4 tarjetas KPI."""
+        src = payments_src.read_text(encoding="utf-8")
+        idx = src.find('"/reportes/caja/pdf"')
+        bloque = src[idx:idx + 6000]
+        # Debe haber una Table con las 4 tarjetas (titulos)
+        for titulo in ["CANTIDAD DE PAGOS", "TOTAL APROBADO", "TOTAL PENDIENTE", "TOTAL ANULADO"]:
+            assert titulo in bloque, (
+                f"El PDF debe tener tarjeta KPI con titulo '{titulo}' (F-043)."
+            )
 
 

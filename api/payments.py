@@ -988,7 +988,7 @@ async def generar_reporte_excel_pagos(
     ws = wb.active
     ws.title = "Reporte de Caja"
     
-    headers = ["Nombre del Estudiante", "Curso", "Método", "Fecha Comprobante", "Fecha Registro", "Moneda", "Monto", "Concepto", "Total Cuotas", "Nº Transacción", "Estado", "Motivo Reversión"]
+    headers = ["Nombre del Estudiante", "C.I.", "Curso", "Método", "Fecha Comprobante", "Fecha Registro", "Moneda", "Monto", "Concepto", "Total Cuotas", "Nº Transacción", "Estado", "Motivo Reversión"]
     ws.append(headers)
     
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -1005,6 +1005,13 @@ async def generar_reporte_excel_pagos(
     for payment in payments:
         student = students_map.get(payment.estudiante_id)
         nombre_estudiante = student.nombre if student and student.nombre else "Sin nombre"
+        # F-COBRANZA-042 (2026-07-22): Carnet de Identidad del estudiante.
+        # Prioriza `carnet_identidad`, fallback a `registro` (compatibilidad con
+        # estudiantes pre-F-027 que no tienen CI separado del registro).
+        estudiante_ci = ""
+        if student:
+            estudiante_ci = (getattr(student, "carnet_identidad", None) or "").strip() or \
+                            (getattr(student, "registro", None) or "").strip()
 
         course = courses_map.get(payment.curso_id)
         # F-COBRANZA-022 (2026-07-22): Joel pidio usar el codigo del programa
@@ -1030,6 +1037,7 @@ async def generar_reporte_excel_pagos(
 
         row = [
             nombre_estudiante,
+            estudiante_ci,
             nombre_curso,
             payment.metodo_pago,
             fecha_comprobante_bolivia,
@@ -1043,8 +1051,8 @@ async def generar_reporte_excel_pagos(
             payment.motivo_reversion or ""
         ]
         ws.append(row)
-    
-    column_widths = [30, 30, 15, 20, 20, 10, 15, 20, 15, 25, 15, 30]
+
+    column_widths = [30, 12, 18, 15, 20, 20, 10, 15, 20, 15, 25, 15, 30]
     for i, width in enumerate(column_widths, 1):
         ws.column_dimensions[chr(64 + i)].width = width
     
@@ -1053,10 +1061,207 @@ async def generar_reporte_excel_pagos(
     excel_file.seek(0)
     
     filename = f"reporte_caja_{fecha_desde}_{fecha_hasta}.xlsx"
-    
+
     return StreamingResponse(
         excel_file,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+# ========================================================================
+# F-COBRANZA-043 (2026-07-22): Reporte de Caja - Export PDF
+# ========================================================================
+# Kevin: "se deberia pooder tener esa opcion de descargar como pdf en el mismo
+# modelo que creaste me gusto ... obviamente debe ser los mismos datos qu el
+# excel que exportas mas lo delc arte que te dije ahorita" (las 4 tarjetas
+# KPI: Cantidad, Total Aprobado, Total Pendiente, Total Anulado).
+#
+# Genera el PDF en el backend con reportlab para mantener consistencia con
+# el XLSX que ya se genera acá. Landscape A4 con:
+#   1. Encabezado: titulo + rango de fechas + filtros aplicados
+#   2. Bloque de 4 tarjetas KPI (Cantidad, Aprobado, Pendiente, Anulado)
+#   3. Tabla de pagos (mismas columnas que el XLSX)
+#   4. Pie de pagina con totales
+@router.get(
+    "/reportes/caja/pdf",
+    summary="Generar Reporte PDF de Caja (mismos datos que XLSX + tarjetas KPI)",
+)
+async def generar_reporte_pdf_caja(
+    *,
+    fecha_desde: Optional[str] = Query(None, description="Fecha inicio (YYYY-MM-DD)"),
+    fecha_hasta: Optional[str] = Query(None, description="Fecha fin (YYYY-MM-DD)"),
+    curso_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por curso"),
+    estudiante_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por estudiante (F-COBRANZA-003)"),
+    estado: Optional[str] = Query(None, description="Filtrar por estado del pago"),
+    current_user: User = Depends(require_staff)
+):
+    from fastapi.responses import StreamingResponse
+    from io import BytesIO
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer,
+    )
+
+    if not puede_ver_economico(current_user):
+        raise HTTPException(status_code=403, detail="No autorizado para generar reportes")
+
+    fecha_desde_str, fecha_hasta_str, fecha_desde_dt, fecha_hasta_dt = _parse_rango_fechas(fecha_desde, fecha_hasta)
+
+    concepto_regex = None
+    if current_user.rol == "cpd":
+        concepto_regex = {"concepto": {"$regex": r"^matr[ií]cula$", "$options": "i"}}
+
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
+    # Traer TODOS los pagos del rango (sin paginar) para el PDF completo.
+    criteria = payment_service._construir_filtro_reporte_caja(
+        fecha_desde_dt, fecha_hasta_dt, curso_id=curso_id, estudiante_id=estudiante_id, estado=estado, cursos_permitidos=cursos_permitidos
+    )
+    if concepto_regex:
+        criteria.update(concepto_regex)
+
+    # Sin limite: PDF debe incluir todos. Si en el futuro hay miles, agregar
+    # parametro de paginacion o limite.
+    from models.payment import Payment
+    cursor = Payment.find(criteria).sort("-fecha_subida")
+    payments_all = await cursor.to_list()
+
+    # Enriquecer (nombre, C.I., curso, etc.) igual que el XLSX
+    enriched = await payment_service.enrich_payments_with_details_bulk(payments_all)
+
+    # Calcular resumen (4 tarjetas KPI)
+    # enriched viene como list[dict] (de model_dump en enrich_payments_with_details_bulk),
+    # así que usamos .get() directamente.
+    def _g(p, key, default=None):
+        return p.get(key, default) if isinstance(p, dict) else getattr(p, key, default)
+
+    cantidad_pagos = len(enriched)
+    total_aprobado = sum(float(_g(p, "cantidad_pago", 0)) for p in enriched if _g(p, "estado_pago") == "aprobado")
+    total_pendiente = sum(float(_g(p, "cantidad_pago", 0)) for p in enriched if _g(p, "estado_pago") == "pendiente")
+    total_anulado = sum(abs(float(_g(p, "cantidad_pago", 0))) for p in enriched if _g(p, "estado_pago") in ("anulado", "rechazado"))
+
+    # Construir el PDF
+    pdf_file = BytesIO()
+    doc = SimpleDocTemplate(
+        pdf_file,
+        pagesize=landscape(A4),
+        leftMargin=10*mm, rightMargin=10*mm,
+        topMargin=10*mm, bottomMargin=10*mm,
+        title="Reporte de Caja - KYC DataHub",
+    )
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("TitleStyle", parent=styles["Title"], fontSize=18, textColor=colors.HexColor("#0c4a6e"), spaceAfter=2*mm)
+    subtitle_style = ParagraphStyle("SubtitleStyle", parent=styles["Normal"], fontSize=10, textColor=colors.HexColor("#475569"), spaceAfter=4*mm)
+
+    elements = []
+    elements.append(Paragraph("Reporte de Caja", title_style))
+    periodo_texto = f"Período: {fecha_desde_str or 'inicio'} → {fecha_hasta_str or 'hoy'}"
+    if curso_id:
+        from models.course import Course
+        c = await Course.get(curso_id)
+        if c:
+            periodo_texto += f"  |  Curso: {c.codigo or c.nombre_programa}"
+    if estudiante_id:
+        from models.student import Student
+        s = await Student.get(estudiante_id)
+        if s:
+            periodo_texto += f"  |  Estudiante: {s.nombre}"
+    if estado:
+        periodo_texto += f"  |  Estado: {estado}"
+    elements.append(Paragraph(periodo_texto, subtitle_style))
+
+    # 4 tarjetas KPI (mismo modelo visual que el dashboard)
+    kpi_data = [
+        ["CANTIDAD DE PAGOS", "TOTAL APROBADO", "TOTAL PENDIENTE", "TOTAL ANULADO"],
+        [str(cantidad_pagos), f"Bs. {total_aprobado:,.2f}", f"Bs. {total_pendiente:,.2f}", f"Bs. {total_anulado:,.2f}"],
+    ]
+    kpi_table = Table(kpi_data, colWidths=[70*mm]*4, rowHeights=[9*mm, 16*mm])
+    kpi_table.setStyle(TableStyle([
+        # Header
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f1f5f9")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#64748b")),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 8),
+        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+        # Values
+        ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 1), (0, 1), 28),  # Cantidad
+        ("FONTSIZE", (1, 1), (-1, 1), 18),  # Montos
+        ("TEXTCOLOR", (0, 1), (0, 1), colors.HexColor("#0f172a")),
+        ("TEXTCOLOR", (1, 1), (1, 1), colors.HexColor("#15803d")),  # Aprobado verde
+        ("TEXTCOLOR", (2, 1), (2, 1), colors.HexColor("#ca8a04")),  # Pendiente amarillo
+        ("TEXTCOLOR", (3, 1), (3, 1), colors.HexColor("#b91c1c")),  # Anulado rojo
+        ("ALIGN", (0, 1), (-1, 1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        # Borders
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+    ]))
+    elements.append(kpi_table)
+    elements.append(Spacer(1, 5*mm))
+
+    # Tabla de pagos (mismas columnas que el XLSX, sin "Motivo Reversión" para
+    # ahorrar espacio; solo se muestra si el filtro de estado es anulado/rechazado)
+    headers = ["Nombre del Estudiante", "C.I.", "Curso", "Método", "Fecha", "Monto", "Concepto", "Nº Transacción", "Estado"]
+    rows = [headers]
+    from core.timezone_utils import to_bolivia_time
+    for p in enriched:
+        def _g2(key, default=None):
+            return p.get(key, default) if isinstance(p, dict) else getattr(p, key, default)
+        student = _g2("estudiante") or {}
+        course = _g2("course") or {}
+        ci = (student.get("carnet_identidad") or student.get("registro") or "").strip()
+        fecha = to_bolivia_time(_g2("fecha_subida"))
+        fecha_str = fecha.strftime("%d/%m/%Y") if fecha else "Sin fecha"
+        monto = float(_g2("cantidad_pago", 0))
+        estado_pago = _g2("estado_pago", "")
+        # Anulados: mostrar como negativo (mismo criterio que el XLSX)
+        if estado_pago == "anulado" and monto > 0:
+            monto = -monto
+        rows.append([
+            Paragraph(str(student.get("nombre") or "Sin nombre")[:40], styles["BodyText"]),
+            ci or "—",
+            course.get("codigo") or course.get("nombre_programa") or "Sin curso",
+            _g2("metodo_pago") or "",
+            fecha_str,
+            f"{monto:,.2f}",
+            Paragraph(str(_g2("concepto") or "")[:50], styles["BodyText"]),
+            str(_g2("numero_transaccion") or "Caja / S/N")[:18],
+            estado_pago,
+        ])
+
+    data_table = Table(rows, repeatRows=1, colWidths=[
+        50*mm, 18*mm, 25*mm, 20*mm, 22*mm, 18*mm, 55*mm, 25*mm, 18*mm,
+    ])
+    data_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0c4a6e")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 8),
+        ("FONTSIZE", (0, 1), (-1, -1), 7),
+        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 4),
+        ("TOPPADDING", (0, 0), (-1, 0), 4),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#e2e8f0")),
+    ]))
+    elements.append(data_table)
+
+    # Pie de pagina (lo agrega automaticamente reportlab al render)
+
+    doc.build(elements)
+    pdf_file.seek(0)
+
+    filename = f"reporte_caja_{fecha_desde_str or 'inicio'}_{fecha_hasta_str or 'hoy'}.pdf"
+    return StreamingResponse(
+        pdf_file,
+        media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
