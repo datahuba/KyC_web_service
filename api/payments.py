@@ -10,6 +10,7 @@ rollback financiero y control de Caja/Bancos.
 from typing import List, Any, Optional
 import asyncio
 import re
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, status
 from pydantic import BaseModel, Field # IMPORTACIÓN REQUERIDA
 from models.course import Course
