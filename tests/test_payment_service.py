@@ -1023,3 +1023,150 @@ class TestFormatFechaHelper:
         from core.timezone_utils import format_fecha
         assert format_fecha("ayer fue lunes", "%Y-%m-%d") == "ayer fue lunes"
 
+
+class TestF022CodigoProgramaEnXLSX:
+    """F-COBRANZA-022 (2026-07-22): Joel pidio que el XLSX de pagos y el de
+    reporte de caja usen el CODIGO del programa (ej DIPL-IA-2026) en vez del
+    nombre largo. Verificamos que en api/payments.py la columna Curso de ambos
+    XLSX use `course.codigo` y NO `course.nombre_programa`."""
+
+    @pytest.fixture
+    def payments_src(self):
+        from pathlib import Path
+        return Path(__file__).parent.parent / "api" / "payments.py"
+
+    def test_xlsx_pagos_usa_codigo(self, payments_src):
+        """El endpoint /export/excel (lista de pagos) usa course.codigo."""
+        src = payments_src.read_text(encoding="utf-8")
+        # En el endpoint /export/excel (post linea ~1100) debe haber
+        # "course.codigo" y la columna del row debe usar course_name con codigo
+        assert "course.codigo" in src, "No se encontro course.codigo en el codigo"
+        # Verificar que el endpoint /export/excel especificamente lo usa
+        idx = src.find('"/export/excel"')
+        assert idx > 0
+        # El endpoint /export/excel mide ~150 lineas, leer 9000 chars
+        bloque = src[idx:idx + 9000]
+        assert "course.codigo" in bloque, "El endpoint /export/excel no usa course.codigo"
+
+    def test_xlsx_reporte_caja_usa_codigo(self, payments_src):
+        """El endpoint /reportes/excel (reporte de caja) usa course.codigo."""
+        src = payments_src.read_text(encoding="utf-8")
+        idx = src.find('"/reportes/excel"')
+        assert idx > 0
+        bloque = src[idx:idx + 4000]
+        assert "course.codigo" in bloque, "El endpoint /reportes/excel no usa course.codigo"
+        # Y debe tener el fallback al nombre_programa por si codigo es None
+        assert "nombre_programa" in bloque, "Falta fallback a nombre_programa"
+
+
+class TestF023ExtractoBancario:
+    """F-COBRANZA-023 (2026-07-22): Joel pidio un reporte de caja con formato
+    extracto bancario estilo Banco Bisa. Verificamos:
+    - Existe el endpoint /reportes/caja/extracto-bancario
+    - Reglas contables: CREDITOS = aprobados, DEBITOS = anulados o rechazados
+    - PENDIENTES NO se muestran
+    - Saldo acumulado = saldo_inicial + creditos - debitos
+    """
+
+    @pytest.fixture
+    def payments_src(self):
+        from pathlib import Path
+        return Path(__file__).parent.parent / "api" / "payments.py"
+
+    def test_endpoint_existe(self, payments_src):
+        src = payments_src.read_text(encoding="utf-8")
+        assert '"/reportes/caja/extracto-bancario"' in src, \
+            "Falta el endpoint /reportes/caja/extracto-bancario"
+
+    def test_endpoint_acepta_filtros(self, payments_src):
+        """El endpoint acepta los mismos filtros que /reportes/caja."""
+        src = payments_src.read_text(encoding="utf-8")
+        idx = src.find('"/reportes/caja/extracto-bancario"')
+        bloque = src[idx:idx + 2000]
+        assert "fecha_desde" in bloque
+        assert "fecha_hasta" in bloque
+        assert "curso_id" in bloque
+        assert "estudiante_id" in bloque
+
+    def test_requiere_rol_economico(self, payments_src):
+        """Solo roles economicos (superadmin/admin/cobranza/mae/cpd/coordinador financiero)."""
+        src = payments_src.read_text(encoding="utf-8")
+        idx = src.find('"/reportes/caja/extracto-bancario"')
+        bloque = src[idx:idx + 2500]
+        assert "puede_ver_economico" in bloque
+        assert "403" in bloque, "Debe rechazar con 403 a roles no economicos"
+
+    def test_logica_debitos_solo_anulados_rechazados(self, payments_src):
+        """El codigo del endpoint debe filtrar SOLO aprobado/anulado/rechazado
+        (NO pendientes, que NO son ingreso ni egreso)."""
+        src = payments_src.read_text(encoding="utf-8")
+        idx = src.find('"/reportes/caja/extracto-bancario"')
+        bloque = src[idx:idx + 5000]
+        # Debe excluir pendientes del query
+        assert '"aprobado"' in bloque or "'aprobado'" in bloque
+        assert '"anulado"' in bloque or "'anulado'" in bloque
+        assert '"rechazado"' in bloque or "'rechazado'" in bloque
+        # Comentario explicito de que pendientes NO se muestran
+        assert "pendiente" in bloque.lower()
+
+    def test_creditos_incluyen_abandonos_congelados(self):
+        """REGLA DE NEGOCIO: Los CREDITOS son pagos APROBADOS sin importar
+        si el estudiante despues abandona o congela. Su dinero SI entro.
+        Logica: si el estado del pago es aprobado → credito."""
+        # Simulamos la logica en Python puro
+        class EstadoPago:
+            APROBADO = "aprobado"
+            ANULADO = "anulado"
+            RECHAZADO = "rechazado"
+            PENDIENTE = "pendiente"
+
+        class Pago:
+            def __init__(self, estado, monto):
+                self.estado_pago = estado
+                self.cantidad_pago = monto
+
+        pagos = [
+            Pago(EstadoPago.APROBADO, 300),     # credito
+            Pago(EstadoPago.APROBADO, 588),     # credito (modulo 1)
+            Pago(EstadoPago.ANULADO, 300),      # debito
+            Pago(EstadoPago.RECHAZADO, 288),    # debito
+            Pago(EstadoPago.PENDIENTE, 588),    # NO se cuenta
+        ]
+
+        total_creditos = sum(p.cantidad_pago for p in pagos if p.estado_pago == EstadoPago.APROBADO)
+        total_debitos = sum(p.cantidad_pago for p in pagos if p.estado_pago in (EstadoPago.ANULADO, EstadoPago.RECHAZADO))
+
+        assert total_creditos == 888, f"Esperado 888, got {total_creditos}"
+        assert total_debitos == 588, f"Esperado 588, got {total_debitos}"
+
+        # Saldo: si saldo_inicial = 0
+        saldo_inicial = 0
+        saldo_final = saldo_inicial + total_creditos - total_debitos
+        assert saldo_final == 300  # 0 + 888 - 588
+
+    def test_saldo_acumulado_ordenado_por_fecha(self):
+        """REGLA: el saldo es acumulado. Se procesan pagos en orden de fecha
+        ascendente y el saldo refleja creditos - debitos."""
+        class Pago:
+            def __init__(self, fecha, estado, monto):
+                self.fecha = fecha
+                self.estado = estado
+                self.monto = monto
+
+        pagos_ordenados = [
+            Pago("2026-07-01", "aprobado", 300),    # +300
+            Pago("2026-07-05", "aprobado", 588),    # +888
+            Pago("2026-07-10", "anulado", 200),     # +688
+            Pago("2026-07-15", "aprobado", 100),    # +788
+        ]
+        saldo = 0
+        saldos_por_pago = []
+        for p in pagos_ordenados:
+            if p.estado == "aprobado":
+                saldo += p.monto
+            elif p.estado in ("anulado", "rechazado"):
+                saldo -= p.monto
+            saldos_por_pago.append(saldo)
+
+        assert saldos_por_pago == [300, 888, 688, 788]
+

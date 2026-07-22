@@ -986,7 +986,10 @@ async def generar_reporte_excel_pagos(
         nombre_estudiante = student.nombre if student and student.nombre else "Sin nombre"
 
         course = courses_map.get(payment.curso_id)
-        nombre_curso = course.nombre_programa if course else "Sin curso"
+        # F-COBRANZA-022 (2026-07-22): Joel pidio usar el codigo del programa
+        # (DIPL-IA-2026) en vez del nombre largo en el XLSX, para que el reporte
+        # sea mas compacto y matchee con el codigo que se ve en el sistema.
+        nombre_curso = course.codigo if course and course.codigo else (course.nombre_programa if course else "Sin curso")
 
         total_cuotas = 0
         enrollment = enrollments_map.get(payment.inscripcion_id)
@@ -1030,6 +1033,300 @@ async def generar_reporte_excel_pagos(
     
     filename = f"reporte_caja_{fecha_desde}_{fecha_hasta}.xlsx"
     
+    return StreamingResponse(
+        excel_file,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+# ========================================================================
+# F-COBRANZA-023 (2026-07-22): Reporte de Caja - Formato Extracto Bancario
+# ========================================================================
+# Joel pidio que el reporte de caja tenga formato estilo estado de cuenta
+# bancaria (como el Banco Bisa que mando como ejemplo). Estructura:
+#   - Encabezado: Banco, Cuenta, Periodo, Saldo Inicial
+#   - Tabla: Fecha | Comprobante | Concepto | DEBITOS | CREDITOS | Saldo
+#   - Totales: Total Operaciones, Total Debitos, Total Creditos, Saldo Final
+#
+# Reglas contables (lo que Joel definio):
+#   - CREDITOS: pagos APROBADOS (incluye los que abandonan/congelan, porque
+#     su dinero SI entro al sistema). NO se filtran por estado del enrollment.
+#   - DEBITOS: pagos ANULADOS o RECHAZADOS (salen del sistema).
+#   - PENDIENTES: NO se muestran (estan en limbo, no son ingreso ni egreso).
+#   - Saldo Final = Saldo Inicial + Total Creditos - Total Debitos
+#
+# El endpoint NO modifica nada, solo lee y genera XLSX con el formato pedido.
+
+@router.get(
+    "/reportes/caja/extracto-bancario",
+    summary="Reporte de Caja Formato Extracto Bancario (Debitos/Creditos)",
+)
+async def get_extracto_bancario(
+    *,
+    fecha_desde: Optional[str] = Query(None, description="Fecha inicio (YYYY-MM-DD)"),
+    fecha_hasta: Optional[str] = Query(None, description="Fecha fin (YYYY-MM-DD)"),
+    curso_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por curso"),
+    estudiante_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por estudiante"),
+    current_user: User = Depends(require_staff)
+):
+    """
+    F-COBRANZA-023: Genera un XLSX con formato extracto bancario (estilo
+    Banco Bisa que Joel paso como ejemplo) para el reporte de caja.
+
+    Reglas contables:
+    - CREDITOS = pagos aprobados (incluye abandonos/congelados, su dinero si entro)
+    - DEBITOS  = pagos anulados o rechazados (salen del sistema)
+    - PENDIENTES NO se muestran (estan en limbo)
+    """
+    from fastapi.responses import StreamingResponse
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from io import BytesIO
+    from models.enrollment import Enrollment
+    from core.timezone_utils import to_bolivia_time, format_fecha
+
+    if not puede_ver_economico(current_user):
+        raise HTTPException(status_code=403, detail="No autorizado para ver reportes de caja")
+
+    fecha_desde_str, fecha_hasta_str, fecha_desde_dt, fecha_hasta_dt = _parse_rango_fechas(fecha_desde, fecha_hasta)
+
+    concepto_regex = None
+    if current_user.rol == "cpd":
+        concepto_regex = {"concepto": {"$regex": r"^matr[ií]cula$", "$options": "i"}}
+
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
+    criteria = payment_service._construir_filtro_reporte_caja(
+        fecha_desde_dt, fecha_hasta_dt,
+        curso_id=curso_id, estudiante_id=estudiante_id,
+        estado=None,  # No filtrar por estado: queremos todos para mostrar debitos y creditos
+        cursos_permitidos=cursos_permitidos
+    )
+    if concepto_regex:
+        criteria.update(concepto_regex)
+
+    # Solo nos interesan aprobado, anulado, rechazado (NO pendientes)
+    criteria["estado_pago"] = {"$in": ["aprobado", "anulado", "rechazado"]}
+
+    # Ordenar por fecha de comprobante (ascendente para el saldo acumulado)
+    payments = await Payment.find(criteria).sort("+fecha_comprobante").to_list()
+
+    # Cargar info relacionada
+    student_ids = list({p.estudiante_id for p in payments if p.estudiante_id})
+    enrollment_ids = list({p.inscripcion_id for p in payments if p.inscripcion_id})
+    curso_ids = list({p.curso_id for p in payments if p.curso_id})
+
+    students_task = Student.find(In(Student.id, student_ids)).to_list()
+    enrollments_task = Enrollment.find(In(Enrollment.id, enrollment_ids)).to_list()
+    courses_task = Course.find(In(Course.id, curso_ids)).to_list()
+
+    students, enrollments, courses = await asyncio.gather(students_task, enrollments_task, courses_task)
+    students_map = {s.id: s for s in students}
+    courses_map = {c.id: c for c in courses}
+
+    # Calcular resumen previo (todos los aprobados sin filtro de fecha, para
+    # tener el "Saldo Inicial" = todo lo cobrado ANTES del rango)
+    criterios_saldo_inicial = payment_service._construir_filtro_reporte_caja(
+        None, fecha_desde_dt,
+        curso_id=curso_id, estudiante_id=estudiante_id,
+        estado=None, cursos_permitidos=cursos_permitidos
+    )
+    if concepto_regex:
+        criterios_saldo_inicial.update(concepto_regex)
+    criterios_saldo_inicial["estado_pago"] = "aprobado"
+    pagos_previos_aprobados = await Payment.find(criterios_saldo_inicial).to_list()
+    saldo_inicial = sum(p.cantidad_pago for p in pagos_previos_aprobados)
+
+    # Calcular debitos previos (anulados antes del rango)
+    criterios_deb_prev = payment_service._construir_filtro_reporte_caja(
+        None, fecha_desde_dt,
+        curso_id=curso_id, estudiante_id=estudiante_id,
+        estado=None, cursos_permitidos=cursos_permitidos
+    )
+    if concepto_regex:
+        criterios_deb_prev.update(concepto_regex)
+    criterios_deb_prev["estado_pago"] = {"$in": ["anulado", "rechazado"]}
+    pagos_previos_deb = await Payment.find(criterios_deb_prev).to_list()
+    debitos_previos = sum(p.cantidad_pago for p in pagos_previos_deb)
+    saldo_inicial -= debitos_previos  # ajustar por débitos previos
+
+    # Generar XLSX
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Extracto Bancario"
+
+    # ======= ESTILOS =======
+    title_font = Font(bold=True, size=14, color="1F4E78")
+    subtitle_font = Font(bold=True, size=11, color="1F4E78")
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    debito_font = Font(color="C00000", bold=True)  # rojo
+    credito_font = Font(color="00B050", bold=True)  # verde
+    total_font = Font(bold=True, size=11)
+    total_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+    thin = Side(border_style="thin", color="A0A0A0")
+    cell_border = Border(top=thin, left=thin, right=thin, bottom=thin)
+
+    # ======= ENCABEZADO (estilo estado de cuenta) =======
+    ws.merge_cells("A1:F1")
+    ws["A1"] = "ESTADO DE CUENTA - SISTEMA KyC DataHub"
+    ws["A1"].font = title_font
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+
+    ws.merge_cells("A2:F2")
+    ws["A2"] = "Banco UAGRM - Postgrado"
+    ws["A2"].font = subtitle_font
+    ws["A2"].alignment = Alignment(horizontal="center", vertical="center")
+
+    # Info de cuenta
+    info_rows = [
+        ("Cuenta:", "POSTGRADO-UAGRM"),
+        ("Titular:", "UAGRM - Direccion de Posgrado"),
+        ("Moneda:", "Bs (Bolivianos)"),
+        ("Período:", f"{fecha_desde_str or '(inicio)'} al {fecha_hasta_str or '(hoy)'}"),
+        ("Generado:", format_fecha(datetime.now(), "%Y-%m-%d %H:%M", fallback="")),
+    ]
+    for i, (label, value) in enumerate(info_rows, start=4):
+        ws.cell(row=i, column=1, value=label).font = Font(bold=True)
+        ws.merge_cells(start_row=i, start_column=2, end_row=i, end_column=6)
+        ws.cell(row=i, column=2, value=value)
+
+    # Saldo inicial
+    row_saldo = 4 + len(info_rows)
+    ws.cell(row=row_saldo, column=1, value="SALDO INICIAL:").font = Font(bold=True, size=11)
+    ws.merge_cells(start_row=row_saldo, start_column=2, end_row=row_saldo, end_column=6)
+    saldo_cell = ws.cell(row=row_saldo, column=2, value=saldo_inicial)
+    saldo_cell.font = Font(bold=True, size=11)
+    saldo_cell.number_format = '#,##0.00 "Bs"'
+
+    # ======= TABLA DE MOVIMIENTOS =======
+    header_row = row_saldo + 2
+    headers = ["Fecha", "Comprobante", "Concepto / Descripción", "Débitos", "Créditos", "Saldo"]
+    for col, h in enumerate(headers, start=1):
+        cell = ws.cell(row=header_row, column=col, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = cell_border
+
+    # Cuerpo: una fila por pago
+    saldo = saldo_inicial
+    total_creditos = 0.0
+    total_debitos = 0.0
+    row = header_row + 1
+    for p in payments:
+        student = students_map.get(p.estudiante_id)
+        nombre = student.nombre if student and student.nombre else "Sin nombre"
+        course = courses_map.get(p.curso_id)
+        codigo_curso = course.codigo if course and course.codigo else (course.nombre_programa if course else "")
+        fecha = format_fecha(p.fecha_comprobante, "%Y-%m-%d", fallback="Sin fecha")
+        comprobante = p.numero_transaccion or p.id or "S/N"
+        # Construir concepto
+        if p.estado_pago == EstadoPago.ANULADO:
+            tipo_mov = "ANULACIÓN"
+        elif p.estado_pago == EstadoPago.RECHAZADO:
+            tipo_mov = "RECHAZO"
+        else:
+            tipo_mov = "PAGO"
+        # Concepto: tipo + concepto del pago + nombre estudiante + código curso
+        concepto_str = f"{tipo_mov} {p.concepto or 'Pago'} - {nombre}"
+        if codigo_curso:
+            concepto_str += f" ({codigo_curso})"
+        if p.detalle:
+            concepto_str += f" | {p.detalle}"
+        # Débitos / Créditos
+        if p.estado_pago in (EstadoPago.ANULADO, EstadoPago.RECHAZADO):
+            debito = p.cantidad_pago
+            credito = 0.0
+            total_debitos += debito
+            saldo -= debito
+        else:  # aprobado
+            debito = 0.0
+            credito = p.cantidad_pago
+            total_creditos += credito
+            saldo += credito
+
+        # Escribir fila
+        ws.cell(row=row, column=1, value=fecha).border = cell_border
+        ws.cell(row=row, column=2, value=str(comprobante)[:30]).border = cell_border
+        ws.cell(row=row, column=3, value=concepto_str[:120]).border = cell_border
+        c4 = ws.cell(row=row, column=4, value=debito if debito > 0 else None)
+        c4.border = cell_border
+        c4.number_format = '#,##0.00'
+        if debito > 0:
+            c4.font = debito_font
+        c5 = ws.cell(row=row, column=5, value=credito if credito > 0 else None)
+        c5.border = cell_border
+        c5.number_format = '#,##0.00'
+        if credito > 0:
+            c5.font = credito_font
+        c6 = ws.cell(row=row, column=6, value=saldo)
+        c6.border = cell_border
+        c6.number_format = '#,##0.00 "Bs"'
+        c6.font = Font(bold=True)
+
+        row += 1
+
+    # Fila vacía
+    row += 1
+
+    # ======= TOTALES (estilo estado de cuenta) =======
+    total_row = row
+    ws.cell(row=total_row, column=1, value="TOTAL OPERACIONES:").font = total_font
+    ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=3)
+    ws.cell(row=total_row, column=4, value=len(payments)).font = total_font
+    ws.cell(row=total_row, column=4).alignment = Alignment(horizontal="right")
+    ws.cell(row=total_row, column=4).fill = total_fill
+
+    row += 1
+    ws.cell(row=row, column=1, value="TOTAL DÉBITOS:").font = total_font
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=3)
+    c = ws.cell(row=row, column=4, value=total_debitos)
+    c.font = Font(bold=True, color="C00000")
+    c.number_format = '#,##0.00 "Bs"'
+    c.fill = total_fill
+
+    row += 1
+    ws.cell(row=row, column=1, value="TOTAL CRÉDITOS:").font = total_font
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=3)
+    c = ws.cell(row=row, column=5, value=total_creditos)
+    c.font = Font(bold=True, color="00B050")
+    c.number_format = '#,##0.00 "Bs"'
+    c.fill = total_fill
+
+    row += 1
+    ws.cell(row=row, column=1, value="SALDO FINAL:").font = Font(bold=True, size=12)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=3)
+    c = ws.cell(row=row, column=6, value=saldo)
+    c.font = Font(bold=True, size=12)
+    c.number_format = '#,##0.00 "Bs"'
+    c.fill = total_fill
+
+    # Anchos de columna
+    column_widths = [12, 18, 60, 14, 14, 16]
+    for i, width in enumerate(column_widths, 1):
+        ws.column_dimensions[chr(64 + i)].width = width
+
+    # Pie de pagina
+    row += 3
+    ws.cell(row=row, column=1, value=(
+        "NOTA: Los CREDITOS incluyen todos los pagos aprobados (incluso si el "
+        "estudiante abandona o congela despues, su dinero SI entro al sistema). "
+        "Los DEBITOS son pagos anulados o rechazados (salen del sistema). "
+        "Los pagos PENDIENTES no se muestran (estan en revision)."
+    )).font = Font(italic=True, size=9, color="606060")
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+    ws.cell(row=row, column=1).alignment = Alignment(wrap_text=True, vertical="top")
+    ws.row_dimensions[row].height = 35
+
+    # Guardar
+    excel_file = BytesIO()
+    wb.save(excel_file)
+    excel_file.seek(0)
+
+    filename = f"extracto_bancario_{fecha_desde_str or 'inicio'}_{fecha_hasta_str or 'hoy'}.xlsx"
     return StreamingResponse(
         excel_file,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1197,7 +1494,10 @@ async def export_payments_excel(
         student_name = student.nombre if student and student.nombre else "Sin nombre"
         student_registro = (student.registro if student and student.registro else "")
         course = courses_map.get(p.get("curso_id"))
-        course_name = (course.nombre_programa if course and course.nombre_programa else "Sin curso")
+        # F-COBRANZA-022 (2026-07-22): Joel pidio usar el codigo del programa
+        # (DIPL-IA-2026) en vez del nombre largo en el XLSX, para que el reporte
+        # sea mas compacto y matchee con el codigo que se ve en el sistema.
+        course_name = (course.codigo if course and course.codigo else (course.nombre_programa if course and course.nombre_programa else "Sin curso"))
         modulo = p.get("numero_cuota") or "N/A"
 
         row = [
