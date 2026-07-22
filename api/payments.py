@@ -1540,7 +1540,7 @@ async def export_payments_excel(
     ws.title = "Pagos"
 
     headers = [
-        "ID", "Fecha Comprobante", "Fecha Subida", "Estudiante", "Registro",
+        "ID", "Fecha Comprobante", "Fecha Subida", "Estudiante", "C.I.",
         "Curso", "Concepto", "Detalle (Desglose)", "Nº Módulo", "Monto (Bs)", "Método", "Banco",
         "Remitente", "Nº Transacción", "Estado", "Comprobante URL",
     ]
@@ -1556,7 +1556,10 @@ async def export_payments_excel(
     for p in enriched:
         student = students_map.get(p.get("estudiante_id"))
         student_name = student.nombre if student and student.nombre else "Sin nombre"
-        student_registro = (student.registro if student and student.registro else "")
+        # F-COBRANZA-036 (2026-07-22): Sandra pidio columna C.I. en el reporte
+        # de caja. Usamos el campo `estudiante_ci` que enrich_payments_with_details_bulk
+        # ya lleno (prioriza carnet_identidad; si no hay, cae al registro).
+        student_ci = p.get("estudiante_ci") or ""
         course = courses_map.get(p.get("curso_id"))
         # F-COBRANZA-022 (2026-07-22): Joel pidio usar el codigo del programa
         # (DIPL-IA-2026) en vez del nombre largo en el XLSX, para que el reporte
@@ -1569,7 +1572,7 @@ async def export_payments_excel(
             format_fecha(p.get("fecha_comprobante"), "%Y-%m-%d", fallback="Sin registrar"),
             format_fecha(p.get("fecha_subida"), "%Y-%m-%d %H:%M", fallback=""),
             student_name,
-            student_registro,
+            student_ci,
             course_name,
             p.get("concepto") or "",
             p.get("detalle") or "",  # F-COBRANZA-020: desglose separado

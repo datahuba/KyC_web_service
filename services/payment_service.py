@@ -145,6 +145,12 @@ async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dic
 
         student = students_map.get(estudiante_id)
         nombre_estudiante = student.nombre if student and student.nombre else "Sin nombre"
+        # F-COBRANZA-036 (2026-07-22): incluir C.I. y registro del estudiante.
+        # Pedido Lic. Sandra Zabala: "Adicionar la columna con los datos de los
+        # C.I. de los estudiantes" en el reporte de caja. C.I. = carnet_identidad.
+        # Si no tiene C.I., caemos al registro universitario.
+        carnet_identidad = (student.carnet_identidad if student and getattr(student, "carnet_identidad", None) else None) or \
+                           (student.registro if student and getattr(student, "registro", None) else None) or ""
 
         enrollment = enrollments_map.get(inscripcion_id)
         total_cuotas = enrollment.cantidad_cuotas if enrollment else 0
@@ -161,6 +167,8 @@ async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dic
             "en_ventana_reversion": _calcular_en_ventana_reversion(payment) if not isinstance(payment, dict) else False,
             # F-COBRANZA-020: incluir el detalle en el dict enriquecido
             "detalle": _get(payment, "detalle", None),
+            # F-COBRANZA-036: CI/registro del estudiante (Sandra - reporte caja)
+            "estudiante_ci": carnet_identidad,
         })
         enriched_list.append(p_dict)
 
