@@ -873,3 +873,44 @@ class TestF015GlosaDetallada:
         glosa, cuota = _generar_glosa_detalle(enrollment, 150.0, [])
         assert glosa == "Pago Módulo 1"
         assert cuota == 1
+
+
+class TestF015GlosaPlaceholderGenerico:
+    """F-COBRANZA-015 (fix 2026-07-22): si el frontend manda un concepto
+    placeholder genérico ('Matrícula' / 'Módulo' / vacío), el backend debe
+    regenerar la glosa detallada. Si el usuario escribió algo específico
+    (caso operador de Caja o un texto custom), se respeta."""
+
+    def test_concepto_modulo_es_generico(self):
+        """El frontend autocompleta `concepto = 'Módulo'` al seleccionar
+        un curso con matrícula ya pagada. Esto es placeholder y debe
+        sobrescribirse con la glosa detallada."""
+        from services.payment_service import _es_concepto_generico_placeholder
+        assert _es_concepto_generico_placeholder("Módulo") is True
+        assert _es_concepto_generico_placeholder("modulo") is True
+        assert _es_concepto_generico_placeholder("MÓDULO") is True
+
+    def test_concepto_matricula_es_generico(self):
+        """El frontend autocompleta `concepto = 'Matrícula'` cuando la
+        matrícula está pendiente. Placeholder → sobrescribir."""
+        from services.payment_service import _es_concepto_generico_placeholder
+        assert _es_concepto_generico_placeholder("Matrícula") is True
+        assert _es_concepto_generico_placeholder("matricula") is True
+        assert _es_concepto_generico_placeholder("Matrícula ") is True  # espacios
+
+    def test_concepto_vacio_o_none_es_generico(self):
+        """Si el frontend no envía concepto (o manda vacío), se regenera."""
+        from services.payment_service import _es_concepto_generico_placeholder
+        assert _es_concepto_generico_placeholder("") is True
+        assert _es_concepto_generico_placeholder("   ") is True
+        assert _es_concepto_generico_placeholder(None) is True
+
+    def test_concepto_especifico_se_respeta(self):
+        """Si el operador de Caja escribió un concepto específico (ej.
+        'Pago completo - Diplomado IA' o 'Recuperación Mayo'), NO se
+        sobrescribe: se respeta lo que el usuario escribió."""
+        from services.payment_service import _es_concepto_generico_placeholder
+        assert _es_concepto_generico_placeholder("Pago completo - Diplomado IA") is False
+        assert _es_concepto_generico_placeholder("Recuperación Mayo") is False
+        assert _es_concepto_generico_placeholder("Cuota especial #5") is False
+

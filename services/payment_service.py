@@ -190,6 +190,31 @@ async def get_next_pending_payment(enrollment_id: PydanticObjectId) -> dict:
 #   - Un módulo parcial           -> "Pago Módulo 3 (parcial, Bs X de Bs Y)"
 #   - Pago excesivo sobre saldo   -> "Pago completo: Matrícula + Módulos 1, 2, 3 (sobrante Bs Z)"
 
+
+# Set de conceptos GENÉRICOS que el frontend puede mandar como placeholder
+# antes de que el usuario los edite. Si el `concepto` entrante es uno de estos
+# (o vacío), lo sobrescribimos con la glosa detallada calculada. Si es algo
+# específico (caso operador de Caja, o un texto custom), lo respetamos.
+#
+# Bug detectado en producción 2026-07-22: el PaymentForm.svelte siempre manda
+# `concepto = 'Módulo'` o `concepto = 'Matrícula'` como placeholders
+# autocompletados al seleccionar el curso. El backend respetaba ese valor y
+# todos los pagos quedaban con glosa "Módulo" genérica, sin detalle de qué
+# módulo se pagaba. Joel lo detectó: "tu correecion de el monto ya lo
+# subiste porque no lo veo".
+_CONCEPTOS_GENERICOS_PLACEHOLDER = frozenset({
+    "", "matrícula", "matricula", "módulo", "modulo",
+})
+
+
+def _es_concepto_generico_placeholder(concepto: str | None) -> bool:
+    """True si el concepto entrante es un placeholder genérico que el
+    frontend autocompletó y debe ser reemplazado por la glosa detallada."""
+    if not concepto:
+        return True
+    return concepto.strip().lower() in _CONCEPTOS_GENERICOS_PLACEHOLDER
+
+
 def _generar_glosa_detalle(
     enrollment,
     monto_pago: float,
@@ -335,12 +360,17 @@ async def create_payment(
     # de "Cuota N" genérico. Joel: "los pagos deben ser detallados, tipo
     # 'Pago Módulo 1' o 'Módulo 1, 2, 3'". Previsualizamos el cascading para
     # saber qué módulos cubre este pago.
-    if payment_in.concepto:
-        # El usuario forzó un concepto (caso de "Caja" o frontends viejos)
+    #
+    # Si el frontend manda un concepto GENÉRICO (los placeholders por defecto
+    # del PaymentForm.svelte: "Matrícula" o "Módulo"), lo sobrescribimos con
+    # la glosa detallada calculada. Si el usuario forzó un concepto específico
+    # (caso de "Caja" o un valor distinto a los genéricos), lo respetamos.
+    if payment_in.concepto and not _es_concepto_generico_placeholder(payment_in.concepto):
+        # El usuario forzó un concepto específico (caso "Caja", carga manual)
         concepto_final = payment_in.concepto
         cuota_final = payment_in.numero_cuota if payment_in.numero_cuota else next_payment["numero_cuota"]
     else:
-        # Generar glosa automática
+        # Generar glosa automática (placeholder genérico o vacío)
         pagos_aprobados_pre = await Payment.find(
             Payment.inscripcion_id == payment_in.inscripcion_id,
             Payment.estado_pago == EstadoPago.APROBADO

@@ -1002,6 +1002,7 @@ async def export_payments_excel(
     from openpyxl.styles import Font, Alignment, PatternFill
     from io import BytesIO
     from core.timezone_utils import to_bolivia_time
+    from models.enrollment import Enrollment
 
     if isinstance(current_user, User):
         if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
