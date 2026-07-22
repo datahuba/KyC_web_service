@@ -477,6 +477,10 @@ async def create_payment(
     if payment_in.concepto and not _es_concepto_generico_placeholder(payment_in.concepto):
         # El usuario forzó un concepto específico (caso "Caja", carga manual)
         concepto_final = payment_in.concepto
+        detalle_final = None  # F-COBRANZA-034 (2026-07-22): inicializar para que no explote
+                              # abajo si el caller pasa concepto especifico. Bug destapado
+                              # al fixear F-034: el check 'no te pertenece' fallaba antes
+                              # y nunca llegabamos aca con concepto especifico.
         cuota_final = payment_in.numero_cuota if payment_in.numero_cuota else next_payment["numero_cuota"]
     else:
         # Generar glosa automática (placeholder genérico o vacío)
