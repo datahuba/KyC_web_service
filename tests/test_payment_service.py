@@ -570,3 +570,66 @@ class TestFiltroEstudianteReporteCaja:
             "F-COBRANZA-003: el endpoint get_reporte_caja_endpoint debe "
             "aceptar estudiante_id como Query param."
         )
+
+
+# ========================================================================
+# F-COBRANZA-011 (UI) · Restricción de roles para upload-by-encargado
+# ========================================================================
+# Decisión de Joel (2026-07-21 20:30): solo cobranza (no encargado_curso, no
+# coordinador, no cpd) puede subir el comprobante del estudiante. Esto evita
+# confusión: la acción vive en /app/payments, vista natural del personal de
+# cobranza.
+
+class TestRolesUploadByEncargado:
+    """F-COBRANZA-011: el endpoint upload-by-encargado acepta solo cobranza/admin/superadmin."""
+
+    def test_roles_permitidos_solo_cobranza(self):
+        """Los roles permitidos en el endpoint son exactamente superadmin, admin, cobranza.
+        Excluye: cpd, coordinador, encargado_curso, docente, estudiante."""
+        import re
+        from pathlib import Path
+
+        api_file = Path(__file__).parent.parent / "api" / "payments.py"
+        contenido = api_file.read_text(encoding="utf-8")
+
+        # Buscar la sección que define roles_permitidos DENTRO de upload_comprobante_by_encargado
+        patron = (
+            r"async\s+def\s+upload_comprobante_by_encargado.*?"
+            r"roles_permitidos\s*=\s*\[(.*?)\]"
+        )
+        match = re.search(patron, contenido, re.DOTALL)
+        assert match, "F-COBRANZA-011: no se encontró la lista de roles_permitidos en upload-by-encargado"
+
+        roles_str = match.group(1)
+        roles = re.findall(r'"([^"]+)"', roles_str)
+
+        # Roles que SÍ deben estar
+        assert "superadmin" in roles, "superadmin debe estar permitido"
+        assert "admin" in roles, "admin debe estar permitido"
+        assert "cobranza" in roles, "cobranza debe estar permitido (rol principal)"
+
+        # Roles que NO deben estar (decisión Joel: solo cobranza, no encargado)
+        assert "cpd" not in roles, "cpd NO debe estar permitido"
+        assert "coordinador" not in roles, "coordinador NO debe estar permitido"
+        assert "encargado_curso" not in roles, "encargado_curso NO debe estar permitido"
+        assert "docente" not in roles, "docente NO debe estar permitido (jamás)"
+        assert "estudiante" not in roles, "estudiante NO debe estar permitido (jamás)"
+
+    def test_mensaje_error_menciona_cobranza(self):
+        """El mensaje de error 403 debe mencionar explícitamente 'cobranza'
+        para que el frontend sepa qué roles son los correctos."""
+        import re
+        from pathlib import Path
+
+        api_file = Path(__file__).parent.parent / "api" / "payments.py"
+        contenido = api_file.read_text(encoding="utf-8")
+
+        # Buscar la sección del error 403 y verificar que el detail menciona "Solo cobranza"
+        patron = (
+            r"async\s+def\s+upload_comprobante_by_encargado.*?"
+            r'detail=f"[^"]*Solo cobranza[^"]*"'
+        )
+        assert re.search(patron, contenido, re.DOTALL), (
+            "F-COBRANZA-011: el detail del error 403 debe mencionar 'Solo cobranza, "
+            "admin y superadmin están autorizados'."
+        )

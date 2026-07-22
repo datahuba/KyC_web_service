@@ -400,25 +400,33 @@ async def upload_comprobante_by_encargado(
     current_user: User = Depends(require_staff)
 ) -> Any:
     """
-    F-COBRANZA-011 (2026-07-21): el encargado del programa puede subir el
+    F-COBRANZA-011 (2026-07-21): el personal de COBRANZA puede subir el
     comprobante de pago del estudiante cuando este no puede hacerlo por
     sí mismo (problemas técnicos, falta de acceso, etc.).
 
-    Roles permitidos: SUPERADMIN, ADMIN, COORDINADOR, ENCARGADO_CURSO, CPD, COBRANZA.
-    Roles NO permitidos: DOCENTE, ESTUDIANTE.
+    Roles permitidos: SUPERADMIN, ADMIN, COBRANZA.
+    Roles NO permitidos: CPD, COORDINADOR, ENCARGADO_CURSO, DOCENTE, ESTUDIANTE.
+
+    Decisión de Joel (2026-07-21 20:30): "debería subirlo el de cobranzas, y
+    que esté en el modal de gestión de pagos [...] no esté en el del encargado
+    porque sería confuncion por ahora". Encargado de programa NO sube: lo hace
+    cobranza. La UI expone este endpoint solo en /app/payments con el botón
+    "Subir comprobante del estudiante".
 
     Diferencias vs `create_payment`:
     - El pago YA EXISTE (creado por el estudiante con o sin comprobante).
     - Solo se actualiza el comprobante_url y datos opcionales.
-    - Se registra en auditoría con `subido_por=encargado_id`.
+    - Se registra en auditoría con `subido_por=cobranza_id`.
     - El estudiante ve en su perfil quién subió el comprobante.
+    - Al subir, el pago ya estaba APROBADO (F-COBRANZA-004), así que el saldo
+      del enrollment NO se vuelve a tocar.
     """
-    # 1. Validar rol: encargado, coordinador, o staff financiero.
-    roles_permitidos = ["superadmin", "admin", "cobranza", "cpd", "encargado_curso", "coordinador"]
+    # 1. Validar rol: SOLO personal financiero (cobranza) y administrativos.
+    roles_permitidos = ["superadmin", "admin", "cobranza"]
     if current_user.rol not in roles_permitidos:
         raise HTTPException(
             status_code=403,
-            detail=f"Su rol ({current_user.rol}) no puede subir comprobantes en nombre de estudiantes."
+            detail=f"Su rol ({current_user.rol}) no puede subir comprobantes en nombre de estudiantes. Solo cobranza, admin y superadmin están autorizados."
         )
 
     # 2. Obtener el pago
