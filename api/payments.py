@@ -1214,7 +1214,12 @@ async def export_payments_excel(
             p.get("banco") or "Caja UAGRM",
             p.get("remitente") or "",
             p.get("numero_transaccion") or "S/N",
-            p.get("estado_pago") or "",
+            # F-COBRANZA-016 fix (2026-07-22): el campo se llama `estado` en
+            # el dict enriquecido (devuelto por enrich_payments_with_details_bulk
+            # que ya lo convierte a .value del enum). Antes usaba `estado_pago`
+            # que devolvía el enum crudo y se mostraba como "EstadoPago.APROBADO"
+            # en el XLSX. Bug detectado por Joel al abrir el Excel descargado.
+            p.get("estado") or "",
             p.get("comprobante_url") or "",
         ]
         ws.append(row)

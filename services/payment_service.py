@@ -223,28 +223,43 @@ def _generar_glosa_detalle(
     """
     Previsualiza el cascading del pago en memoria y construye la glosa detallada.
 
+    F-COBRANZA-018 (2026-07-22): la decisión de si este pago cubre la
+    matrícula o va a módulos NO se basa en `enrollment.matricula_pagada`
+    (que puede estar desincronizado por migraciones o por datos históricos).
+    Se basa en el HISTORIAL de pagos aprobados: si la suma NO alcanza el
+    costo de la matrícula, este pago es para la matrícula. Robusto contra
+    datos desincronizados y permite re-migración retroactiva correcta.
+
     Returns:
         tuple (concepto, numero_cuota) listo para asignar al Payment.
     """
-    # 1. Calcular dinero aprobado histórico (lo que ya se acreditó)
+    # 1. Calcular dinero aprobado histórico (lo que ya se acreditó).
+    # F-COBRANZA-018: la decisión de si este pago cubre la matrícula o va
+    # a módulos se basa en DOS señales concordantes:
+    #   (a) `enrollment.matricula_pagada` (estado oficial del enrollment)
+    #   (b) suma de pagos_aprobados_existentes >= costo_matricula
+    # Si CUALQUIERA de las dos señales dice "ya pagada", el pago va a
+    # módulos. Si AMBAS dicen "no pagada", va a matrícula. Esto es robusto
+    # contra datos históricos desincronizados en una sola señal.
     dinero_antes = sum(p.cantidad_pago for p in pagos_aprobados_existentes)
-    tanque = round(dinero_antes + monto_pago, 2)
+    matricula_ya_cubierta_por_pagos_previos = dinero_antes >= (enrollment.costo_matricula or 0)
+    matricula_ya_pagada_segun_enrollment = bool(getattr(enrollment, "matricula_pagada", False))
+    matricula_ya_cubierta = matricula_ya_cubierta_por_pagos_previos or matricula_ya_pagada_segun_enrollment
 
-    # 2. Determinar si cubre matrícula y a partir de qué módulo
-    matricula_ya_pagada = enrollment.matricula_pagada
+    tanque = round(dinero_antes + monto_pago, 2)
     matricula_cubierta_por_este_pago = False
     modulos_cubiertos: list = []  # cada item: (numero_o_nombre, tipo='completo'|'parcial', monto_pagado, costo_total)
     sobrante = 0.0
 
-    if not matricula_ya_pagada:
-        if tanque >= enrollment.costo_matricula:
-            tanque = round(tanque - enrollment.costo_matricula, 2)
+    if not matricula_ya_cubierta:
+        if tanque >= (enrollment.costo_matricula or 0):
+            tanque = round(tanque - (enrollment.costo_matricula or 0), 2)
             matricula_cubierta_por_este_pago = True
         else:
             # No alcanza para matrícula → no se computa
             return ("Matrícula (pago parcial)", None)
 
-    # 3. Cascada sobre los módulos
+    # 2. Cascada sobre los módulos
     for idx, mod in enumerate(enrollment.modulos, start=1):
         if tanque <= 0.01:
             break
@@ -257,25 +272,18 @@ def _generar_glosa_detalle(
             modulos_cubiertos.append((idx, "parcial", tanque, costo_modulo))
             tanque = 0.0
 
-    # 4. Si queda dinero después de todo, es sobrante (no debería pasar, pero por si acaso)
+    # 3. Si queda dinero después de todo, es sobrante (no debería pasar, pero por si acaso)
     if tanque > 0.01:
         sobrante = tanque
 
-    # 5. Construir la glosa
+    # 4. Construir la glosa
     partes = []
     numero_cuota_final = None
 
-    # Solo agregar "Matrícula" si este PAGO la cubrió (no si ya estaba pagada antes)
-    if matricula_cubierta_por_este_pago and not modulos_cubiertos:
-        partes.append("Matrícula")
-    elif matricula_cubierta_por_este_pago and modulos_cubiertos:
+    if matricula_cubierta_por_este_pago:
         partes.append("Matrícula")
 
     if modulos_cubiertos:
-        # Construir el detalle de módulos
-        # Caso simple: un solo módulo completo → "Módulo 1"
-        # Caso varios: "Módulos 1, 2, 3"
-        # Caso parcial: "Módulo 3 (parcial, Bs X de Bs Y)"
         indices_completos = [m[0] for m in modulos_cubiertos if m[1] == "completo"]
         indices_parciales = [m for m in modulos_cubiertos if m[1] == "parcial"]
 
@@ -296,7 +304,7 @@ def _generar_glosa_detalle(
                 )
                 partes.append(f"Pago parcial {detalle}")
         else:
-            # Mixto: completos + parciales
+            # Mixto: completos + parciales (caso matricula + modulos)
             detalle_completos = (
                 f"Módulo {indices_completos[0]}"
                 if len(indices_completos) == 1
@@ -304,7 +312,10 @@ def _generar_glosa_detalle(
             )
             partes.append(f"Pago {detalle_completos}")
             for idx, _, monto_p, costo in indices_parciales:
-                partes.append(f" + Módulo {idx} parcial (Bs {monto_p:.0f} de Bs {costo:.0f})")
+                # FIX F-COBRANZA-018: no incluir " + " redundante cuando la
+                # parte anterior ya es "Matrícula". El join " + " ya pone
+                # el espacio. Antes daba "Matrícula +  + Módulo 2 parcial".
+                partes.append(f"+ Módulo {idx} parcial (Bs {monto_p:.0f} de Bs {costo:.0f})")
 
     glosa = " + ".join(partes) if partes else "Pago sin detalle"
     if sobrante > 0.01:
