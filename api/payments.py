@@ -1541,7 +1541,8 @@ async def export_payments_excel(
 
     headers = [
         "ID", "Fecha Comprobante", "Fecha Subida", "Estudiante", "C.I.",
-        "Curso", "Concepto", "Detalle (Desglose)", "Nº Módulo", "Monto (Bs)", "Método", "Banco",
+        "Curso", "Concepto", "Detalle (Desglose)", "Nº Módulo", "Tipo Movimiento",
+        "Débito (Bs)", "Crédito (Bs)", "Monto (Bs)", "Método", "Banco",
         "Remitente", "Nº Transacción", "Estado", "Comprobante URL",
     ]
     ws.append(headers)
@@ -1577,6 +1578,12 @@ async def export_payments_excel(
             p.get("concepto") or "",
             p.get("detalle") or "",  # F-COBRANZA-020: desglose separado
             modulo,
+            # F-COBRANZA-037 (2026-07-22): Sandra pidio columnas Debito/Credito
+            # para ver la diferencia entre pagos y anulaciones. Los rechazos
+            # tambien van a Debito. Los pagos aprobados van a Credito.
+            p.get("tipo_movimiento") or "PAGO",
+            float(p.get("debito") or 0),
+            float(p.get("credito") or 0),
             p.get("cantidad_pago", 0),
             p.get("metodo_pago") or "Transferencia",
             p.get("banco") or "Caja UAGRM",

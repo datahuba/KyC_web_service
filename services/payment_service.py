@@ -169,6 +169,17 @@ async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dic
             "detalle": _get(payment, "detalle", None),
             # F-COBRANZA-036: CI/registro del estudiante (Sandra - reporte caja)
             "estudiante_ci": carnet_identidad,
+            # F-COBRANZA-037 (2026-07-22): columnas Débitos/Créditos + tipo
+            # movimiento en el reporte de caja. Sandra Zabala pidio ver
+            # claramente la diferencia entre PAGO (credito) y ANULACION/
+            # RECHAZO (debito), sin que los anulados se sumen al total.
+            "tipo_movimiento": (
+                "ANULACION" if _set_estado_value(_get(payment, "estado_pago")) == "anulado" else
+                "RECHAZO"  if _set_estado_value(_get(payment, "estado_pago")) == "rechazado" else
+                "PAGO"
+            ),
+            "debito": abs(_get(payment, "cantidad_pago", 0)) if _set_estado_value(_get(payment, "estado_pago")) in ("anulado", "rechazado") else 0.0,
+            "credito": abs(_get(payment, "cantidad_pago", 0)) if _set_estado_value(_get(payment, "estado_pago")) == "aprobado" else 0.0,
         })
         enriched_list.append(p_dict)
 
