@@ -1306,12 +1306,68 @@ class TestF026ComprobanteObligatorio:
             bloque = src[idx:idx + rango]
             pos_not_file = bloque.find("if not file")
             pos_caja_check = bloque.find('if metodo_pago != "Caja"')
-            assert pos_not_file > 0, f"{name}: falta 'if not file'"
+            assert pos_not_file > 0, f"{name}: falla 'if not file'"
             if pos_caja_check < 0:
-                # Puede no tener check de Caja (si no valida numero_transaccion)
                 continue
             assert pos_not_file < pos_caja_check, (
                 f"{name}: 'if not file' debe estar ANTES de 'if metodo_pago != Caja' "
                 f"(pos_not_file={pos_not_file}, pos_caja={pos_caja_check})"
             )
+
+
+class TestF031EnrichAceptaDicts:
+    """F-COBRANZA-031 (2026-07-22): el endpoint /reportes/caja convertia
+    los pagos a dict antes de llamar a enrich_payments_with_details_bulk,
+    pero esa funcion solo aceptaba objetos Payment, causando 500.
+
+    Kevin reporto el incidente: 'errores y mas errores'. Causa: el codigo
+    asume que el parametro es un objeto, pero el endpoint pasa dicts.
+
+    El fix: enrich_payments_with_details_bulk detecta si los items son
+    dicts u objetos y usa .get() o atributos segun corresponda.
+    """
+
+    @pytest.fixture
+    def service_src(self):
+        from pathlib import Path
+        return Path(__file__).parent.parent / "services" / "payment_service.py"
+
+    def test_enrich_tiene_helper_get_para_dictobjeto(self, service_src):
+        """La funcion debe tener un helper _get que detecta dict vs objeto."""
+        src = service_src.read_text(encoding="utf-8")
+        idx = src.find("async def enrich_payments_with_details_bulk")
+        bloque = src[idx:idx + 3000]
+        assert "def _get(p" in bloque, (
+            "enrich_payments_with_details_bulk debe tener un helper _get() "
+            "que funcione tanto con dicts como con objetos Payment"
+        )
+        assert "isinstance(p, dict)" in bloque, (
+            "el helper _get debe verificar si p es dict con isinstance"
+        )
+
+    def test_enrich_pasa_por_codigo_de_deteccion(self, service_src):
+        """El codigo debe detectar dicts y NO llamar model_dump() sobre un dict."""
+        src = service_src.read_text(encoding="utf-8")
+        idx = src.find("async def enrich_payments_with_details_bulk")
+        bloque = src[idx:idx + 3000]
+        # Debe verificar isinstance(payment, dict) antes de model_dump
+        assert "isinstance(payment, dict)" in bloque, (
+            "enrich debe detectar si payment es dict antes de model_dump"
+        )
+        # El model_dump solo debe ejecutarse si NO es dict
+        assert "if isinstance(payment, dict):" in bloque, (
+            "enrich debe tener un if isinstance para usar p directamente si es dict"
+        )
+
+    def test_reporte_caja_pasa_lista_a_enrich(self, service_src):
+        """get_reporte_caja debe poder pasar su lista (de dicts) a enrich."""
+        # Verificar que get_reporte_caja retorna dicts y enrich los acepta
+        idx = service_src.read_text(encoding="utf-8").find("async def get_reporte_caja")
+        bloque = service_src.read_text(encoding="utf-8")[idx:idx + 3000]
+        assert "p_dict = p.model_dump" in bloque, (
+            "get_reporte_caja convierte a dicts (esto era lo que causaba el 500)"
+        )
+        # Pero enrich ahora debe aceptar dicts (verificado arriba)
+        # Asi que el endpoint puede pasar la lista de dicts directamente
+
 

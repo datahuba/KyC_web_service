@@ -99,15 +99,34 @@ async def enrich_payment_with_details(payment: Payment) -> dict:
 
 
 async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dict]:
+    """
+    Enriquece una lista de pagos con informacion del estudiante y enrollment.
+
+    F-COBRANZA-031 (2026-07-22): acepta tanto objetos Payment como dicts
+    (algunos endpoints como /reportes/caja convierten a dict antes de llamar).
+    Antes solo aceptaba objetos, lo que causaba 500 en /reportes/caja
+    cuando le pasaba dicts.
+    """
     if not payments:
         return []
 
-    student_ids = list({p.estudiante_id for p in payments if p.estudiante_id})
-    enrollment_ids = list({p.inscripcion_id for p in payments if p.inscripcion_id})
+    # F-COBRANZA-031: detectar si vienen dicts u objetos
+    def _get(p, key, default=None):
+        if isinstance(p, dict):
+            return p.get(key, default)
+        return getattr(p, key, default)
+
+    def _set_estado_value(estado):
+        if hasattr(estado, "value"):
+            return estado.value
+        return estado or ""
+
+    student_ids = list({_get(p, "estudiante_id") for p in payments if _get(p, "estudiante_id")})
+    enrollment_ids = list({_get(p, "inscripcion_id") for p in payments if _get(p, "inscripcion_id")})
 
     students_task = Student.find(In(Student.id, student_ids)).to_list()
     enrollments_task = Enrollment.find(In(Enrollment.id, enrollment_ids)).to_list()
-    
+
     students, enrollments = await asyncio.gather(students_task, enrollments_task)
 
     students_map = {s.id: s for s in students}
@@ -115,26 +134,33 @@ async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dic
 
     enriched_list = []
     for payment in payments:
-        p_dict = payment.model_dump(by_alias=True)
-        
-        student = students_map.get(payment.estudiante_id)
+        # Si ya es dict, usarlo; sino, volcarlo a dict
+        if isinstance(payment, dict):
+            p_dict = dict(payment)
+        else:
+            p_dict = payment.model_dump(by_alias=True)
+
+        estudiante_id = _get(payment, "estudiante_id")
+        inscripcion_id = _get(payment, "inscripcion_id")
+
+        student = students_map.get(estudiante_id)
         nombre_estudiante = student.nombre if student and student.nombre else "Sin nombre"
-        
-        enrollment = enrollments_map.get(payment.inscripcion_id)
+
+        enrollment = enrollments_map.get(inscripcion_id)
         total_cuotas = enrollment.cantidad_cuotas if enrollment else 0
 
         p_dict.update({
             "nombre_estudiante": nombre_estudiante,
-            "fecha": to_bolivia_time(payment.fecha_subida),
+            "fecha": to_bolivia_time(_get(payment, "fecha_subida")),
             "moneda": "Bs",
-            "monto": payment.cantidad_pago,
-            "estado": payment.estado_pago.value if payment.estado_pago else "",
+            "monto": _get(payment, "cantidad_pago"),
+            "estado": _set_estado_value(_get(payment, "estado_pago")),
             "total_cuotas": total_cuotas,
-            "created_at": to_bolivia_time(payment.created_at),
-            "updated_at": to_bolivia_time(payment.updated_at),
-            "en_ventana_reversion": _calcular_en_ventana_reversion(payment),  # ISSUE-P-REVERSION
+            "created_at": to_bolivia_time(_get(payment, "created_at")),
+            "updated_at": to_bolivia_time(_get(payment, "updated_at")),
+            "en_ventana_reversion": _calcular_en_ventana_reversion(payment) if not isinstance(payment, dict) else False,
             # F-COBRANZA-020: incluir el detalle en el dict enriquecido
-            "detalle": getattr(payment, "detalle", None),
+            "detalle": _get(payment, "detalle", None),
         })
         enriched_list.append(p_dict)
 
