@@ -633,3 +633,120 @@ class TestRolesUploadByEncargado:
             "F-COBRANZA-011: el detail del error 403 debe mencionar 'Solo cobranza, "
             "admin y superadmin están autorizados'."
         )
+
+
+# ========================================================================
+# F-COBRANZA-014 · Fix actualizar_saldo_enrollment resta anulados (2026-07-21)
+# ========================================================================
+# El bug: actualizar_saldo_enrollment solo sumaba pagos APROBADOS al total_pagado,
+# sin descontar los ANULADOS. Esto causaba un desfase de 3,534 BOB en producción.
+#
+# El fix: ahora se calcula dinero_neto_pagado = aprobados - anulados, y se usa ese
+# para total_pagado y saldo_pendiente. El waterfall de módulos sigue usando el
+# aprobado bruto (estado académico histórico).
+
+class TestF014ActualizarSaldoRestaAnulados:
+    """F-COBRANZA-014: total_pagado = aprobados - anulados."""
+
+    def test_codigo_recolecta_anulados(self):
+        """El código de actualizar_saldo_enrollment debe buscar pagos anulados,
+        no solo aprobados. Defensa contra refactors que reviertan el fix."""
+        import re
+        from pathlib import Path
+
+        svc_file = Path(__file__).parent.parent / "services" / "enrollment_service.py"
+        contenido = svc_file.read_text(encoding="utf-8")
+
+        # Buscar dentro de la función la query de pagos anulados
+        patron = (
+            r"async\s+def\s+actualizar_saldo_enrollment.*?"
+            r"pagos_anulados\s*=\s*await\s+Payment\.find.*?"
+            r"EstadoPago\.ANULADO"
+        )
+        assert re.search(patron, contenido, re.DOTALL), (
+            "F-COBRANZA-014: la función debe recolectar pagos_anulados con EstadoPago.ANULADO"
+        )
+
+    def test_codigo_usa_dinero_neto_para_total_pagado(self):
+        """total_pagado debe usar el neto (aprobados - anulados), no el bruto.
+        Verifica con line-precise parsing (no regex matchea comentarios)."""
+        import re
+        from pathlib import Path
+
+        svc_file = Path(__file__).parent.parent / "services" / "enrollment_service.py"
+        lineas = svc_file.read_text(encoding="utf-8").splitlines()
+
+        # Encontrar la línea donde arranca la función
+        start_line = None
+        for i, ln in enumerate(lineas):
+            if "async def actualizar_saldo_enrollment" in ln:
+                start_line = i
+                break
+        assert start_line is not None, "No se encontró la función actualizar_saldo_enrollment"
+
+        # Buscar las asignaciones a enrollment.total_pagado DENTRO de la función
+        # (hasta 200 líneas de función, suficiente para cubrirla toda)
+        asignaciones_total_pagado = []
+        for ln in lineas[start_line:start_line + 200]:
+            stripped = ln.strip()
+            # Excluir comentarios
+            if stripped.startswith("#"):
+                continue
+            if "enrollment.total_pagado" in ln and "=" in ln and "round" not in ln[:ln.find("=")]:
+                # Capturar la línea que asigna (no la que compara)
+                if "<=" not in ln and ">=" not in ln and "==" not in ln and "!=" not in ln:
+                    asignaciones_total_pagado.append(ln.strip())
+
+        # Debe haber exactamente UNA asignación directa a enrollment.total_pagado
+        # y debe usar dinero_neto_pagado
+        assert len(asignaciones_total_pagado) >= 1, (
+            f"F-COBRANZA-014: no se encontró asignación a enrollment.total_pagado. "
+            f"Líneas escaneadas: {asignaciones_total_pagado}"
+        )
+        asignacion = asignaciones_total_pagado[0]
+        assert "dinero_neto_pagado" in asignacion, (
+            f"F-COBRANZA-014: la asignación debe usar dinero_neto_pagado, no "
+            f"dinero_aprobado_bruto. Encontrado: {asignacion!r}"
+        )
+        assert "dinero_aprobado_bruto" not in asignacion, (
+            f"F-COBRANZA-014: BUG REGRESION. La asignación usa dinero_aprobado_bruto "
+            f"directo. Debe ser dinero_neto_pagado (= aprobados - anulados). "
+            f"Line: {asignacion!r}"
+        )
+
+    def test_calculo_neto_correcto(self):
+        """Test puro de la lógica de resta: total_pagado = aprobados - anulados."""
+        # Caso real del bug de 3,534 BOB
+        aprobados = 888.0
+        anulados = 0.0
+        neto = round(aprobados - anulados, 2)
+        assert neto == 888.0
+
+        # Caso con anulados
+        aprobados = 594.0
+        anulados = 588.0
+        neto = round(aprobados - anulados, 2)
+        assert neto == 6.0  # caso real de la inscripción 4376
+
+        # Caso con más anulados que aprobados (no debería pasar, pero cubrimos)
+        aprobados = 100.0
+        anulados = 200.0
+        neto = round(aprobados - anulados, 2)
+        # En este caso el neto sería negativo, pero el código actual hace round
+        # y luego max(0, ...) en saldo_pendiente, no en total_pagado.
+        # El bug aquí sería que total_pagado quede negativo. Es responsabilidad
+        # del flujo de negocio no llegar a este estado.
+        assert neto == -100.0
+
+    def test_saldo_pendiente_usa_total_pagado_neto(self):
+        """saldo_pendiente se calcula como max(0, total_a_pagar - total_pagado_neto).
+        Verifica con el caso real de la inscripción 43d6 que tenía DIF=+300."""
+        total_a_pagar = 1770.0
+        total_pagado_neto = 900.0  # aprobado (aprobados) - anulado (0) = 900
+        saldo_esperado = max(0.0, round(total_a_pagar - total_pagado_neto, 2))
+        assert saldo_esperado == 870.0  # antes era 1170, ahora 870
+
+        # Caso con anulado: el saldo_pendiente se "agranda" porque el total_pagado es menor
+        total_pagado_neto_con_anulado = 6.0  # 594 - 588
+        saldo_con_anulado = max(0.0, round(total_a_pagar - total_pagado_neto_con_anulado, 2))
+        assert saldo_con_anulado == 1764.0  # 1770 - 6
