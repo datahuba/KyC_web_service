@@ -914,3 +914,38 @@ class TestF015GlosaPlaceholderGenerico:
         assert _es_concepto_generico_placeholder("Recuperación Mayo") is False
         assert _es_concepto_generico_placeholder("Cuota especial #5") is False
 
+
+class TestFormatFechaHelper:
+    """F-COBRANZA-016 (fix 2026-07-22): el export XLSX crasheaba porque
+    `fecha_comprobante` venía como string ISO y `to_bolivia_time()` esperaba
+    datetime. Helper `format_fecha` (en core/timezone_utils.py) maneja ambos casos."""
+
+    def test_datetime_input(self):
+        from datetime import datetime
+        from core.timezone_utils import format_fecha
+        dt = datetime(2026, 7, 22, 15, 30, 0)
+        assert format_fecha(dt, "%Y-%m-%d") == "2026-07-22"
+        assert format_fecha(dt, "%Y-%m-%d %H:%M") == "2026-07-22 15:30"
+
+    def test_date_input(self):
+        from datetime import date
+        from core.timezone_utils import format_fecha
+        d = date(2026, 7, 22)
+        assert format_fecha(d, "%Y-%m-%d") == "2026-07-22"
+
+    def test_iso_string_input(self):
+        from core.timezone_utils import format_fecha
+        assert format_fecha("2026-07-22", "%Y-%m-%d") == "2026-07-22"
+        assert format_fecha("2026-07-22T15:30:00", "%Y-%m-%d %H:%M") == "2026-07-22 15:30"
+
+    def test_none_input_returns_fallback(self):
+        from core.timezone_utils import format_fecha
+        assert format_fecha(None, "%Y-%m-%d", fallback="Sin fecha") == "Sin fecha"
+        assert format_fecha(None, "%Y-%m-%d") == ""
+
+    def test_invalid_string_returns_as_is(self):
+        """Si el string no se puede parsear, devolvemos el string crudo
+        (no rompemos el XLSX)."""
+        from core.timezone_utils import format_fecha
+        assert format_fecha("ayer fue lunes", "%Y-%m-%d") == "ayer fue lunes"
+

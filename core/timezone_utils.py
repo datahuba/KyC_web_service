@@ -102,5 +102,39 @@ def convert_dict_dates_to_bolivia(
     for field in date_fields:
         if field in data and isinstance(data[field], datetime):
             data[field] = to_bolivia_time(data[field])
-    
+
     return data
+
+
+def format_fecha(fecha_val, fmt: str = "%Y-%m-%d", fallback: str = "") -> str:
+    """
+    Helper para formatear fechas que pueden venir como datetime, date,
+    string ISO, o None. Usado en F-COBRANZA-016 (export XLSX) porque
+    `fecha_comprobante` puede llegar como string 'YYYY-MM-DD' en lugar
+    de datetime, y `to_bolivia_time()` espera un datetime.
+
+    Args:
+        fecha_val: datetime | date | str | None
+        fmt: formato strftime de salida
+        fallback: string a devolver si fecha_val es None
+
+    Returns:
+        String formateado, o fallback si es None, o el string crudo
+        si no se puede parsear.
+    """
+    from datetime import datetime, date
+    if fecha_val is None:
+        return fallback
+    if isinstance(fecha_val, (datetime, date)):
+        return fecha_val.strftime(fmt)
+    if isinstance(fecha_val, str):
+        # viene como '2026-07-22' o '2026-07-22T15:14:33'
+        try:
+            try:
+                dt = datetime.fromisoformat(fecha_val.replace("Z", "+00:00"))
+            except ValueError:
+                dt = datetime.strptime(fecha_val, "%Y-%m-%d")
+            return dt.strftime(fmt)
+        except (ValueError, AttributeError):
+            return fecha_val  # si no se puede parsear, devolver el string original
+    return fallback

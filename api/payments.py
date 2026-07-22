@@ -1001,8 +1001,8 @@ async def export_payments_excel(
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment, PatternFill
     from io import BytesIO
-    from core.timezone_utils import to_bolivia_time
     from models.enrollment import Enrollment
+    from core.timezone_utils import format_fecha
 
     if isinstance(current_user, User):
         if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
@@ -1080,8 +1080,8 @@ async def export_payments_excel(
 
         row = [
             str(p.get("_id", "")),
-            to_bolivia_time(p.get("fecha_comprobante")).strftime("%Y-%m-%d") if p.get("fecha_comprobante") else "Sin registrar",
-            to_bolivia_time(p.get("fecha_subida")).strftime("%Y-%m-%d %H:%M") if p.get("fecha_subida") else "",
+            format_fecha(p.get("fecha_comprobante"), "%Y-%m-%d", fallback="Sin registrar"),
+            format_fecha(p.get("fecha_subida"), "%Y-%m-%d %H:%M", fallback=""),
             student_name,
             student_registro,
             course_name,
