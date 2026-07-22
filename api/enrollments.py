@@ -260,9 +260,135 @@ async def get_enrollments_by_course(
     """Obtener todas las inscripciones de un curso (Planilla)"""
     if isinstance(current_user, Student):
         raise HTTPException(status_code=403, detail="Los estudiantes no tienen acceso a planillas de cursos.")
-        
+
     enrollments = await enrollment_service.get_enrollments_by_course(course_id)
     return enrollments
+
+
+# ========================================================================
+# F-COBRANZA-035 (2026-07-22): desglose inscritos/activos/pasivos
+# ========================================================================
+# Pedido Lic. Sandra Zabala (vía Telegram 2026-07-22 10:34):
+# "En esta sección si se puede visualizar los estudiantes que están en
+# modo pasivo, es decir los congelados, para que tengamos la diferencia
+# del total de inscritos inicialmente, cuantos son los activo y cuantos
+# los pasivos."
+#
+# Devuelve un resumen agregado que la UI puede usar para renderizar
+# tarjetas. El total incluye TODOS los estados MENOS cancelados (porque
+# cancelados = nunca inscritos realmente). Activos = PENDIENTE_PAGO +
+# ACTIVO. Pasivos = SUSPENDIDO (con motivo_suspension en {pasivo,
+# congelado, abandono}). Completados = COMPLETADO.
+@router.get(
+    "/stats/resumen",
+    summary="Resumen de inscritos: total, activos, pasivos, completados (F-035)",
+)
+async def get_enrollments_resumen(
+    *,
+    curso_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por Curso ID"),
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> Any:
+    """
+    F-COBRANZA-035: devuelve el conteo de inscripciones agrupadas por
+    categoría visual, filtrable opcionalmente por curso. Roles: cualquier
+    staff autenticado (cobranza, cpd, admin, superadmin, mae, etc).
+    Estudiantes NO tienen acceso (no les interesa este KPI).
+    """
+    from models.enums import EstadoInscripcion
+
+    if isinstance(current_user, Student):
+        raise HTTPException(
+            status_code=403,
+            detail="Los estudiantes no tienen acceso al resumen de inscritos."
+        )
+
+    # Filtro base (para encargado_curso si aplica)
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
+    # Si el caller pasó curso_id y NO está en sus permitidos, rechazar
+    if curso_id and cursos_permitidos and curso_id not in cursos_permitidos:
+        raise HTTPException(
+            status_code=403,
+            detail="No tienes asignado ese curso."
+        )
+
+    # Si no pasó curso_id y el rol tiene cursos asignados, filtrar
+    if not curso_id and cursos_permitidos:
+        filtro_curso = {"curso_id": {"$in": cursos_permitidos}}
+    elif curso_id:
+        filtro_curso = {"curso_id": curso_id}
+    else:
+        filtro_curso = {}
+
+    # Aggregate: una sola query para todas las categorías
+    pipeline = [
+        {"$match": filtro_curso},
+        {"$group": {
+            "_id": {
+                "estado": "$estado",
+                "motivo": "$motivo_suspension",
+            },
+            "count": {"$sum": 1}
+        }}
+    ]
+    raw = await Enrollment.aggregate(pipeline).to_list()
+
+    # Inicializar contadores
+    total_inicial = 0  # TODOS los inscritos, MENOS cancelados
+    activos = 0
+    pasivos_congelado = 0
+    pasivos_pasivo = 0
+    pasivos_abandono = 0
+    completados = 0
+    cancelados = 0
+    pendientes_pago = 0
+
+    for r in raw:
+        estado = r["_id"].get("estado")
+        motivo = r["_id"].get("motivo")
+        count = r.get("count", 0)
+
+        if estado == "cancelado":
+            cancelados += count
+            continue  # NO cuentan en total_inicial
+
+        total_inicial += count
+
+        if estado == "activo":
+            activos += count
+        elif estado == "pendiente_pago":
+            pendientes_pago += count
+            activos += count  # pendiente_pago se considera activo (aún no paga pero sigue en el programa)
+        elif estado == "suspendido":
+            if motivo == "congelado":
+                pasivos_congelado += count
+            elif motivo == "abandono":
+                pasivos_abandono += count
+            elif motivo == "pasivo":
+                pasivos_pasivo += count
+            else:
+                # motivo None o desconocido -> cuenta como pasivo genérico
+                pasivos_pasivo += count
+        elif estado == "completado":
+            completados += count
+
+    total_pasivos = pasivos_congelado + pasivos_pasivo + pasivos_abandono
+
+    return {
+        "total_inicial": total_inicial,  # inscritos totales (excluye cancelados)
+        "activos": activos,  # activo + pendiente_pago
+        "pendientes_pago": pendientes_pago,
+        "pasivos": {
+            "total": total_pasivos,
+            "congelado": pasivos_congelado,
+            "pasivo": pasivos_pasivo,
+            "abandono": pasivos_abandono,
+        },
+        "completados": completados,
+        "cancelados": cancelados,  # NO cuentan como inscritos
+        "curso_id": str(curso_id) if curso_id else None,
+    }
 
 
 @router.get(
