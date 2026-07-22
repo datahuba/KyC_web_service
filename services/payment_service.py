@@ -312,10 +312,10 @@ def _generar_glosa_detalle(
             )
             partes.append(f"Pago {detalle_completos}")
             for idx, _, monto_p, costo in indices_parciales:
-                # FIX F-COBRANZA-018: no incluir " + " redundante cuando la
-                # parte anterior ya es "Matrícula". El join " + " ya pone
-                # el espacio. Antes daba "Matrícula +  + Módulo 2 parcial".
-                partes.append(f"+ Módulo {idx} parcial (Bs {monto_p:.0f} de Bs {costo:.0f})")
+                # FIX F-COBRANZA-018: el join " + " pone el espacio, así que
+                # las parciales no deben empezar con "+". Antes daba
+                # "Matrícula +  + Módulo 2 parcial" (doble +).
+                partes.append(f"Módulo {idx} parcial (Bs {monto_p:.0f} de Bs {costo:.0f})")
 
     glosa = " + ".join(partes) if partes else "Pago sin detalle"
     if sobrante > 0.01:
