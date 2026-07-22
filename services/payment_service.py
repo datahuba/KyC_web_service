@@ -323,10 +323,22 @@ def _generar_glosa_detalle(
 
 async def create_payment(
     payment_in: PaymentCreate,
-    student_id: PydanticObjectId
+    student_id: PydanticObjectId,
+    auto_approve: bool = True,
+    approved_by: Optional[str] = None
 ) -> Payment:
     """
     Crear un nuevo pago. Soporta pagos digitales o pagos físicos en CAJA (sin voucher).
+
+    Args:
+        payment_in: datos del pago (validated schema).
+        student_id: ObjectId del estudiante dueño de la inscripción.
+        auto_approve: si True (default), el pago nace APROBADO. Esto es F-COBRANZA-004
+            (auto-aprobación al subir comprobante). El coord. financiero puede RECHAZAR
+            después si el comprobante es inválido.
+        approved_by: si se provee (caso staff via by-staff endpoint), se usa como
+            `verificado_por` en lugar del genérico "SISTEMA (auto-aprobación)".
+            Útil para auditoría: deja claro quién aprobó el pago.
     """
     enrollment = await Enrollment.get(payment_in.inscripcion_id)
     if not enrollment:
@@ -416,16 +428,30 @@ async def create_payment(
         # saldo). Esto reduce la fricción operativa: en producción las 48h de
         # espera generaban desconfianza en los estudiantes y retrasaban la
         # conciliación con el extracto bancario.
-        estado_pago=EstadoPago.APROBADO,
+        estado_pago=EstadoPago.APROBADO if auto_approve else EstadoPago.PENDIENTE,
         verificado_por=None,  # se setea más abajo
     )
     # Setear fecha_verificacion y verificado_por manualmente porque aprobar_pago()
     # es un método de instancia que asume que ya está insertado.
     from core.timezone_utils import utcnow_naive
-    payment.fecha_verificacion = utcnow_naive()
-    payment.verificado_por = "SISTEMA (auto-aprobación)"
+    payment.fecha_verificacion = utcnow_naive() if auto_approve else None
+    if approved_by:
+        # F-COBRANZA-017: si el pago lo registra un usuario staff, dejar
+        # claro en la auditoría quién fue. Formato: "STAFF:<username>" para
+        # distinguir de la auto-aprobación del estudiante.
+        payment.verificado_por = f"STAFF:{approved_by}"
+    elif auto_approve:
+        payment.verificado_por = "SISTEMA (auto-aprobación)"
+    else:
+        payment.verificado_por = None
 
     await payment.insert()
+
+    if not auto_approve:
+        # Si NO se auto-aprueba, retornamos ya — los efectos colaterales
+        # (actualizar saldo, auditoría APROBACION) se ejecutan cuando
+        # el coord. financiero apruebe el pago explícitamente.
+        return payment
 
     # ========================================================================
     # F-COBRANZA-004: Efectos colaterales de la aprobación automática

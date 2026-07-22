@@ -127,13 +127,134 @@ async def create_payment(
         )
         
         return await payment_service.enrich_payment_with_details(payment)
-        
+
     except HTTPException:
         raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al crear pago: {str(e)}")
+
+
+@router.post(
+    "/by-staff",
+    response_model=PaymentResponse,
+    summary="Registrar Pago en nombre de Estudiante (Staff: cobranza/admin/superadmin)"
+)
+async def create_payment_by_staff(
+    *,
+    inscripcion_id: str = Form(..., description="ID de la inscripción"),
+    estudiante_id: str = Form(..., description="ID del estudiante (para asociar el comprobante en Cloudinary)"),
+    metodo_pago: str = Form(default="Transferencia", description="Transferencia, Depósito o Caja"),
+    monto_comprobante: float = Form(..., gt=0, description="Monto del pago en BOB (>0)"),
+    concepto: Optional[str] = Form(None, description="Concepto (opcional; si vacío, backend calcula glosa detallada)"),
+
+    numero_transaccion: Optional[str] = Form(None),
+    remitente: Optional[str] = Form(None),
+    banco: Optional[str] = Form(None),
+    fecha_comprobante: Optional[str] = Form(None),
+    cuenta_destino: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None, description="Comprobante (opcional si es Caja)"),
+
+    current_user: User = Depends(require_staff)
+) -> Any:
+    """
+    F-COBRANZA-017 (2026-07-22): cuando el estudiante no pudo subir su
+    comprobante desde su perfil (por problemas técnicos, falta de acceso,
+    etc.), el personal de COBRANZA puede REGISTRAR el pago completo en
+    nombre del estudiante desde la gestion de pagos.
+
+    Decisión Joel 2026-07-22 22:25: el botón vive en la parte superior
+    derecha de /app/payments (no en el menú de 3 puntos de cada pago).
+    Roles permitidos: superadmin, admin, cobranza. NO cpd, NO coordinador,
+    NO encargado_curso.
+
+    Diferencias con `create_payment` (estudiante):
+    - Acepta `estudiante_id` (no lo toma del current_user).
+    - El pago nace APROBADO (auto-aprobación como F-COBRANZA-004).
+    - `verificado_por` = nombre del usuario staff.
+    - Glosa: si el frontend manda placeholder genérico ("Matrícula" /
+      "Módulo"), se regenera con detalle de módulos cubiertos.
+    - Comprobante opcional solo si `metodo_pago == "Caja"`.
+    """
+    from core.cloudinary_utils import upload_image, upload_pdf
+    from schemas.payment import PaymentCreate
+
+    # RBAC: solo roles económicos (no cpd, no coordinador, no docente)
+    if current_user.rol not in ["superadmin", "admin", "cobranza"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Solo cobranza/admin/superadmin pueden registrar pagos en nombre de estudiantes."
+        )
+
+    if metodo_pago != "Caja":
+        if not file:
+            raise HTTPException(status_code=400, detail="El comprobante es obligatorio para transferencias y depósitos.")
+        if not numero_transaccion:
+            raise HTTPException(status_code=400, detail="El número de transacción es obligatorio para este método.")
+        if not banco:
+            raise HTTPException(status_code=400, detail="Debe especificar el banco emisor.")
+
+    comprobante_url = None
+    if file:
+        folder = f"payments/{estudiante_id}"
+        if numero_transaccion:
+            public_id = f"voucher_{numero_transaccion}"
+        else:
+            public_id = f"staff_upload_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        image_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
+        pdf_type = "application/pdf"
+
+        if file.content_type in image_types:
+            comprobante_url = await upload_image(file, folder, public_id)
+        elif file.content_type == pdf_type:
+            comprobante_url = await upload_pdf(file, folder, public_id)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Formato no permitido: {file.content_type}. Use imagen o PDF"
+            )
+
+    payment_in = PaymentCreate(
+        inscripcion_id=inscripcion_id,
+        metodo_pago=metodo_pago,
+        monto_comprobante=monto_comprobante,
+        concepto=concepto,
+        cantidad_pago=monto_comprobante,
+        numero_transaccion=numero_transaccion,
+        remitente=remitente,
+        banco=banco,
+        fecha_comprobante=fecha_comprobante,
+        cuenta_destino=cuenta_destino,
+        comprobante_url=comprobante_url,
+    )
+
+    try:
+        # F-COBRANZA-017: el pago se crea APROBADO al registrarlo desde
+        # cobranza (no pasa por el flujo pendiente → revisar → aprobar).
+        # Esto es consistente con F-COBRANZA-004 (auto-aprobación cuando
+        # el estudiante sube su comprobante). Joel decidió 22:25 que sea
+        # automático para no demorar al estudiante.
+        payment = await payment_service.create_payment(
+            payment_in=payment_in,
+            student_id=estudiante_id,
+            auto_approve=True,
+            approved_by=current_user.username,
+        )
+
+        # F-COBRANZA-014: el saldo del enrollment se actualiza dentro de
+        # create_payment (vía actualizar_saldo_enrollment). No hace falta
+        # hacer nada más aquí.
+
+        return await payment_service.enrich_payment_with_details(payment)
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al registrar pago por staff: {str(e)}")
 
 
 @router.get(
