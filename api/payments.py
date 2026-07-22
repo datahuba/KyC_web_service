@@ -964,3 +964,152 @@ async def registrar_cobro_caja_directo(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al registrar cobro directo: {str(e)}")
+
+
+# ========================================================================
+# F-COBRANZA-016 (2026-07-21): Exportar lista de pagos a XLSX (no CSV)
+# ========================================================================
+# Joel pidió: "se mejoren todas las exportaciones y sean tablas, no CSV".
+# Este endpoint devuelve un Excel formateado con todos los pagos que
+# matcheen los filtros. Reemplaza al `downloadCSV()` que el frontend
+# generaba manualmente con un Blob.
+
+@router.get(
+    "/export/excel",
+    summary="Exportar lista de pagos a XLSX (reemplaza al CSV)",
+)
+async def export_payments_excel(
+    *,
+    q: Optional[str] = Query(None, description="Búsqueda por transacción o comprobante"),
+    estado: Optional[str] = Query(None, description="Filtrar por estado"),
+    curso_id: Optional[PydanticObjectId] = Query(None),
+    estudiante_id: Optional[PydanticObjectId] = Query(None),
+    tipo_concepto: Optional[str] = Query(None),
+    current_user: User | Student = Depends(get_current_user)
+):
+    """
+    F-COBRANZA-016: exporta TODOS los pagos que matcheen los filtros como
+    un archivo .xlsx con formato de tabla (no CSV). Mismas reglas de RBAC
+    que GET /payments/.
+
+    Columnas:
+      ID, Fecha Comprobante, Fecha Subida, Estudiante, Registro, Curso,
+      Concepto, Módulo, Monto (Bs), Método, Banco, Remitente,
+      Nº Transacción, Estado, Comprobante (URL)
+    """
+    from fastapi.responses import StreamingResponse
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill
+    from io import BytesIO
+    from core.timezone_utils import to_bolivia_time
+
+    if isinstance(current_user, User):
+        if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
+            raise HTTPException(status_code=403, detail="No autorizado para exportar pagos")
+
+        filtro_rol = filtro_cursos_por_rol(current_user)
+        cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
+        # Traemos hasta 5,000 pagos (suficiente para producción; si crece, paginar).
+        payments, _ = await payment_service.get_all_payments(
+            page=1, per_page=5000, q=q, estado=estado, curso_id=curso_id,
+            estudiante_id=estudiante_id, cursos_permitidos=cursos_permitidos,
+            tipo_concepto=tipo_concepto,
+        )
+
+        # Filtrar RBAC adicional (CPD solo ve matrículas, etc.) — replica
+        # la lógica de list_payments.
+        filtered = []
+        for p in payments:
+            concepto_lower = (p.concepto or "").lower().strip()
+            is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
+            if current_user.rol == "cpd" and not is_matricula:
+                continue
+            filtered.append(p)
+        payments = filtered
+    else:
+        # Estudiante solo puede exportar SUS pagos
+        payments = await payment_service.get_payments_by_student(current_user.id)
+        if estado and estado != "Todos los estados":
+            payments = [p for p in payments if p.estado_pago.value == estado]
+        if tipo_concepto:
+            if tipo_concepto == "matricula":
+                payments = [p for p in payments if "matricula" in (p.concepto or "").lower() or "matrícula" in (p.concepto or "").lower()]
+            elif tipo_concepto == "colegiatura":
+                payments = [p for p in payments if "matricula" not in (p.concepto or "").lower() and "matrícula" not in (p.concepto or "").lower()]
+
+    # Enriquecer con estudiante + curso para el Excel
+    enriched = await payment_service.enrich_payments_with_details_bulk(payments)
+    student_ids = list({p.estudiante_id for p in payments if p.estudiante_id})
+    enrollment_ids = list({p.inscripcion_id for p in payments if p.inscripcion_id})
+    curso_ids = list({p.curso_id for p in payments if p.curso_id})
+
+    students_task = Student.find(In(Student.id, student_ids)).to_list()
+    enrollments_task = Enrollment.find(In(Enrollment.id, enrollment_ids)).to_list()
+    courses_task = Course.find(In(Course.id, curso_ids)).to_list()
+    students, enrollments, courses = await asyncio.gather(students_task, enrollments_task, courses_task)
+    students_map = {s.id: s for s in students}
+    courses_map = {c.id: c for c in courses}
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Pagos"
+
+    headers = [
+        "ID", "Fecha Comprobante", "Fecha Subida", "Estudiante", "Registro",
+        "Curso", "Concepto", "Nº Módulo", "Monto (Bs)", "Método", "Banco",
+        "Remitente", "Nº Transacción", "Estado", "Comprobante URL",
+    ]
+    ws.append(headers)
+
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF")
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for p in enriched:
+        student = students_map.get(p.get("estudiante_id"))
+        student_name = student.nombre if student and student.nombre else "Sin nombre"
+        student_registro = (student.registro if student and student.registro else "")
+        course = courses_map.get(p.get("curso_id"))
+        course_name = (course.nombre_programa if course and course.nombre_programa else "Sin curso")
+        modulo = p.get("numero_cuota") or "N/A"
+
+        row = [
+            str(p.get("_id", "")),
+            to_bolivia_time(p.get("fecha_comprobante")).strftime("%Y-%m-%d") if p.get("fecha_comprobante") else "Sin registrar",
+            to_bolivia_time(p.get("fecha_subida")).strftime("%Y-%m-%d %H:%M") if p.get("fecha_subida") else "",
+            student_name,
+            student_registro,
+            course_name,
+            p.get("concepto") or "",
+            modulo,
+            p.get("cantidad_pago", 0),
+            p.get("metodo_pago") or "Transferencia",
+            p.get("banco") or "Caja UAGRM",
+            p.get("remitente") or "",
+            p.get("numero_transaccion") or "S/N",
+            p.get("estado_pago") or "",
+            p.get("comprobante_url") or "",
+        ]
+        ws.append(row)
+
+    # Auto-width básico
+    column_widths = [28, 14, 18, 30, 12, 28, 22, 10, 12, 14, 18, 22, 18, 14, 50]
+    for i, width in enumerate(column_widths, 1):
+        ws.column_dimensions[chr(64 + i)].width = width
+    ws.auto_filter.ref = ws.dimensions
+    ws.freeze_panes = "A2"
+
+    excel_file = BytesIO()
+    wb.save(excel_file)
+    excel_file.seek(0)
+
+    filename = f"pagos_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        excel_file,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
