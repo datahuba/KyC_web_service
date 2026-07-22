@@ -246,14 +246,29 @@ def _generar_glosa_detalle(
     matricula_ya_pagada_segun_enrollment = bool(getattr(enrollment, "matricula_pagada", False))
     matricula_ya_cubierta = matricula_ya_cubierta_por_pagos_previos or matricula_ya_pagada_segun_enrollment
 
-    tanque = round(dinero_antes + monto_pago, 2)
+    # F-COBRANZA-018 fix (2026-07-22): para la cascada de módulos, el dinero
+    # que importa es el que ya fue a MÓDULOS, NO la matrícula. Si la
+    # matrícula ya está cubierta, restamos su costo del dinero_antes para
+    # no contaminar el tanque con dinero que ya se asignó a matrícula.
+    # Antes: dinero_antes incluía la matrícula → el segundo pago de 300
+    # Bs (módulo 1 cuesta 294) erróneamente se marcaba como cubriendo
+    # módulos 1, 2 y 3 parcial. Después: solo cubre módulo 1.
+    if matricula_ya_cubierta:
+        dinero_aplicado_a_modulos_antes = max(0, dinero_antes - (enrollment.costo_matricula or 0))
+    else:
+        dinero_aplicado_a_modulos_antes = 0
+
+    tanque = round(dinero_aplicado_a_modulos_antes + monto_pago, 2)
     matricula_cubierta_por_este_pago = False
     modulos_cubiertos: list = []  # cada item: (numero_o_nombre, tipo='completo'|'parcial', monto_pagado, costo_total)
     sobrante = 0.0
 
     if not matricula_ya_cubierta:
-        if tanque >= (enrollment.costo_matricula or 0):
-            tanque = round(tanque - (enrollment.costo_matricula or 0), 2)
+        if (dinero_antes + monto_pago) >= (enrollment.costo_matricula or 0):
+            # El tanque solo se reduce por el costo de matrícula DESPUÉS de
+            # gastar lo que ya se tenía. Si el dinero_antes + monto_pago
+            # alcanza, cubrimos matrícula completa y sobrante va a módulos.
+            tanque = round((dinero_antes + monto_pago) - (enrollment.costo_matricula or 0), 2)
             matricula_cubierta_por_este_pago = True
         else:
             # No alcanza para matrícula → no se computa
