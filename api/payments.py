@@ -58,27 +58,33 @@ async def create_payment(
     banco: Optional[str] = Form(None),
     fecha_comprobante: Optional[str] = Form(None),
     cuenta_destino: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None, description="Comprobante (Opcional si es en Caja)"),
-    
+    # F-COBRANZA-026 (2026-07-22): Kevin: "el sistema no debe dejar que se suba
+    # una solicitud de pago sin el comprobante no importa que tipo de pago sea
+    # caja o todo lo demas". El comprobante es OBLIGATORIO para todos los
+    # metodos, incluyendo Caja.
+    file: UploadFile = File(..., description="Comprobante obligatorio (imagen o PDF)"),
+
     current_user: Student = Depends(get_current_user)
 ) -> Any:
     """
     Registrar un nuevo pago.
     Soporta pagos digitales (exige voucher/número) y pagos físicos (Caja).
+    F-COBRANZA-026: el comprobante es OBLIGATORIO para todos los metodos.
     """
     from core.cloudinary_utils import upload_image, upload_pdf
     from schemas.payment import PaymentCreate
-    
+
     if not isinstance(current_user, Student):
         raise HTTPException(
             status_code=403,
             detail="Solo los estudiantes pueden subir comprobantes de pago"
         )
-    
+
     # 1. Validaciones rígidas según el Método de Pago
+    # F-COBRANZA-026: el comprobante es obligatorio SIEMPRE (no opcional para Caja)
+    if not file:
+        raise HTTPException(status_code=400, detail="El comprobante es obligatorio (imagen o PDF) para todos los métodos de pago.")
     if metodo_pago != "Caja":
-        if not file:
-            raise HTTPException(status_code=400, detail="El comprobante es obligatorio para transferencias y depósitos.")
         if not numero_transaccion:
             raise HTTPException(status_code=400, detail="El número de transacción es obligatorio para este método de pago.")
         if not banco:
@@ -154,7 +160,8 @@ async def create_payment_by_staff(
     banco: Optional[str] = Form(None),
     fecha_comprobante: Optional[str] = Form(None),
     cuenta_destino: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None, description="Comprobante (opcional si es Caja)"),
+    # F-COBRANZA-026 (2026-07-22): comprobante obligatorio para todos los métodos
+    file: UploadFile = File(..., description="Comprobante obligatorio (imagen o PDF)"),
 
     current_user: User = Depends(require_staff)
 ) -> Any:
@@ -175,7 +182,7 @@ async def create_payment_by_staff(
     - `verificado_por` = nombre del usuario staff.
     - Glosa: si el frontend manda placeholder genérico ("Matrícula" /
       "Módulo"), se regenera con detalle de módulos cubiertos.
-    - Comprobante opcional solo si `metodo_pago == "Caja"`.
+    - F-COBRANZA-026: comprobante OBLIGATORIO (no opcional para Caja).
     """
     from core.cloudinary_utils import upload_image, upload_pdf
     from schemas.payment import PaymentCreate
@@ -187,9 +194,10 @@ async def create_payment_by_staff(
             detail="Solo cobranza/admin/superadmin pueden registrar pagos en nombre de estudiantes."
         )
 
+    # F-COBRANZA-026: comprobante obligatorio siempre
+    if not file:
+        raise HTTPException(status_code=400, detail="El comprobante es obligatorio (imagen o PDF) para todos los métodos de pago.")
     if metodo_pago != "Caja":
-        if not file:
-            raise HTTPException(status_code=400, detail="El comprobante es obligatorio para transferencias y depósitos.")
         if not numero_transaccion:
             raise HTTPException(status_code=400, detail="El número de transacción es obligatorio para este método.")
         if not banco:
@@ -1347,36 +1355,79 @@ class CajaDirectoRequest(BaseModel):
 @router.post(
     "/caja-directo",
     response_model=PaymentResponse,
-    summary="Registrar Cobro Directo en Caja"
+    summary="Registrar Cobro Directo en Caja (requiere comprobante)"
 )
 async def registrar_cobro_caja_directo(
     *,
-    payload: CajaDirectoRequest,
+    # F-COBRANZA-026 (2026-07-22): comprobante obligatorio también para caja-directo
+    file: UploadFile = File(..., description="Comprobante obligatorio (foto del recibo/factura)"),
+    payload: str = Form(..., description="CajaDirectoRequest serializado como JSON string"),
     current_user: User = Depends(require_cobranza)
 ) -> Any:
     """
     Registrar un cobro físico directo en Caja para cualquier estudiante.
     Se crea directamente como APROBADO sin requerir la intervención o credenciales del estudiante.
+
+    F-COBRANZA-026: ahora requiere comprobante obligatorio (foto del recibo/factura).
     """
+    import json
+    from core.cloudinary_utils import upload_image, upload_pdf
+
+    # Parsear payload JSON
+    try:
+        payload_dict = json.loads(payload)
+        payload_obj = CajaDirectoRequest(**payload_dict)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Payload inválido: {e}")
+
+    # F-COBRANZA-026: validar comprobante
+    if not file:
+        raise HTTPException(status_code=400, detail="El comprobante es obligatorio (foto del recibo/factura)")
+
+    # Subir comprobante a Cloudinary
+    try:
+        from models.student import Student
+        estudiante = await Student.get(payload_obj.estudiante_id)
+        folder = f"payments/{payload_obj.estudiante_id}"
+        public_id = f"caja_{payload_obj.inscripcion_id}_{int(datetime.now().timestamp())}"
+
+        image_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
+        pdf_type = "application/pdf"
+
+        if file.content_type in image_types:
+            comprobante_url = await upload_image(file, folder, public_id)
+        elif file.content_type == pdf_type:
+            comprobante_url = await upload_pdf(file, folder, public_id)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Formato no permitido: {file.content_type}. Use imagen o PDF"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al subir comprobante: {e}")
+
     # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados no puede cobrar en caja
     # para inscripciones fuera de sus cursos.
     filtro_rol = filtro_cursos_por_rol(current_user)
     if filtro_rol:
         from services import enrollment_service
-        target_enrollment = await enrollment_service.get_enrollment(payload.inscripcion_id)
+        target_enrollment = await enrollment_service.get_enrollment(payload_obj.inscripcion_id)
         if not target_enrollment or target_enrollment.curso_id not in filtro_rol["curso_id"]["$in"]:
             raise HTTPException(status_code=403, detail="No tienes asignado el curso de esta inscripción")
 
     try:
         payment = await payment_service.create_caja_directo_payment(
-            estudiante_id=payload.estudiante_id,
-            inscripcion_id=payload.inscripcion_id,
-            cantidad_pago=payload.cantidad_pago,
+            estudiante_id=payload_obj.estudiante_id,
+            inscripcion_id=payload_obj.inscripcion_id,
+            cantidad_pago=payload_obj.cantidad_pago,
             admin_username=current_user.nombre_visible,  # ISSUE-R-PERFIL-GENERICO
-            concepto=payload.concepto,
-            numero_cuota=payload.numero_cuota,
-            remitente=payload.remitente,
-            cuenta_destino=payload.cuenta_destino
+            concepto=payload_obj.concepto,
+            numero_cuota=payload_obj.numero_cuota,
+            remitente=payload_obj.remitente,
+            cuenta_destino=payload_obj.cuenta_destino,
+            comprobante_url=comprobante_url,  # F-COBRANZA-026
         )
         return await payment_service.enrich_payment_with_details(payment)
     except ValueError as e:

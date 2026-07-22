@@ -1,4 +1,4 @@
-﻿"""
+"""
 Servicio de Pagos (Payments)
 ============================
 
@@ -1207,13 +1207,25 @@ async def create_caja_directo_payment(
     concepto: Optional[str] = None,
     numero_cuota: Optional[int] = None,
     remitente: Optional[str] = None,
-    cuenta_destino: Optional[str] = None
+    cuenta_destino: Optional[str] = None,
+    # F-COBRANZA-026 (2026-07-22): Kevin pidio que TODOS los pagos requieran
+    # comprobante, incluso los cobros directos en Caja. Si es None, lanzamos
+    # ValueError.
+    comprobante_url: Optional[str] = None
 ) -> Payment:
     """
     Registrar un pago físico directo en Caja realizado por cobranzas para un alumno.
     El pago se crea directamente como APROBADO e impacta el saldo del estudiante automáticamente.
     No requiere las credenciales del estudiante para procesar.
+
+    F-COBRANZA-026: comprobante_url es OBLIGATORIO (foto del recibo/factura).
     """
+    # F-COBRANZA-026: comprobante obligatorio incluso para cobros en Caja
+    if not comprobante_url:
+        raise ValueError(
+            "El comprobante es obligatorio para registrar un cobro en Caja. "
+            "Suba la foto del recibo/factura antes de continuar."
+        )
     enrollment = await Enrollment.get(inscripcion_id)
     if not enrollment:
         raise ValueError(f"Inscripción {inscripcion_id} no encontrada")
@@ -1259,7 +1271,7 @@ async def create_caja_directo_payment(
         cantidad_pago=cantidad_pago,
         numero_cuota=cuota_final,
         numero_transaccion="Caja / Directo",
-        comprobante_url=None,
+        comprobante_url=comprobante_url,  # F-COBRANZA-026
         remitente=remitente,
         banco="Caja Física",
         monto_comprobante=cantidad_pago,
