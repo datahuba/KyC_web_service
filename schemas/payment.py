@@ -109,6 +109,12 @@ class PaymentResponse(BaseModel):
     moneda: str = "Bs"
     monto: float
     concepto: str
+    # F-COBRANZA-039 (2026-07-22): faltaba este campo en el schema, por lo que el
+    # endpoint /payments/{id} y los listados NO retornaban el detalle de la glosa.
+    # Bug detectado al regenerar glosas de los 6 pagos con descuento (F-038): los
+    # detalles regenerados NO aparecian en el modal de detalle del pago. Fix:
+    # agregar el campo al schema PaymentResponse.
+    detalle: Optional[str] = None
     total_cuotas: Optional[int] = None
     
     # ISSUE-P-CANALES
