@@ -51,9 +51,26 @@ class Payment(MongoBaseModel):
     concepto: str = Field(
         ...,
         min_length=1,
-        description="Concepto del pago: 'Matrícula', 'Módulo', etc."
+        description=(
+            "Concepto CONTABLE del pago (resumen): 'Matrícula', 'Pago Módulo 1', "
+            "'Pago Módulos 1, 2', etc. Lo que importa para agrupación contable."
+        )
     )
-    
+
+    # F-COBRANZA-020 (2026-07-22): detalle del pago, separado del concepto.
+    # Kevin: "se podria poner como un total que junte a los dos por temas contables
+    # y que este desglose sea ya un detalle de justificacion tipo".
+    # Ej: si el pago cubre módulo 1 completo + módulo 2 parcial:
+    #   - concepto: "Pago Módulo 1"          (para contabilidad)
+    #   - detalle:  "Módulo 2 parcial (Bs 6 de Bs 294)"  (justificación)
+    detalle: Optional[str] = Field(
+        None,
+        description=(
+            "Desglose detallado del pago: módulos parciales, sobrantes, "
+            "fracciones. Para auditoría. Null si no aplica."
+        )
+    )
+
     numero_cuota: Optional[int] = Field(
         None,
         ge=1,

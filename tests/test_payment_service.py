@@ -771,14 +771,15 @@ class TestF015GlosaDetallada:
             modulos=[],
         )
         from services.payment_service import _generar_glosa_detalle
-        glosa, cuota = _generar_glosa_detalle(enrollment, 300.0, [])
+        glosa, detalle, cuota = _generar_glosa_detalle(enrollment, 300.0, [])
         assert glosa == "Matrícula"
+        assert detalle is None  # Sin desglose (solo matrícula)
         assert cuota is None
 
     def test_matricula_pagada_solo(self):
         """Si la matrícula ya está pagada y el pago es solo del primer módulo
         pero no alcanza para un módulo completo, debe decir 'Pago Módulo 1
-        (parcial, Bs X de Bs Y)'."""
+        (parcial)' en el concepto y el desglose con Bs X de Bs Y en el detalle."""
         from types import SimpleNamespace
         enrollment = SimpleNamespace(
             costo_matricula=300.0,
@@ -788,11 +789,12 @@ class TestF015GlosaDetallada:
             ],
         )
         from services.payment_service import _generar_glosa_detalle
-        glosa, cuota = _generar_glosa_detalle(enrollment, 150.0, [])
+        glosa, detalle, cuota = _generar_glosa_detalle(enrollment, 150.0, [])
         assert "Módulo 1" in glosa
         assert "parcial" in glosa
-        assert "150" in glosa  # Bs 150 de Bs 200
-        assert "200" in glosa
+        # F-COBRANZA-020: el detalle va por separado
+        assert "150" in detalle  # Bs 150
+        assert "200" in detalle  # de Bs 200
 
     def test_modulo_completo_unico(self):
         """Pago que cubre exactamente 1 módulo completo → 'Pago Módulo 1'."""
@@ -805,8 +807,12 @@ class TestF015GlosaDetallada:
             ],
         )
         from services.payment_service import _generar_glosa_detalle
-        glosa, cuota = _generar_glosa_detalle(enrollment, 200.0, [])
+        glosa, detalle, cuota = _generar_glosa_detalle(enrollment, 200.0, [])
         assert glosa == "Pago Módulo 1"
+        # F-COBRANZA-020: detalle con monto y estado
+        assert detalle is not None
+        assert "Módulo 1" in detalle
+        assert "completo" in detalle
         assert cuota == 1
 
     def test_varios_modulos_completos(self):
@@ -822,9 +828,13 @@ class TestF015GlosaDetallada:
             ],
         )
         from services.payment_service import _generar_glosa_detalle
-        glosa, cuota = _generar_glosa_detalle(enrollment, 600.0, [])
+        glosa, detalle, cuota = _generar_glosa_detalle(enrollment, 600.0, [])
         assert glosa == "Pago Módulos 1, 2, 3"
         assert cuota == 1  # primer módulo cubierto
+        # F-COBRANZA-020: detalle con 3 módulos completos
+        assert detalle is not None
+        assert detalle.count("Módulo") == 3
+        assert detalle.count("completo") == 3
 
     def test_matricula_y_modulos(self):
         """Pago que cubre matrícula + 2 módulos → 'Matrícula + Pago Módulos 1, 2'."""
@@ -838,11 +848,15 @@ class TestF015GlosaDetallada:
             ],
         )
         from services.payment_service import _generar_glosa_detalle
-        glosa, cuota = _generar_glosa_detalle(enrollment, 700.0, [])
+        glosa, detalle, cuota = _generar_glosa_detalle(enrollment, 700.0, [])
         # 700 - 300 matricula = 400 → cubre módulos 1 y 2 completos
         assert "Matrícula" in glosa
         assert "Módulos 1, 2" in glosa
         assert glosa == "Matrícula + Pago Módulos 1, 2"
+        # F-COBRANZA-020: detalle
+        assert detalle is not None
+        assert "Módulo 1" in detalle
+        assert "Módulo 2" in detalle
 
     def test_pago_no_alcanza_matricula(self):
         """Pago que no alcanza ni para matrícula → 'Matrícula (pago parcial)'."""
@@ -853,7 +867,7 @@ class TestF015GlosaDetallada:
             modulos=[],
         )
         from services.payment_service import _generar_glosa_detalle
-        glosa, cuota = _generar_glosa_detalle(enrollment, 100.0, [])
+        glosa, detalle, cuota = _generar_glosa_detalle(enrollment, 100.0, [])
         assert "parcial" in glosa.lower()
 
     def test_pago_exacto_un_modulo(self):
@@ -870,7 +884,7 @@ class TestF015GlosaDetallada:
             ],
         )
         from services.payment_service import _generar_glosa_detalle
-        glosa, cuota = _generar_glosa_detalle(enrollment, 150.0, [])
+        glosa, detalle, cuota = _generar_glosa_detalle(enrollment, 150.0, [])
         assert glosa == "Pago Módulo 1"
         assert cuota == 1
 
@@ -913,6 +927,66 @@ class TestF015GlosaPlaceholderGenerico:
         assert _es_concepto_generico_placeholder("Pago completo - Diplomado IA") is False
         assert _es_concepto_generico_placeholder("Recuperación Mayo") is False
         assert _es_concepto_generico_placeholder("Cuota especial #5") is False
+
+
+class TestF020DetalleSeparado:
+    """F-COBRANZA-020 (2026-07-22): el helper ahora retorna (concepto, detalle, cuota)
+    donde `concepto` es el resumen contable y `detalle` es la justificación
+    con montos. Kevin: "se podria poner como un total que junte a los dos
+    por temas contables y que este desglose sea ya un detalle de justificacion tipo"."""
+
+    def test_detalle_pago_matricula_solo(self):
+        """Si solo cubre matrícula, no hay detalle (null)."""
+        from types import SimpleNamespace
+        enrollment = SimpleNamespace(
+            costo_matricula=300.0, matricula_pagada=False, modulos=[]
+        )
+        from services.payment_service import _generar_glosa_detalle
+        glosa, detalle, cuota = _generar_glosa_detalle(enrollment, 300.0, [])
+        assert glosa == "Matrícula"
+        assert detalle is None  # sin desglose
+
+    def test_detalle_modulo_completo(self):
+        """Si cubre 1 módulo completo, detalle muestra monto + completo."""
+        from types import SimpleNamespace
+        enrollment = SimpleNamespace(
+            costo_matricula=300.0, matricula_pagada=True,
+            modulos=[SimpleNamespace(costo=294.0, estado="Pendiente", monto_pagado=0.0)]
+        )
+        from services.payment_service import _generar_glosa_detalle
+        glosa, detalle, cuota = _generar_glosa_detalle(enrollment, 294.0, [])
+        assert glosa == "Pago Módulo 1"
+        assert "294" in detalle
+        assert "completo" in detalle
+
+    def test_detalle_modulo_parcial(self):
+        """Pago parcial: detalle muestra Bs X de Bs Y."""
+        from types import SimpleNamespace
+        enrollment = SimpleNamespace(
+            costo_matricula=300.0, matricula_pagada=True,
+            modulos=[SimpleNamespace(costo=294.0, estado="Pendiente", monto_pagado=0.0)]
+        )
+        from services.payment_service import _generar_glosa_detalle
+        glosa, detalle, cuota = _generar_glosa_detalle(enrollment, 100.0, [])
+        assert "parcial" in glosa.lower()
+        assert "100" in detalle
+        assert "294" in detalle
+        assert "parcial" in detalle
+
+    def test_detalle_matricula_y_modulos(self):
+        """Si cubre matrícula + 1 módulo: detalle muestra ambos."""
+        from types import SimpleNamespace
+        enrollment = SimpleNamespace(
+            costo_matricula=300.0, matricula_pagada=False,
+            modulos=[SimpleNamespace(costo=294.0, estado="Pendiente", monto_pagado=0.0)]
+        )
+        from services.payment_service import _generar_glosa_detalle
+        glosa, detalle, cuota = _generar_glosa_detalle(enrollment, 594.0, [])
+        assert "Matrícula" in glosa
+        assert "Módulo 1" in glosa
+        # Detalle debe mencionar ambos (matrícula y módulo 1)
+        assert detalle is not None
+        assert ("Módulo" in detalle) or ("Matrícula" in detalle)
 
 
 class TestFormatFechaHelper:

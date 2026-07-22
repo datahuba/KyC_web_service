@@ -132,7 +132,9 @@ async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dic
             "total_cuotas": total_cuotas,
             "created_at": to_bolivia_time(payment.created_at),
             "updated_at": to_bolivia_time(payment.updated_at),
-            "en_ventana_reversion": _calcular_en_ventana_reversion(payment)  # ISSUE-P-REVERSION
+            "en_ventana_reversion": _calcular_en_ventana_reversion(payment),  # ISSUE-P-REVERSION
+            # F-COBRANZA-020: incluir el detalle en el dict enriquecido
+            "detalle": getattr(payment, "detalle", None),
         })
         enriched_list.append(p_dict)
 
@@ -200,7 +202,7 @@ async def get_next_pending_payment(enrollment_id: PydanticObjectId) -> dict:
 # `concepto = 'Módulo'` o `concepto = 'Matrícula'` como placeholders
 # autocompletados al seleccionar el curso. El backend respetaba ese valor y
 # todos los pagos quedaban con glosa "Módulo" genérica, sin detalle de qué
-# módulo se pagaba. Joel lo detectó: "tu correecion de el monto ya lo
+# módulo se pagaba. Kevin lo detectó: "tu correecion de el monto ya lo
 # subiste porque no lo veo".
 _CONCEPTOS_GENERICOS_PLACEHOLDER = frozenset({
     "", "matrícula", "matricula", "módulo", "modulo",
@@ -272,7 +274,8 @@ def _generar_glosa_detalle(
             matricula_cubierta_por_este_pago = True
         else:
             # No alcanza para matrícula → no se computa
-            return ("Matrícula (pago parcial)", None)
+            # F-COBRANZA-020: retornamos (concepto, detalle, numero_cuota)
+            return ("Matrícula (pago parcial)", f"Faltan {((enrollment.costo_matricula or 0) - tanque):.0f} Bs para completar la matrícula", None)
 
     # 2. Cascada sobre los módulos
     for idx, mod in enumerate(enrollment.modulos, start=1):
@@ -295,46 +298,67 @@ def _generar_glosa_detalle(
     partes = []
     numero_cuota_final = None
 
+    # F-COBRANZA-020 (2026-07-22): ahora retornamos TRES campos:
+    #   - concepto: resumen CONTABLE (para agrupación/reportes)
+    #   - detalle:  desglose para justificación/auditoría
+    #   - numero_cuota: el primer módulo cubierto completo
+    #
+    # Ejemplo: pago de 300 Bs que cubre módulo 1 (294) + parcial módulo 2 (6):
+    #   concepto: "Pago Módulos 1, 2"      ← para Excel/reporte contable
+    #   detalle:  "Módulo 1: 294 Bs (completo); Módulo 2: 6 Bs (parcial de 294 Bs)"  ← justificación
+    #
+    # Kevin: "se podria poner como un total que junte a los dos por temas contables
+    # y que este desglose sea ya un detalle de justificacion tipo"
+    concepto_partes = []
+    detalle_partes = []
+
     if matricula_cubierta_por_este_pago:
-        partes.append("Matrícula")
+        concepto_partes.append("Matrícula")
+        # Si también cubre módulos, lo indicamos en el detalle
+        if modulos_cubiertos:
+            detalle_partes.append("Matrícula completa")
 
     if modulos_cubiertos:
         indices_completos = [m[0] for m in modulos_cubiertos if m[1] == "completo"]
         indices_parciales = [m for m in modulos_cubiertos if m[1] == "parcial"]
 
+        # --- Construir CONCEPTO (resumen contable) ---
         if indices_completos and not indices_parciales:
             if len(indices_completos) == 1:
-                partes.append(f"Pago Módulo {indices_completos[0]}")
+                concepto_partes.append(f"Pago Módulo {indices_completos[0]}")
             else:
-                partes.append(f"Pago Módulos {', '.join(str(i) for i in indices_completos)}")
-        elif indices_parciales and not indices_completos:
-            # Solo parcial(es)
-            if len(indices_parciales) == 1:
-                idx, _, monto_p, costo = indices_parciales[0]
-                partes.append(f"Pago Módulo {idx} (parcial, Bs {monto_p:.0f} de Bs {costo:.0f})")
-            else:
-                detalle = ", ".join(
-                    f"M{m[0]} (Bs {m[2]:.0f} de Bs {m[3]:.0f})"
-                    for m in indices_parciales
+                concepto_partes.append(
+                    f"Pago Módulos {', '.join(str(i) for i in indices_completos)}"
                 )
-                partes.append(f"Pago parcial {detalle}")
+        elif indices_parciales and not indices_completos:
+            # Solo parcial(es): el módulo parcialmente cubierto aparece en concepto
+            if len(indices_parciales) == 1:
+                idx = indices_parciales[0][0]
+                concepto_partes.append(f"Pago Módulo {idx} (parcial)")
+            else:
+                concepto_partes.append(
+                    f"Pago parcial Módulos {', '.join(str(m[0]) for m in indices_parciales)}"
+                )
         else:
             # Mixto: completos + parciales (caso matricula + modulos)
-            detalle_completos = (
-                f"Módulo {indices_completos[0]}"
-                if len(indices_completos) == 1
-                else f"Módulos {', '.join(str(i) for i in indices_completos)}"
-            )
-            partes.append(f"Pago {detalle_completos}")
-            for idx, _, monto_p, costo in indices_parciales:
-                # FIX F-COBRANZA-018: el join " + " pone el espacio, así que
-                # las parciales no deben empezar con "+". Antes daba
-                # "Matrícula +  + Módulo 2 parcial" (doble +).
-                partes.append(f"Módulo {idx} parcial (Bs {monto_p:.0f} de Bs {costo:.0f})")
+            # Para el concepto, juntamos todos los índices cubiertos.
+            todos = sorted(indices_completos + [m[0] for m in indices_parciales])
+            if len(todos) == 1:
+                concepto_partes.append(f"Pago Módulo {todos[0]}")
+            else:
+                concepto_partes.append(f"Pago Módulos {', '.join(str(i) for i in todos)}")
 
-    glosa = " + ".join(partes) if partes else "Pago sin detalle"
-    if sobrante > 0.01:
-        glosa += f" (sobrante Bs {sobrante:.0f})"
+        # --- Construir DETALLE (desglose con montos) ---
+        for m in modulos_cubiertos:
+            idx, tipo, monto_p, costo = m
+            if tipo == "completo":
+                detalle_partes.append(
+                    f"Módulo {idx}: {monto_p:.0f} Bs (completo)"
+                )
+            else:  # parcial
+                detalle_partes.append(
+                    f"Módulo {idx}: {monto_p:.0f} Bs (parcial de {costo:.0f} Bs)"
+                )
 
     # numero_cuota: el primer módulo cubierto completo (si hay), si no None
     if modulos_cubiertos:
@@ -344,7 +368,14 @@ def _generar_glosa_detalle(
     elif matricula_cubierta_por_este_pago and not modulos_cubiertos:
         numero_cuota_final = None  # solo matrícula
 
-    return (glosa, numero_cuota_final)
+    # Si hay sobrante, agregarlo al detalle
+    if sobrante > 0.01:
+        detalle_partes.append(f"Sobrante: {sobrante:.0f} Bs")
+
+    concepto = " + ".join(concepto_partes) if concepto_partes else "Pago sin detalle"
+    detalle = "; ".join(detalle_partes) if detalle_partes else None
+
+    return (concepto, detalle, numero_cuota_final)
 
 
 async def create_payment(
@@ -413,7 +444,8 @@ async def create_payment(
             Payment.inscripcion_id == payment_in.inscripcion_id,
             Payment.estado_pago == EstadoPago.APROBADO
         ).to_list()
-        concepto_final, cuota_final = _generar_glosa_detalle(
+        # F-COBRANZA-020: ahora retorna (concepto, detalle, numero_cuota)
+        concepto_final, detalle_final, cuota_final = _generar_glosa_detalle(
             enrollment, monto_real, pagos_aprobados_pre
         )
 
@@ -437,6 +469,7 @@ async def create_payment(
 
         metodo_pago=payment_in.metodo_pago,
         concepto=concepto_final,
+        detalle=detalle_final,  # F-COBRANZA-020: desglose separado del concepto
         cantidad_pago=monto_real,
         numero_cuota=cuota_final,
 
@@ -1201,7 +1234,8 @@ async def create_caja_directo_payment(
             Payment.inscripcion_id == inscripcion_id,
             Payment.estado_pago == EstadoPago.APROBADO
         ).to_list()
-        concepto_final, cuota_final = _generar_glosa_detalle(
+        # F-COBRANZA-020: ahora retorna (concepto, detalle, numero_cuota)
+        concepto_final, detalle_final, cuota_final = _generar_glosa_detalle(
             enrollment, cantidad_pago, pagos_aprobados_pre
         )
 
@@ -1221,6 +1255,7 @@ async def create_caja_directo_payment(
         curso_id=enrollment.curso_id,
         metodo_pago="Caja",
         concepto=concepto_final,
+        detalle=detalle_final,  # F-COBRANZA-020
         cantidad_pago=cantidad_pago,
         numero_cuota=cuota_final,
         numero_transaccion="Caja / Directo",
