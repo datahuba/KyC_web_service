@@ -1337,7 +1337,7 @@ async def get_matriz_pagos(
             "nombre": nombre,
             "registro": registro,
             "curso_id": str(e.curso_id) if e.curso_id else "",
-            "curso_nombre": curso.nombre,
+            "curso_nombre": curso.nombre_programa,
             "estado_inscripcion": e.estado.value if hasattr(e.estado, "value") else str(e.estado),
             "matricula_pagada": bool(e.matricula_pagada),
             "matricula_monto": round(costo_mat, 2),
