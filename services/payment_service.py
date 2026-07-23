@@ -581,13 +581,42 @@ async def create_payment(
     # ========================================================================
 
     # 1) Actualizar saldo de la inscripción
+    # F-074-FIX-5 (2026-07-23): agregar retry para evitar desincronización
+    # entre `total_pagado` del enrollment y los pagos aprobados. Si la
+    # operación falla por RevisionIdWasChanged (otro proceso modificó el
+    # enrollment entre la lectura y el guardado), reintentamos UNA vez.
+    # Caso detectado (origen: Alfredo Elias Tito Mendoza Villarroel 2026-07-23):
+    # 7 estudiantes de DIPL-IA-2026 quedaron con `total_pagado` desactualizado
+    # (300 = solo matrícula) aunque tenían pagos aprobados por Bs 588-2.940.
+    # La libreta del estudiante mostraba "Pagado: Bs 0.00" para todos los
+    # módulos aunque el pago SÍ estaba en Gestión de Pagos con comprobante.
     try:
         await enrollment_service.actualizar_saldo_enrollment(
             enrollment_id=payment.inscripcion_id,
             monto_pago_aprobado=payment.cantidad_pago
         )
-    except Exception as e:
-        print(f"Error al actualizar saldo del enrollment tras auto-aprobación: {str(e)}")
+    except Exception as first_error:
+        # Retry: 1 intento más por si fue race condition
+        try:
+            await enrollment_service.actualizar_saldo_enrollment(
+                enrollment_id=payment.inscripcion_id,
+                monto_pago_aprobado=payment.cantidad_pago
+            )
+        except Exception as retry_error:
+            # F-074-FIX-5: loguear como WARNING (no print) para que sea
+            # visible en监控系统. Si esto pasa, ejecutar el script
+            # evidence/reuniones/2026-07-23/fix-prorrateo-masivo-v2.py
+            # --apply para corregir las desincronizaciones.
+            import logging
+            logger = logging.getLogger("kyc.payment")
+            logger.warning(
+                f"F-074-FIX-5: pago {payment.id} aprobado pero prorrateo "
+                f"falló tras 2 intentos. enrollment={payment.inscripcion_id} "
+                f"monto={payment.cantidad_pago}. "
+                f"Error1: {str(first_error)[:200]}. "
+                f"Error2: {str(retry_error)[:200]}. "
+                f"Ejecutar fix-prorrateo-masivo-v2.py --apply para corregir."
+            )
 
     # 2) Auditoría financiera (inmutable, obligatoria para todo movimiento)
     await _registrar_auditoria_financiera(
