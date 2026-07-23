@@ -1215,12 +1215,38 @@ async def generar_reporte_pdf_caja(
     headers = ["Nombre del Estudiante", "C.I.", "Curso", "Método", "Fecha", "Monto", "Concepto", "Nº Transacción", "Estado"]
     rows = [headers]
     from core.timezone_utils import to_bolivia_time
+
+    # F-068 (2026-07-22, Kevin): el PDF mostraba "Sin nombre", "—", "Sin curso"
+    # porque `enrich_payments_with_details_bulk` retorna `nombre_estudiante` y
+    # `estudiante_ci` PLANOS (no un dict anidado con `student` y `course`).
+    # Hay que construir maps propios como hace el XLSX.
+    from models.student import Student
+    from models.course import Course
+    student_ids_pdf = list({p.get("estudiante_id") for p in enriched if p.get("estudiante_id")})
+    course_ids_pdf = list({p.get("curso_id") for p in enriched if p.get("curso_id")})
+    students_pdf = await Student.find(In(Student.id, student_ids_pdf)).to_list() if student_ids_pdf else []
+    courses_pdf = await Course.find(In(Course.id, course_ids_pdf)).to_list() if course_ids_pdf else []
+    students_map_pdf = {s.id: s for s in students_pdf}
+    courses_map_pdf = {c.id: c for c in courses_pdf}
+
     for p in enriched:
         def _g2(key, default=None):
             return p.get(key, default) if isinstance(p, dict) else getattr(p, key, default)
-        student = _g2("estudiante") or {}
-        course = _g2("course") or {}
-        ci = (student.get("carnet_identidad") or student.get("registro") or "").strip()
+        # F-068: leer de maps propios (no de `student`/`course` que no existen)
+        student_obj = students_map_pdf.get(_g2("estudiante_id"))
+        course_obj = courses_map_pdf.get(_g2("curso_id"))
+        nombre = (student_obj.nombre if student_obj and getattr(student_obj, "nombre", None) else None) or _g2("nombre_estudiante") or "Sin nombre"
+        ci = (
+            (getattr(student_obj, "carnet_identidad", None) if student_obj else None)
+            or (getattr(student_obj, "registro", None) if student_obj else None)
+            or _g2("estudiante_ci")
+            or ""
+        ).strip()
+        nombre_curso = ""
+        if course_obj:
+            nombre_curso = getattr(course_obj, "codigo", None) or getattr(course_obj, "nombre_programa", None) or ""
+        if not nombre_curso:
+            nombre_curso = "Sin curso"
         # to_bolivia_time retorna STRING ya formateado (ej "22/07/2026 14:30").
         # Si retorna None (no hay fecha), mostrar "Sin fecha".
         fecha = _g2("fecha_subida")
@@ -1230,19 +1256,24 @@ async def generar_reporte_pdf_caja(
             fecha_str = "Sin fecha"
         monto = float(_g2("cantidad_pago", 0))
         estado_pago = _g2("estado_pago", "")
+        # F-068: si es enum (no string), extraer .value
+        if hasattr(estado_pago, "value"):
+            estado_pago_str = estado_pago.value
+        else:
+            estado_pago_str = str(estado_pago) if estado_pago else ""
         # Anulados: mostrar como negativo (mismo criterio que el XLSX)
-        if estado_pago == "anulado" and monto > 0:
+        if estado_pago_str == "anulado" and monto > 0:
             monto = -monto
         rows.append([
-            Paragraph(str(student.get("nombre") or "Sin nombre")[:40], styles["BodyText"]),
+            Paragraph(str(nombre)[:40], styles["BodyText"]),
             ci or "—",
-            course.get("codigo") or course.get("nombre_programa") or "Sin curso",
+            nombre_curso,
             _g2("metodo_pago") or "",
             fecha_str,
             f"{monto:,.2f}",
             Paragraph(str(_g2("concepto") or "")[:50], styles["BodyText"]),
             str(_g2("numero_transaccion") or "Caja / S/N")[:18],
-            estado_pago,
+            estado_pago_str,
         ])
 
     data_table = Table(rows, repeatRows=1, colWidths=[

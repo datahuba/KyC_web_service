@@ -1213,7 +1213,13 @@ async def get_reporte_caja(
     todos_los_pagos_del_rango = await Payment.find(criteria).to_list()
     total_aprobado = sum(p.cantidad_pago for p in todos_los_pagos_del_rango if p.estado_pago == EstadoPago.APROBADO)
     total_pendiente = sum(p.cantidad_pago for p in todos_los_pagos_del_rango if p.estado_pago == EstadoPago.PENDIENTE)
-    total_anulado = sum(p.cantidad_pago for p in todos_los_pagos_del_rango if p.estado_pago == EstadoPago.ANULADO)
+    # F-068 (2026-07-22, Kevin): "Total Anulado" debe incluir TANTO anulados
+    # como rechazados (regla F-023: Débitos = anulados/rechazados).
+    # Antes: solo contaba ANULADO, lo que daba 588 Bs en la UI vs 876 Bs en el PDF.
+    total_anulado = sum(
+        p.cantidad_pago for p in todos_los_pagos_del_rango
+        if p.estado_pago in (EstadoPago.ANULADO, EstadoPago.RECHAZADO)
+    )
 
     # F-COBRANZA-005 (2026-07-21): los pagos ANULADOS ahora se reportan con
     # monto negativo (en la lista) y se restan del total. Esto hace que el

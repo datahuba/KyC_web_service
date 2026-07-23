@@ -1574,6 +1574,71 @@ class TestF043PDFReporteCaja:
                 f"El PDF debe tener tarjeta KPI con titulo '{titulo}' (F-043)."
             )
 
+    def test_pdf_usa_nombre_estudiante_no_student_nombre(self, payments_src):
+        """F-068 (2026-07-22): el PDF debe leer `nombre_estudiante` (plano) del
+        dict enriquecido, no `student.nombre` (que no existe en el dict)."""
+        src = payments_src.read_text(encoding="utf-8")
+        idx = src.find('"/reportes/caja/pdf"')
+        bloque = src[idx:idx + 15000]  # PDF endpoint es grande
+        # Debe construir maps propios de Student/Course
+        assert "students_map_pdf" in bloque, (
+            "F-068: El PDF debe construir su propio map de Student (no leer de "
+            "un dict `student` anidado que no existe en enriched)."
+        )
+        assert "courses_map_pdf" in bloque, (
+            "F-068: El PDF debe construir su propio map de Course (no leer de "
+            "un dict `course` anidado que no existe en enriched)."
+        )
+
+    def test_pdf_usa_value_del_enum_estado(self, payments_src):
+        """F-068: el PDF debe convertir el enum a su .value para no mostrar
+        'EstadoPago.APROBADO' literal."""
+        src = payments_src.read_text(encoding="utf-8")
+        idx = src.find('"/reportes/caja/pdf"')
+        bloque = src[idx:idx + 15000]
+        # Buscar la conversión del enum a .value
+        assert 'hasattr(estado_pago, "value")' in bloque, (
+            "F-068: El PDF debe usar `hasattr(estado_pago, 'value')` para extraer "
+            "el .value del enum, sino muestra 'EstadoPago.APROBADO' literal."
+        )
+
+
+class TestF068TotalAnuladoIncluyeRechazados:
+    """
+    F-068 (2026-07-22, Kevin): "Total Anulado" del reporte de caja debe
+    incluir TANTO anulados COMO rechazados (regla F-023: Débitos = anulados/
+    rechazados). Antes solo contaba ANULADO, dando 588 Bs en UI vs 876 Bs en PDF.
+
+    Caso real: Luis Valdez 288 Bs RECHAZADO + Jerry Fletcher 2x -294 Bs
+    ANULADO = 876 Bs total.
+    """
+
+    @pytest.fixture
+    def get_reporte_caja_src(self):
+        from pathlib import Path
+        return Path("services/payment_service.py").read_text(encoding="utf-8")
+
+    def test_get_reporte_caja_incluye_rechazados_en_total_anulado(self, get_reporte_caja_src):
+        """La función debe sumar tanto ANULADO como RECHAZADO."""
+        # Buscar la sección de "Totales agregados"
+        idx = get_reporte_caja_src.find("Totales agregados sobre TODO el rango")
+        assert idx > 0, "No se encontró la sección de totales en get_reporte_caja"
+        bloque = get_reporte_caja_src[idx:idx + 2000]
+        # Debe chequear AMBOS
+        assert "EstadoPago.ANULADO" in bloque, (
+            "F-068: Falta la suma de ANULADO en total_anulado."
+        )
+        assert "EstadoPago.RECHAZADO" in bloque, (
+            "F-068: Falta la suma de RECHAZADO en total_anulado. "
+            "Sin esto, la UI muestra 588 Bs pero el PDF 876 Bs "
+            "(288 del rechazado de Luis Valdez no se cuenta)."
+        )
+        # Debe ser `in (ANULADO, RECHAZADO)` (tupla), no dos ifs separados
+        assert "EstadoPago.ANULADO, EstadoPago.RECHAZADO" in bloque, (
+            "F-068: El chequeo debe ser `in (EstadoPago.ANULADO, EstadoPago.RECHAZADO)`, "
+            "no dos ifs separados."
+        )
+
 
 class TestF048RechazadoMontoNegativoEnXLSX:
     """
