@@ -16,8 +16,8 @@ TTL: 604800 segundos (7 días)
 
 from datetime import datetime, timedelta
 from typing import Optional
-import pymongo
 from pydantic import Field
+from beanie import Indexed
 from .base import MongoBaseModel, PyObjectId
 
 
@@ -45,7 +45,7 @@ class ErrorLog(MongoBaseModel):
     - environment: 'production' / 'staging' / 'development'
     """
 
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Indexed(datetime, expireAfterSeconds=604800)  # TTL 7 días
     path: str = Field(..., description="URL del request")
     method: str = Field(..., description="HTTP method")
     status_code: int = Field(..., description="HTTP status code")
@@ -82,25 +82,11 @@ class ErrorLog(MongoBaseModel):
 
     class Settings:
         name = "error_logs"
-        # F-044: TTL de 7 días para auto-limpieza.
-        # MongoDB borrará automáticamente los docs donde
-        # timestamp + 7 días < now.
+        # F-044: TTL de 7 días se configura en el campo `timestamp` con
+        # `Indexed(datetime, expireAfterSeconds=604800)` arriba.
+        # Índices secundarios para queries del visor.
         indexes = [
-            {
-                "key": [("timestamp", pymongo.DESCENDING)],
-                "name": "timestamp_desc",
-                "expireAfterSeconds": 604800,  # 7 días
-            },
-            {
-                "key": [("path", pymongo.ASCENDING), ("timestamp", pymongo.DESCENDING)],
-                "name": "path_timestamp",
-            },
-            {
-                "key": [("status_code", pymongo.ASCENDING), ("timestamp", pymongo.DESCENDING)],
-                "name": "status_timestamp",
-            },
-            {
-                "key": [("error_type", pymongo.ASCENDING)],
-                "name": "error_type",
-            },
+            "path",
+            "error_type",
+            "status_code",
         ]
