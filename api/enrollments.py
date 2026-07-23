@@ -725,9 +725,13 @@ async def _enriquecer_nota_pendiente(enrollment: Enrollment, modulo_index: int) 
 )
 async def listar_notas_pendientes(
     *,
-    curso_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por curso"),
+    # F-070-FIX (2026-07-22): aceptar string vacío como None para no romper
+    # cuando el frontend envíe ?curso_id= o ?estudiante_query= vacíos.
+    # Usamos `str` y validamos manualmente. FastAPI/Pydantic intenta
+    # convertir "" a PydanticObjectId antes del handler y eso retornaba 422.
+    curso_id: Optional[str] = Query(None, description="Filtrar por curso (string vacío se ignora)"),
     modulo_index: Optional[int] = Query(None, ge=0, description="Filtrar por índice de módulo"),
-    estudiante_query: Optional[str] = Query(None, description="Buscar por nombre, registro o CI del estudiante"),
+    estudiante_query: Optional[str] = Query(None, description="Buscar por nombre, registro o CI"),
     current_user: User = Depends(require_cpd)
 ) -> Any:
     """
@@ -738,6 +742,20 @@ async def listar_notas_pendientes(
     Permisos: CPD, ADMIN, SUPERADMIN (mismo criterio que validar/rechazar
     notas individuales).
     """
+    # F-070-FIX: normalizar string vacío a None antes de validar el ObjectId
+    from bson import ObjectId as _ObjectId
+    if curso_id is not None and str(curso_id).strip() == "":
+        curso_id = None
+    if curso_id is not None:
+        try:
+            curso_id = _ObjectId(curso_id)
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail=f"curso_id inválido: '{curso_id}' no es un ObjectId válido.",
+            )
+    if estudiante_query is not None and estudiante_query.strip() == "":
+        estudiante_query = None
     # Filtro base: cualquier modulo con nota_borrador pendiente
     # (necesitamos un $elemMatch para que MongoDB evalúe cada elemento del array)
     match_dict: dict = {
