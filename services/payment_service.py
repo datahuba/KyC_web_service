@@ -1952,7 +1952,7 @@ async def get_reporte_caja(
     # En la lista de payments, los anulados se serializan con cantidad_pago
     # en negativo. El frontend los muestra como "-X" automáticamente.
     payments = []
-    for p in payments_raw:
+    for p in todos_los_pagos_del_rango:
         # to_dict para no mutar el documento persistido
         p_dict = p.model_dump(by_alias=True)
         if p.estado_pago == EstadoPago.ANULADO and p.cantidad_pago > 0:
