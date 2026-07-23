@@ -816,6 +816,11 @@ async def rechazar_nota_borrador(
     """
     CPD rechaza el borrador propuesto por el docente. No toca la nota oficial
     (que puede mantener un valor validado previamente, si existía).
+
+    F-050 (2026-07-22, audios viejos): antes NO recalculaba `nota_final`
+    (promedio) tras rechazar, así que el promedio podía seguir sumando el
+    borrador rechazado. Fix: recalcular SIEMPRE el promedio, igual que
+    `validar_nota_borrador` y `actualizar_nota_modulo`.
     """
     enrollment = await Enrollment.get(enrollment_id)
     if not enrollment:
@@ -829,6 +834,18 @@ async def rechazar_nota_borrador(
 
     modulo.nota_borrador = None
     modulo.estado_validacion_nota = "sin_borrador"
+
+    # F-050 FIX: recalcular el promedio igual que en actualizar_nota_modulo
+    # y validar_nota_borrador. Sin esto, el promedio podía seguir sumando
+    # la nota rechazada en alguna vista de UI / reportes.
+    notas_evaluadas = [m.nota for m in enrollment.modulos if m.nota is not None]
+    if notas_evaluadas:
+        promedio = sum(notas_evaluadas) / len(notas_evaluadas)
+        enrollment.nota_final = round(promedio, 2)
+    else:
+        # Sin notas válidas, no hay promedio. Mantener como None.
+        enrollment.nota_final = None
+
     enrollment.updated_at = utcnow_naive()
     await enrollment.save()
     return enrollment

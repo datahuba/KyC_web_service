@@ -1694,6 +1694,50 @@ class TestF048RechazadoMontoNegativoEnXLSX:
         )
 
 
+class TestF050RechazarBorradorRecalculaPromedio:
+    """
+    F-050 (2026-07-22, audios viejos): cuando CPD rechaza un borrador de nota,
+    el promedio (`nota_final`) NO se recalculaba, así que el rechazo del
+    docente seguía "sumando" en alguna vista.
+
+    Fix: `rechazar_nota_borrador` ahora recalcula el promedio igual que
+    `actualizar_nota_modulo` y `validar_nota_borrador`.
+    """
+
+    @pytest.fixture
+    def enrollment_service_src(self):
+        from pathlib import Path
+        return Path("services/enrollment_service.py").read_text(encoding="utf-8")
+
+    def test_rechazar_nota_borrador_recalcula_promedio(self, enrollment_service_src):
+        """La función `rechazar_nota_borrador` debe recalcular `nota_final`."""
+        # Buscar la función rechazar_nota_borrador
+        idx = enrollment_service_src.find("async def rechazar_nota_borrador")
+        assert idx > 0, "No se encontró la función `rechazar_nota_borrador`"
+        bloque = enrollment_service_src[idx:idx + 3000]
+        # Debe recalcular el promedio con la lista de notas
+        assert "nota_final" in bloque, (
+            "F-050: `rechazar_nota_borrador` debe recalcular `nota_final`."
+        )
+        assert "notas_evaluadas" in bloque, (
+            "F-050: `rechazar_nota_borrador` debe iterar sobre las notas "
+            "oficiales (`m.nota for m in enrollment.modulos`) y calcular "
+            "el nuevo promedio, igual que `actualizar_nota_modulo`."
+        )
+        assert "promedio" in bloque, (
+            "F-050: Debe calcular la variable `promedio` y asignarla a `nota_final`."
+        )
+
+    def test_rechazar_nota_borrador_nota_final_none_si_sin_notas(self, enrollment_service_src):
+        """Si no hay notas válidas, `nota_final` debe ser None (no promedio de [])."""
+        idx = enrollment_service_src.find("async def rechazar_nota_borrador")
+        bloque = enrollment_service_src[idx:idx + 3000]
+        assert "enrollment.nota_final = None" in bloque, (
+            "F-050: Si no hay notas válidas, `nota_final` debe ser None "
+            "(no un promedio de lista vacía que daría error)."
+        )
+
+
 class TestF049SaldoAFavorEnResumen:
     """
     F-049 (2026-07-22, audio Sandra 9/7 17:44):
