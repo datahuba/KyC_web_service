@@ -492,6 +492,49 @@ async def get_reporte_caja_endpoint(
     enriched = await payment_service.enrich_payments_with_details_bulk(resultado["payments"])
 
     # Los pagos enriquecidos vienen de model_dump() y conservan campos PyObjectId
+
+
+@router.get(
+    "/reportes/lista-habilitados",
+    summary="F-075: Lista de Postgraduantes Habilitados (informe acta de notas)"
+)
+async def get_lista_habilitados(
+    *,
+    curso_id: PydanticObjectId = Query(..., description="ID del curso (obligatorio)"),
+    modulo_index: Optional[int] = Query(
+        None,
+        ge=0,
+        description=(
+            "0 = solo matrícula, 1..N = solo ese módulo, None/omitido = TODOS los módulos "
+            "(un registro por estudiante-módulo)"
+        ),
+    ),
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    F-075 (2026-07-23): Genera la 'Lista de Postgraduantes Habilitados' para
+    aprobación de acta de notas. Formato estilo papel Sandra:
+
+    Encabezado:
+      LISTA DE POSTGRADUANTES HABILITADOS
+      (MAESTRÍA / DIPLOMADO / DOCTORADO) <nombre del programa>
+      MÓDULO: <Módulo N: nombre>
+      PERÍODO: <rango de fechas de los pagos>
+      DOCENTE: <nombre del docente del módulo>
+
+    Filas: N° | Apellido y Nombre | C.I. | Fecha | N° Boleta | Importe Bs. | Beca %
+
+    Solo se listan estudiantes que TIENEN al menos un pago APROBADO
+    aplicado al módulo (o matrícula) pedido. Si el estudiante pagó en
+    varios pagos parciales, se SUMAN en un solo registro.
+
+    El sistema incluye el % de beca del estudiante para justificar por qué
+    unos pagan más que otros.
+    """
+    return await payment_service.generar_lista_habilitados(
+        curso_id=curso_id,
+        modulo_index=modulo_index,
+    )
     # (inscripcion_id, estudiante_id, curso_id, _id) como objetos ObjectId. Este
     # endpoint devuelve un dict crudo (sin response_model que los coaccione, a
     # diferencia de list_payments), por lo que hay que serializarlos a string
