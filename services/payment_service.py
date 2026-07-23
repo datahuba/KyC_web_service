@@ -1196,6 +1196,11 @@ async def get_matriz_pagos(
           ],
           "total_ingresos": float,
           "por_cobrar": float,
+          # F-074-FIX-4: campos de auditoría de descuentos/becas
+          "beca_porcentaje": float,        # % total de descuento aplicado (curso + personal)
+          "ahorro": float,                 # Bs ahorrados vs costo sin descuento del curso
+          "costo_sin_descuento": float,    # Lo que pagaría sin descuento (matrícula + 5 módulos)
+          "pago_todo": bool,               # True si pagó matrícula + todos los módulos
         }
       ],
       "totales_por_columna": {
@@ -1206,6 +1211,10 @@ async def get_matriz_pagos(
         "total_ingresos": float,
         "por_cobrar": float,
         "total_inscritos": int,
+        # F-074-FIX-4: contadores globales
+        "estudiantes_pagaron_todo": int,  # Cuántos pagaron matrícula + todos los módulos
+        "estudiantes_con_beca": int,       # Cuántos tienen algún descuento aplicado
+        "ahorro_total_por_descuentos": float,  # Suma total de Bs ahorrados
       },
       "filtros_aplicados": {"modulo_index": int|None, "cursos_count": int},
     }
@@ -1245,6 +1254,9 @@ async def get_matriz_pagos(
     tot_ingresos = 0.0
     tot_por_cobrar = 0.0
     tot_inscritos = 0
+    tot_pagaron_todo = 0  # F-074-FIX-4: cuántos tienen matrícula + todos los módulos pagados
+    tot_con_beca = 0       # F-074-FIX-4: cuántos tienen algún descuento
+    tot_ahorro_total = 0.0  # F-074-FIX-4: ahorro total por descuentos aplicados
 
     # Carga batch de estudiantes para resolver nombres
     student_ids = list({e.estudiante_id for e in enrollments if e.estudiante_id})
@@ -1332,6 +1344,50 @@ async def get_matriz_pagos(
         # mostrar la columna "MATRÍCULA" usando matricula_monto/matricula_pagado,
         # y las columnas Módulo 1..N usando modulos[0..N-1].
 
+        # F-074-FIX-4 (2026-07-23): beca y ahorro del estudiante
+        # Regla de Kevin (2026-07-23 10:01 GMT-4): "el descuento solamente es
+        # para modulos no matriculas eso no se cambia eso es una regla si o si
+        # no hagas sonceras". La matrícula NUNCA tiene descuento, solo los
+        # módulos. Por lo tanto el `ahorro` se calcula únicamente sobre los
+        # módulos, NO sobre la matrícula. El campo `costo_matricula` en BD es
+        # el costo ORIGINAL de la matrícula (sin beca), por regla de negocio.
+        desc_curso = float(e.descuento_curso_aplicado or 0)
+        desc_personal = float(e.descuento_personalizado or 0) if e.descuento_personalizado is not None else 0.0
+        # Costo de los módulos DEL CURSO sin descuento (referencia, ya que el
+        # costo en `e.modulos[]` está CON descuento aplicado al becado)
+        costo_curso_sin_desc = sum((float(m.costo or 0.0)) for m in (curso.modulos or []))
+        # Costo de los módulos DEL ESTUDIANTE (con descuento ya aplicado)
+        costo_modulos_con_desc_estudiante = sum(
+            (float(m.costo or 0.0)) for m in (e.modulos or [])
+        )
+        # Costo sin descuento del estudiante = matrícula (sin beca, regla Kevin)
+        # + módulos del CURSO sin descuento. NO se aplica beca a la matrícula.
+        costo_total_sin_desc = float(e.costo_matricula or 0.0) + costo_curso_sin_desc
+        total_a_pagar_e = float(e.total_a_pagar or 0.0)
+        # El ahorro es la diferencia entre lo que pagaría SIN beca y lo que paga
+        # CON beca. Como la beca NUNCA aplica a matrícula, el ahorro viene
+        # solamente de los módulos: (costo_curso_sin_desc - costo_modulos_con_desc_estudiante)
+        ahorro_modulos = max(0.0, costo_curso_sin_desc - costo_modulos_con_desc_estudiante)
+        ahorro_e = ahorro_modulos  # Por regla de Kevin, NUNCA se resta matrícula
+        # Beca efectiva del estudiante (puede ser 0% si no tiene descuento)
+        beca_porcentaje = desc_curso + (desc_personal or 0.0)
+        # Solo se considera "con beca" si el ahorro > 0 (puede haber un descuento
+        # que no se aplicó realmente — caso bug histórico)
+        tiene_beca = ahorro_e > 0.01 and beca_porcentaje > 0
+
+        # F-074-FIX-4: "no veo el conteo del que pago todo" — calcular si pagó
+        # matrícula + todos los módulos
+        todos_modulos_pagados = all(
+            (m.estado == "Pagado") for m in (e.modulos or [])
+        ) if (e.modulos or []) else False
+        pago_todo = bool(e.matricula_pagada) and todos_modulos_pagados and bool(e.modulos)
+
+        if pago_todo:
+            tot_pagaron_todo += 1
+        if tiene_beca:
+            tot_con_beca += 1
+        tot_ahorro_total += ahorro_e
+
         estudiantes_out.append({
             "estudiante_id": str(e.estudiante_id) if e.estudiante_id else "",
             "nombre": nombre,
@@ -1345,6 +1401,11 @@ async def get_matriz_pagos(
             "modulos": modulos_out,
             "total_ingresos": round(total_ingresos_e, 2),
             "por_cobrar": round(por_cobrar_e, 2),
+            # F-074-FIX-4: campos de auditoría de descuentos
+            "beca_porcentaje": round(beca_porcentaje, 1),
+            "ahorro": round(ahorro_e, 2),
+            "costo_sin_descuento": round(costo_total_sin_desc, 2),
+            "pago_todo": pago_todo,
         })
 
     # Ordenar estudiantes por nombre
@@ -1374,6 +1435,10 @@ async def get_matriz_pagos(
         "total_ingresos": round(tot_ingresos, 2),
         "por_cobrar": round(tot_por_cobrar, 2),
         "total_inscritos": tot_inscritos,
+        # F-074-FIX-4: contadores adicionales solicitados por Kevin
+        "estudiantes_pagaron_todo": tot_pagaron_todo,
+        "estudiantes_con_beca": tot_con_beca,
+        "ahorro_total_por_descuentos": round(tot_ahorro_total, 2),
     }
 
     return {
