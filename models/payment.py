@@ -165,10 +165,26 @@ class Payment(MongoBaseModel):
         self.updated_at = utcnow_naive()
     
     def rechazar_pago(self, admin_username: str, motivo: str):
+        # F-048 (2026-07-22): antes guardaba en `motivo_rechazo` (campo
+        # incorrecto), lo que dejaba el campo `motivo_reversion` (que es el
+        # que se muestra en UI/XLSX) en NULL. Caso real: Luis Valdez 288 Bs
+        # RECHAZADO mostraba "Motivo Reversión" vacío.
+        # Fix: guardar en `motivo_reversion` (consistente con `anular_pago`)
+        # y validar que el motivo no esté vacío.
+        if not motivo or not motivo.strip():
+            raise ValueError(
+                "F-048: El motivo de rechazo es OBLIGATORIO. "
+                "Debe indicar por qué se rechaza el pago (ej: comprobante ilegible, "
+                "monto no coincide, etc.)."
+            )
         self.estado_pago = EstadoPago.RECHAZADO
         self.fecha_verificacion = utcnow_naive()
         self.verificado_por = admin_username
-        self.motivo_rechazo = motivo
+        # Unificado: ahora rechaza también usa `motivo_reversion` (mismo campo
+        # que `anular_pago`). Se mantiene `motivo_rechazo` por compatibilidad
+        # histórica pero queda en None.
+        self.motivo_reversion = motivo.strip()
+        self.motivo_rechazo = motivo.strip()  # sincronizado para evitar inconsistencias
         self.updated_at = utcnow_naive()
 
     def anular_pago(self, admin_username: str, motivo: str):

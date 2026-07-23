@@ -1771,6 +1771,57 @@ class TestF051ReglaMoraAbandonoKevin:
         )
 
 
+class TestF048MotivoRechazoUnificado:
+    """
+    F-048 (2026-07-22): inconsistencia entre `motivo_rechazo` y
+    `motivo_reversion` causaba que el XLSX/UI mostraran "Motivo Reversión"
+    VACÍO para pagos RECHAZADOS, aunque el admin sí había dado un motivo.
+
+    Caso real: Luis Valdez (CI 5384101) tiene un pago de 288 Bs RECHAZADO
+    con `motivo_reversion=None` aunque en la UI sí se proporcionó motivo.
+
+    Fix: `rechazar_pago` ahora guarda el motivo en `motivo_reversion`
+    (consistente con `anular_pago`) Y valida que no esté vacío.
+    """
+
+    @pytest.fixture
+    def payment_model_src(self):
+        from pathlib import Path
+        return Path("models/payment.py").read_text(encoding="utf-8")
+
+    def test_rechazar_pago_usa_motivo_reversion(self, payment_model_src):
+        """La función `rechazar_pago` debe guardar en `motivo_reversion`."""
+        idx = payment_model_src.find("def rechazar_pago")
+        assert idx > 0
+        bloque = payment_model_src[idx:idx + 2000]
+        # Debe guardar en motivo_reversion
+        assert "self.motivo_reversion = motivo" in bloque, (
+            "F-048: `rechazar_pago` debe guardar en `self.motivo_reversion` "
+            "(consistente con `anular_pago`). Antes guardaba en "
+            "`motivo_rechazo` que la UI/XLSX no leían."
+        )
+
+    def test_rechazar_pago_valida_motivo_no_vacio(self, payment_model_src):
+        """Debe lanzar ValueError si el motivo está vacío."""
+        idx = payment_model_src.find("def rechazar_pago")
+        bloque = payment_model_src[idx:idx + 2000]
+        assert 'raise ValueError' in bloque, (
+            "F-048: `rechazar_pago` debe validar que el motivo no esté vacío."
+        )
+        assert 'motivo de rechazo es OBLIGATORIO' in bloque, (
+            "F-048: El mensaje de error debe mencionar que el motivo es obligatorio."
+        )
+
+    def test_xlsx_muestra_motivo_reversion(self, payments_src_fixture := __import__('pathlib').Path("api/payments.py")):
+        """El XLSX del reporte de pagos debe leer `motivo_reversion`."""
+        src = payments_src_fixture.read_text(encoding="utf-8")
+        idx = src.find('"/reportes/excel"')
+        bloque = src[idx:idx + 5000]
+        assert "payment.motivo_reversion" in bloque, (
+            "F-048: El XLSX debe leer `payment.motivo_reversion` (no `motivo_rechazo`)."
+        )
+
+
 class TestF050RechazarBorradorRecalculaPromedio:
     """
     F-050 (2026-07-22, audios viejos): cuando CPD rechaza un borrador de nota,
