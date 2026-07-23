@@ -1248,7 +1248,7 @@ async def get_reporte_caja(
 
 async def get_resumen_pagos_enrollment(enrollment_id: PydanticObjectId) -> dict:
     payments = await get_payments_by_enrollment(enrollment_id)
-    
+
     resumen = {
         "total_pagos": len(payments),
         "pendientes": len([p for p in payments if p.estado_pago == EstadoPago.PENDIENTE]),
@@ -1259,6 +1259,40 @@ async def get_resumen_pagos_enrollment(enrollment_id: PydanticObjectId) -> dict:
             p.cantidad_pago for p in payments if p.estado_pago == EstadoPago.APROBADO
         ),
     }
+
+    # F-049 (2026-07-22, audio Sandra 9/7): cuando un estudiante paga de más
+    # (ej: paga 300 cuando módulo cuesta 294), el sistema le genera un
+    # "saldo a favor" que el estudiante VE en su resumen pero cobranza NO.
+    # Agregar desglose por módulo + saldo a favor calculado.
+    try:
+        enrollment = await Enrollment.get(enrollment_id)
+        if enrollment:
+            modulos_info = []
+            for i, m in enumerate(enrollment.modulos or []):
+                modulos_info.append({
+                    "index": i,
+                    "nombre": m.nombre or f"Módulo {i + 1}",
+                    "monto": float(m.monto or 0),
+                    "monto_pagado": float(m.monto_pagado or 0),
+                    "saldo_modulo": round(float(m.monto or 0) - float(m.monto_pagado or 0), 2),
+                    "pagado": (m.monto_pagado or 0) >= (m.monto or 0),
+                })
+
+            total_a_pagar = float(enrollment.total_a_pagar or 0)
+            total_pagado = float(enrollment.total_pagado or 0)
+            # F-049: si total_pagado > total_a_pagar, hay saldo a favor
+            saldo_a_favor = round(max(0.0, total_pagado - total_a_pagar), 2)
+            saldo_pendiente_real = round(max(0.0, total_a_pagar - total_pagado), 2)
+
+            resumen["modulos"] = modulos_info
+            resumen["total_a_pagar"] = total_a_pagar
+            resumen["total_pagado"] = total_pagado
+            resumen["saldo_a_favor"] = saldo_a_favor
+            resumen["saldo_pendiente"] = saldo_pendiente_real
+    except Exception as e:
+        # No romper el endpoint si algo falla al enriquecer
+        print(f"[F-049 WARN] No se pudo enriquecer resumen con desglose: {e}")
+
     return resumen
 
 

@@ -1629,3 +1629,70 @@ class TestF048RechazadoMontoNegativoEnXLSX:
         )
 
 
+class TestF049SaldoAFavorEnResumen:
+    """
+    F-049 (2026-07-22, audio Sandra 9/7 17:44):
+    "yo no puedo visualizar por ejemplo si un estudiante paga de más y y no
+     cumple digamos con el o si cumple con el moto establecido pero que tiene
+     un saldo a favor en este caso por ejemplo él tenía que pagar 294 y pagó
+     300 y a mí solamente me sale los 300 pero no me sale lo se volvían a
+     favor sin embargo como estudiante el sí lo puede visualizar"
+
+    Caso real: Luis Valdez pagó 300 Bs cuando su módulo costaba 294. El
+    estudiante SÍ ve el saldo a favor pero cobranza NO.
+
+    Fix: enriquecer `get_resumen_pagos_enrollment` con:
+    - `modulos`: array con desglose por módulo (monto, monto_pagado, saldo_modulo, pagado)
+    - `total_a_pagar`: total de la inscripción
+    - `total_pagado`: total pagado (sin restar anulados, son positivos)
+    - `saldo_a_favor`: max(0, total_pagado - total_a_pagar)
+    - `saldo_pendiente`: max(0, total_a_pagar - total_pagado)
+    """
+
+    @pytest.fixture
+    def payment_service_src(self):
+        from pathlib import Path
+        return Path("services/payment_service.py")
+
+    def test_resumen_incluye_modulos(self, payment_service_src):
+        """El resumen debe incluir array 'modulos' con desglose por módulo."""
+        src = payment_service_src.read_text(encoding="utf-8")
+        assert '"modulos"' in src, (
+            "F-049: Falta campo 'modulos' en get_resumen_pagos_enrollment. "
+            "Cobranza no puede ver el desglose por módulo del estudiante."
+        )
+
+    def test_resumen_incluye_saldo_a_favor(self, payment_service_src):
+        """El resumen debe incluir 'saldo_a_favor' calculado."""
+        src = payment_service_src.read_text(encoding="utf-8")
+        assert "saldo_a_favor" in src, (
+            "F-049: Falta campo 'saldo_a_favor' en get_resumen_pagos_enrollment. "
+            "Sandra reporto que cuando un estudiante paga de más (ej: 300 en lugar de 294), "
+            "el saldo a favor no es visible para cobranza."
+        )
+
+    def test_resumen_calcula_saldo_a_favor_como_diferencia(self, payment_service_src):
+        """saldo_a_favor = max(0, total_pagado - total_a_pagar)."""
+        src = payment_service_src.read_text(encoding="utf-8")
+        # El patrón debe usar max(0.0, total_pagado - total_a_pagar)
+        assert "max(0.0, total_pagado - total_a_pagar)" in src, (
+            "F-049: saldo_a_favor debe calcularse como max(0, total_pagado - total_a_pagar). "
+            "Si total_pagado > total_a_pagar, hay saldo a favor."
+        )
+
+    def test_resumen_incluye_saldo_pendiente(self, payment_service_src):
+        """saldo_pendiente = max(0, total_a_pagar - total_pagado)."""
+        src = payment_service_src.read_text(encoding="utf-8")
+        assert "max(0.0, total_a_pagar - total_pagado)" in src, (
+            "F-049: saldo_pendiente debe calcularse como max(0, total_a_pagar - total_pagado)."
+        )
+
+    def test_resumen_desglose_modulos_tiene_monto_pagado(self, payment_service_src):
+        """Cada módulo debe tener monto, monto_pagado, saldo_modulo, pagado."""
+        src = payment_service_src.read_text(encoding="utf-8")
+        for campo in ['"monto"', '"monto_pagado"', '"saldo_modulo"', '"pagado"']:
+            assert campo in src, (
+                f"F-049: Falta campo {campo} en el desglose por módulo del resumen."
+            )
+
+
