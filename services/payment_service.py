@@ -1929,8 +1929,15 @@ async def get_reporte_caja(
     if concepto_regex:
         criteria.update(concepto_regex)
 
+    # F-075-FIX-7 (2026-07-23): el reporte de caja estaba roto desde un refactor
+    # anterior (referenciaba variables inexistentes `payments_raw` y
+    # `total_count`). Aqui lo reescribo completo con paginación correcta.
     # Totales agregados sobre TODO el rango filtrado (no solo la página actual)
+    total_count = await Payment.find(criteria).count()
+    skip = (page - 1) * per_page
+    pagos_pagina_raw = await Payment.find(criteria).sort("-fecha_comprobante").skip(skip).limit(per_page).to_list()
     todos_los_pagos_del_rango = await Payment.find(criteria).to_list()
+
     total_aprobado = sum(p.cantidad_pago for p in todos_los_pagos_del_rango if p.estado_pago == EstadoPago.APROBADO)
     total_pendiente = sum(p.cantidad_pago for p in todos_los_pagos_del_rango if p.estado_pago == EstadoPago.PENDIENTE)
     # F-068 (2026-07-22, Kevin): "Total Anulado" debe incluir TANTO anulados
@@ -1952,7 +1959,7 @@ async def get_reporte_caja(
     # En la lista de payments, los anulados se serializan con cantidad_pago
     # en negativo. El frontend los muestra como "-X" automáticamente.
     payments = []
-    for p in todos_los_pagos_del_rango:
+    for p in pagos_pagina_raw:
         # to_dict para no mutar el documento persistido
         p_dict = p.model_dump(by_alias=True)
         if p.estado_pago == EstadoPago.ANULADO and p.cantidad_pago > 0:
