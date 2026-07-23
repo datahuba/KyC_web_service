@@ -5,11 +5,17 @@ Servicio de Solicitudes de Estado Pasivo (Passive Requests)
 Flujo: solicitud (Encargado de Curso / CPD-Admin / Estudiante propio) ->
 notificación al CPD -> aprobación (Enrollment pasa a SUSPENDIDO) o rechazo.
 Reutiliza el mismo patrón que account_request_service.py.
+
+F-061 (2026-07-23, regla de Kevin): ventana de gracia configurable
+(VENTANA_GRACIA_PASIVO_DIAS, default 30 días). Si el estudiante pide pasivo
+dentro de esa ventana, no se cobra multa de reincorporación. Pasada la ventana,
+se aplica `MULTA_REINCORPORACION_BS` automáticamente al aprobar.
 """
 
 from typing import List, Optional, Union
-from datetime import datetime
+from datetime import datetime, timedelta
 from core.timezone_utils import utcnow_naive
+from core.config import settings
 from beanie import PydanticObjectId
 
 from models.passive_request import PassiveRequest
@@ -64,6 +70,21 @@ async def create_passive_request(
     if existente:
         raise ValueError("Ya existe una solicitud de pasivo pendiente para esta inscripción")
 
+    # F-061: calcular días desde inscripción para determinar si aplica multa.
+    # Se snapshot-ea en la solicitud para que cambios futuros de settings no
+    # alteren la auditoría.
+    ahora = utcnow_naive()
+    fecha_inscripcion = enrollment.fecha_inscripcion
+    if fecha_inscripcion:
+        dias_desde_inscripcion = max(0, (ahora - fecha_inscripcion).days)
+    else:
+        # F-061-FIX: si el enrollment no tiene fecha_inscripcion (caso legacy),
+        # no aplicar multa por defecto (asumimos que está dentro de la ventana).
+        dias_desde_inscripcion = 0
+
+    en_ventana_gracia = dias_desde_inscripcion <= settings.VENTANA_GRACIA_PASIVO_DIAS
+    multa_aplicada = 0.0 if en_ventana_gracia else float(settings.MULTA_REINCORPORACION_BS)
+
     solicitante_tipo = "student" if isinstance(current_user, Student) else "user"
 
     solicitud = PassiveRequest(
@@ -72,7 +93,9 @@ async def create_passive_request(
         solicitante_tipo=solicitante_tipo,
         motivo=data.motivo.strip(),
         respaldo_url=data.respaldo_url,
-        estado="pendiente"
+        estado="pendiente",
+        dias_desde_inscripcion_al_solicitar=dias_desde_inscripcion,
+        multa_aplicada_bs=multa_aplicada,
     )
     try:
         await solicitud.insert()
@@ -146,6 +169,12 @@ async def approve_passive_request(request_id: PydanticObjectId, admin_username: 
         raise ValueError("La inscripción asociada ya no existe")
 
     enrollment.estado = EstadoInscripcion.SUSPENDIDO
+    # F-061: si la solicitud tiene multa de reincorporación (fuera de la
+    # ventana de gracia), marcarla como pendiente para que Cobranza la cobre
+    # al reactivar. Dentro de la ventana de gracia, multa_aplicada_bs = 0 y
+    # no se marca nada.
+    if (solicitud.multa_aplicada_bs or 0) > 0:
+        enrollment.multa_reincorporacion_pendiente = True
     enrollment.updated_at = utcnow_naive()
     await enrollment.save()
 
@@ -156,11 +185,26 @@ async def approve_passive_request(request_id: PydanticObjectId, admin_username: 
 
     try:
         from services.notification_service import create_notification
+        multa = solicitud.multa_aplicada_bs or 0
+        if multa > 0:
+            mensaje = (
+                f"Tu inscripción fue puesta en estado pasivo. "
+                f"Como pasaron {solicitud.dias_desde_inscripcion_al_solicitar} días desde tu inscripción, "
+                f"se aplicará una multa de reincorporación de Bs. {multa:.0f} cuando te reincorpores. "
+                f"Contacta al CPD si tienes dudas."
+            )
+        else:
+            mensaje = (
+                f"Tu inscripción fue puesta en estado pasivo. "
+                f"Estás dentro de la ventana de gracia ({settings.VENTANA_GRACIA_PASIVO_DIAS} días), "
+                f"así que no se te cobrará multa de reincorporación. "
+                f"Contacta al CPD si tienes dudas sobre cómo reincorporarte."
+            )
         await create_notification(
             destinatario_id=enrollment.estudiante_id,
             tipo_destinatario="student",
             titulo="Tu curso quedó en pausa",
-            mensaje="Tu inscripción fue puesta en estado pasivo. Contacta al CPD si tienes dudas sobre cómo reincorporarte.",
+            mensaje=mensaje,
             tipo_alerta="warning",
             ruta="/app/enrollments",
             referencia_tipo="enrollment",
@@ -224,11 +268,22 @@ async def reactivate_enrollment(enrollment_id: PydanticObjectId, admin_username:
 
     try:
         from services.notification_service import create_notification
+        mensaje = "Tu inscripción volvió a estar activa. ¡Bienvenido/a de nuevo!"
+        # F-061: si había multa de reincorporación pendiente (pasivo fuera de
+        # ventana de gracia), Cobranza la registra manualmente al reactivar
+        # (igual que cualquier otro cobro, no se genera un Payment automático
+        # para no inventar dinero en caja). Aquí solo lo notificamos.
+        if getattr(enrollment, "multa_reincorporacion_pendiente", False):
+            mensaje += (
+                f" Recuerda que corresponde cobrar la multa de reincorporación "
+                f"de Bs. {settings.MULTA_REINCORPORACION_BS:.0f} (pasivo fuera de la "
+                f"ventana de gracia de {settings.VENTANA_GRACIA_PASIVO_DIAS} días)."
+            )
         await create_notification(
             destinatario_id=enrollment.estudiante_id,
             tipo_destinatario="student",
             titulo="Tu curso fue reactivado",
-            mensaje="Tu inscripción volvió a estar activa. ¡Bienvenido/a de nuevo!",
+            mensaje=mensaje,
             tipo_alerta="success",
             ruta="/app/enrollments",
             referencia_tipo="enrollment",

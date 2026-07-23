@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     # 2 meses = abandono automático". Antes era 20/30 días, ahora 30/60.
     DIAS_INACTIVIDAD_MORA: int = Field(default=30, env="DIAS_INACTIVIDAD_MORA")  # 1 mes
     DIAS_INACTIVIDAD_ABANDONO: int = Field(default=60, env="DIAS_INACTIVIDAD_ABANDONO")  # 2 meses
+    # F-061 (2026-07-23, regla de Kevin): ventana de gracia para volverse
+    # pasivo voluntario SIN multa. Mientras `dias_desde_inscripcion <= ventana`,
+    # el pasivo se aprueba sin multa de reincorporación. Pasada la ventana, se
+    # cobra `MULTA_REINCORPORACION_BS` al reactivar. Default 30 días (1 mes)
+    # según la convención usada para mora.
+    VENTANA_GRACIA_PASIVO_DIAS: int = Field(default=30, env="VENTANA_GRACIA_PASIVO_DIAS")  # 1 mes
     # Apaga el job automático en background (útil en desarrollo local para no
     # afectar la base compartida con producción por accidente en cada reload).
     # Por defecto ACTIVO; poner en False explícitamente en .env local si se
