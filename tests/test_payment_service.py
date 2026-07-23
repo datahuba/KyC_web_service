@@ -1812,13 +1812,21 @@ class TestF048MotivoRechazoUnificado:
             "F-048: El mensaje de error debe mencionar que el motivo es obligatorio."
         )
 
-    def test_xlsx_muestra_motivo_reversion(self, payments_src_fixture := __import__('pathlib').Path("api/payments.py")):
+    def test_xlsx_muestra_motivo_reversion(self):
         """El XLSX del reporte de pagos debe leer `motivo_reversion`."""
+        from pathlib import Path
+        payments_src_fixture = Path("api/payments.py")
         src = payments_src_fixture.read_text(encoding="utf-8")
+        # El endpoint /reportes/excel está cerca de la línea 950, pero la fila
+        # donde se lee `payment.motivo_reversion` está ~6000 chars más adelante.
+        # Usamos un rango de 10000 chars para cubrir todo el handler.
         idx = src.find('"/reportes/excel"')
-        bloque = src[idx:idx + 5000]
+        bloque = src[idx:idx + 10000]
         assert "payment.motivo_reversion" in bloque, (
             "F-048: El XLSX debe leer `payment.motivo_reversion` (no `motivo_rechazo`)."
+        )
+        assert "payment.motivo_rechazo" not in bloque, (
+            "F-048: El XLSX NO debe leer `payment.motivo_rechazo` (fue deprecado por motivo_reversion)."
         )
 
 
