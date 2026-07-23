@@ -195,6 +195,308 @@ async def list_enrollments(
     }
 
 
+# F-070 (2026-07-22, reunión Lic. Miguel/Kevin): Endpoint para que CPD/Superadmin
+# gestione las notas pendientes de validación de manera centralizada, en lugar
+# de ir enrollment por enrollment. Surge del bug urgente: Miguel (socio de Kevin)
+# tenía 51 notas cargadas en estado "pendiente_validacion" y no había forma
+# rápida de aprobarlas todas. Aquí se listan y se aprueban en bulk.
+# ========================================================================
+
+async def _enriquecer_nota_pendiente(enrollment: Enrollment, modulo_index: int) -> Optional[NotaPendienteItem]:
+    """Helper: toma un enrollment y un índice de módulo y construye el item de respuesta."""
+    if not enrollment or not enrollment.modulos or modulo_index >= len(enrollment.modulos):
+        return None
+    modulo = enrollment.modulos[modulo_index]
+    if modulo.estado_validacion_nota != "pendiente_validacion":
+        return None
+
+    # estudiante
+    student = await Student.get(enrollment.estudiante_id)
+    if not student:
+        return None
+
+    # curso
+    course = await Course.get(enrollment.curso_id)
+    curso_codigo = course.codigo if course and hasattr(course, "codigo") else "?"
+    curso_nombre = course.nombre if course and hasattr(course, "nombre") else None
+
+    # docente del módulo
+    docente_username = None
+    docente_nombre = None
+    if course and hasattr(course, "modulos") and modulo_index < len(course.modulos):
+        mod_docente = course.modulos[modulo_index]
+        if hasattr(mod_docente, "docente_id") and mod_docente.docente_id:
+            docente = await User.get(mod_docente.docente_id)
+            if docente:
+                docente_username = docente.username
+                docente_nombre = docente.nombre_funcional or docente.nombre_visible or docente.username
+
+    return NotaPendienteItem(
+        enrollment_id=str(enrollment.id),
+        estudiante_id=str(student.id),
+        estudiante_nombre=student.nombre,
+        estudiante_registro=student.registro,
+        estudiante_ci=student.carnet_identidad,
+        curso_id=str(enrollment.curso_id),
+        curso_codigo=curso_codigo or "?",
+        curso_nombre=curso_nombre,
+        modulo_index=modulo_index,
+        modulo_nombre=modulo.nombre,
+        nota_borrador=modulo.nota_borrador,
+        docente_username=docente_username,
+        docente_nombre=docente_nombre,
+        fecha_subida=enrollment.updated_at,
+        estado="pendiente_validacion",
+    )
+
+
+@router.get(
+    "/notas-pendientes",
+    response_model=NotasPendientesResponse,
+    summary="Listar notas pendientes de validación (CPD/Superadmin)",
+)
+async def listar_notas_pendientes(
+    *,
+    # F-070-FIX (2026-07-22): aceptar string vacío como None para no romper
+    # cuando el frontend envíe ?curso_id= o ?estudiante_query= vacíos.
+    # Usamos `str` y validamos manualmente. FastAPI/Pydantic intenta
+    # convertir "" a PydanticObjectId antes del handler y eso retornaba 422.
+    curso_id: Optional[str] = Query(None, description="Filtrar por curso (string vacío se ignora)"),
+    modulo_index: Optional[int] = Query(None, ge=0, description="Filtrar por índice de módulo"),
+    estudiante_query: Optional[str] = Query(None, description="Buscar por nombre, registro o CI"),
+    current_user: User = Depends(require_cpd)
+) -> Any:
+    """
+    F-070: Lista todos los enrollments con al menos un módulo en estado
+    `pendiente_validacion`. Pensado para que CPD/Superadmin haga una pasada
+    rápida de aprobación/rechazo.
+
+    Permisos: CPD, ADMIN, SUPERADMIN (mismo criterio que validar/rechazar
+    notas individuales).
+    """
+    # F-070-FIX: normalizar string vacío a None antes de validar el ObjectId
+    from bson import ObjectId as _ObjectId
+    if curso_id is not None and str(curso_id).strip() == "":
+        curso_id = None
+    if curso_id is not None:
+        try:
+            curso_id = _ObjectId(curso_id)
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail=f"curso_id inválido: '{curso_id}' no es un ObjectId válido.",
+            )
+    if estudiante_query is not None and estudiante_query.strip() == "":
+        estudiante_query = None
+    # Filtro base: cualquier modulo con nota_borrador pendiente
+    # (necesitamos un $elemMatch para que MongoDB evalúe cada elemento del array)
+    match_dict: dict = {
+        "modulos": {
+            "$elemMatch": {"estado_validacion_nota": "pendiente_validacion"}
+        }
+    }
+    if curso_id:
+        match_dict["curso_id"] = curso_id
+    if modulo_index is not None:
+        match_dict["modulos.$elemMatch.estado_validacion_nota"] = "pendiente_validacion"
+        match_dict["modulos"] = {
+            "$elemMatch": {
+                "estado_validacion_nota": "pendiente_validacion",
+            }
+        }
+        # Filtrar también por el índice específico requiere unwind; lo hacemos
+        # en Python después para mantener la query simple
+
+    # Filtro de encargado_curso
+    if current_user.rol == UserRole.ENCARGADO_CURSO and current_user.cursos_asignados:
+        match_dict["curso_id"] = {"$in": current_user.cursos_asignados}
+
+    # Buscar enrollments candidatos
+    raw = await Enrollment.find(match_dict).to_list()
+
+    # Si hay filtro por módulo_index, filtrar en Python
+    items: List[NotaPendienteItem] = []
+    for e in raw:
+        for idx, m in enumerate(e.modulos or []):
+            if m.estado_validacion_nota != "pendiente_validacion":
+                continue
+            if modulo_index is not None and idx != modulo_index:
+                continue
+            item = await _enriquecer_nota_pendiente(e, idx)
+            if not item:
+                continue
+            # filtro de búsqueda por texto
+            if estudiante_query:
+                q = estudiante_query.lower()
+                hay = (
+                    q in (item.estudiante_nombre or "").lower()
+                    or q in (item.estudiante_registro or "")
+                    or q in (item.estudiante_ci or "")
+                )
+                if not hay:
+                    continue
+            items.append(item)
+
+    # Ordenar por curso + estudiante para hacerlo predecible
+    items.sort(key=lambda x: (x.curso_codigo, x.estudiante_nombre or ""))
+
+    return NotasPendientesResponse(
+        total=len(items),
+        items=items,
+        filtros_aplicados={
+            "curso_id": str(curso_id) if curso_id else None,
+            "modulo_index": modulo_index,
+            "estudiante_query": estudiante_query,
+        },
+    )
+
+
+@router.post(
+    "/notas/bulk-validar",
+    response_model=BulkValidarResponse,
+    summary="Aprobar en bulk notas pendientes (CPD/Superadmin)",
+)
+async def bulk_validar_notas(
+    *,
+    payload: BulkValidarRequest,
+    current_user: User = Depends(require_cpd)
+) -> Any:
+    """
+    F-070: aprueba (valida) varias notas pendientes en una sola llamada.
+    Cada item es (enrollment_id, modulo_index). Devuelve un resumen con
+    éxitos/fallos por item para que el frontend pueda mostrar cuáles pasaron
+    y cuáles no.
+    """
+    resultados: List[BulkValidarResultado] = []
+    exitosos = 0
+    fallidos = 0
+
+    for item in payload.items:
+        try:
+            eid = PydanticObjectId(item.enrollment_id)
+            # Validar primero que existe y está pendiente
+            e = await Enrollment.get(eid)
+            if not e:
+                raise ValueError("Inscripción no encontrada")
+            if item.modulo_index < 0 or item.modulo_index >= len(e.modulos):
+                raise ValueError(f"Índice de módulo {item.modulo_index} fuera de rango")
+            mod = e.modulos[item.modulo_index]
+            if mod.estado_validacion_nota != "pendiente_validacion":
+                raise ValueError(f"El módulo no está en estado 'pendiente_validacion' (actual: {mod.estado_validacion_nota})")
+
+            # Validar (reutiliza la lógica existente)
+            updated = await enrollment_service.validar_nota_borrador(
+                enrollment_id=eid,
+                modulo_index=item.modulo_index,
+                evaluador_username=current_user.nombre_funcional or current_user.username,
+            )
+            resultados.append(BulkValidarResultado(
+                enrollment_id=item.enrollment_id,
+                modulo_index=item.modulo_index,
+                ok=True,
+                nota_final=updated.nota_final,
+            ))
+            exitosos += 1
+        except Exception as ex:
+            resultados.append(BulkValidarResultado(
+                enrollment_id=item.enrollment_id,
+                modulo_index=item.modulo_index,
+                ok=False,
+                error=str(ex),
+            ))
+            fallidos += 1
+
+    return BulkValidarResponse(
+        total=len(payload.items),
+        exitosos=exitosos,
+        fallidos=fallidos,
+        resultados=resultados,
+    )
+
+
+@router.put(
+    "/{id}/modulos/{index}/nota",
+    response_model=EnrollmentResponse,
+    summary="Editar nota validada (CPD/Superadmin)",
+)
+async def editar_nota_validada(
+    *,
+    id: PydanticObjectId,
+    index: int = Path(..., ge=0),
+    payload: EditarNotaRequest,
+    current_user: User = Depends(require_cpd)
+) -> Any:
+    """
+    F-070: edita una nota que ya fue validada (estado_validacion_nota='validada'
+    o sin_borrador). Solo CPD/Superadmin. Registra quién y cuándo la modificó
+    para auditoría.
+
+    Aplica la misma lógica que `actualizar_nota_modulo` (recalcula promedio,
+    beca, estado académico Aprobado/Reprobado) y notifica al estudiante.
+    """
+    try:
+        enrollment = await Enrollment.get(id)
+        if not enrollment:
+            raise HTTPException(status_code=404, detail="Inscripción no encontrada")
+        if not enrollment.modulos or len(enrollment.modulos) == 0:
+            raise HTTPException(status_code=400, detail="Inscripción sin módulos")
+        if index >= len(enrollment.modulos):
+            raise HTTPException(status_code=400, detail=f"Índice {index} fuera de rango (hay {len(enrollment.modulos)} módulos)")
+
+        modulo = enrollment.modulos[index]
+        nota_anterior = modulo.nota
+        # Solo permitir editar si la nota ya está validada o el módulo no tiene borrador pendiente
+        if modulo.estado_validacion_nota == "pendiente_validacion":
+            raise HTTPException(
+                status_code=400,
+                detail="No se puede editar una nota pendiente de validación. Use el flujo validar/rechazar primero."
+            )
+
+        modulo.nota = round(payload.nota, 2)
+        modulo.estado_academico = "Aprobado" if payload.nota >= 51 else "Reprobado"
+        enrollment.updated_at = utcnow_naive()
+
+        # Recalcular promedio
+        notas_evaluadas = [m.nota for m in enrollment.modulos if m.nota is not None]
+        if notas_evaluadas:
+            promedio = sum(notas_evaluadas) / len(notas_evaluadas)
+            enrollment.nota_final = round(promedio, 2)
+        else:
+            enrollment.nota_final = None
+
+        await enrollment.save()
+
+        # Notificar al estudiante
+        try:
+            from services.notification_service import create_notification
+            nombre_modulo = modulo.nombre if hasattr(modulo, "nombre") else f"Módulo {index + 1}"
+            await create_notification(
+                destinatario_id=enrollment.estudiante_id,
+                tipo_destinatario="student",
+                titulo="Nota ajustada por CPD",
+                mensaje=(
+                    f"Tu nota de '{nombre_modulo}' fue ajustada de {nota_anterior} a {modulo.nota} "
+                    f"por {current_user.nombre_funcional or current_user.username}. "
+                    + (f"Motivo: {payload.motivo}. " if payload.motivo else "")
+                    + f"Tu promedio final es ahora {enrollment.nota_final}."
+                ),
+                tipo_alerta="info",
+                ruta="/app/enrollments",
+                referencia_tipo="enrollment",
+                referencia_id=enrollment.id,
+            )
+        except Exception as e:
+            print(f"Error notificando edición de nota: {str(e)}")
+
+        return await enrollment_service.enrich_enrollment_dates(enrollment)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ========================================================================
+
 @router.get(
     "/{id}",
     response_model=EnrollmentResponse,
@@ -658,307 +960,6 @@ async def rechazar_modulo_nota(
             print(f"Error notificando rechazo de borrador al docente: {str(e)}")
 
         return await enrollment_service.enrich_enrollment_dates(updated)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-# ========================================================================
-# F-070 (2026-07-22, reunión Lic. Miguel/Kevin): Endpoint para que CPD/Superadmin
-# gestione las notas pendientes de validación de manera centralizada, en lugar
-# de ir enrollment por enrollment. Surge del bug urgente: Miguel (socio de Kevin)
-# tenía 51 notas cargadas en estado "pendiente_validacion" y no había forma
-# rápida de aprobarlas todas. Aquí se listan y se aprueban en bulk.
-# ========================================================================
-
-async def _enriquecer_nota_pendiente(enrollment: Enrollment, modulo_index: int) -> Optional[NotaPendienteItem]:
-    """Helper: toma un enrollment y un índice de módulo y construye el item de respuesta."""
-    if not enrollment or not enrollment.modulos or modulo_index >= len(enrollment.modulos):
-        return None
-    modulo = enrollment.modulos[modulo_index]
-    if modulo.estado_validacion_nota != "pendiente_validacion":
-        return None
-
-    # estudiante
-    student = await Student.get(enrollment.estudiante_id)
-    if not student:
-        return None
-
-    # curso
-    course = await Course.get(enrollment.curso_id)
-    curso_codigo = course.codigo if course and hasattr(course, "codigo") else "?"
-    curso_nombre = course.nombre if course and hasattr(course, "nombre") else None
-
-    # docente del módulo
-    docente_username = None
-    docente_nombre = None
-    if course and hasattr(course, "modulos") and modulo_index < len(course.modulos):
-        mod_docente = course.modulos[modulo_index]
-        if hasattr(mod_docente, "docente_id") and mod_docente.docente_id:
-            docente = await User.get(mod_docente.docente_id)
-            if docente:
-                docente_username = docente.username
-                docente_nombre = docente.nombre_funcional or docente.nombre_visible or docente.username
-
-    return NotaPendienteItem(
-        enrollment_id=str(enrollment.id),
-        estudiante_id=str(student.id),
-        estudiante_nombre=student.nombre,
-        estudiante_registro=student.registro,
-        estudiante_ci=student.carnet_identidad,
-        curso_id=str(enrollment.curso_id),
-        curso_codigo=curso_codigo or "?",
-        curso_nombre=curso_nombre,
-        modulo_index=modulo_index,
-        modulo_nombre=modulo.nombre,
-        nota_borrador=modulo.nota_borrador,
-        docente_username=docente_username,
-        docente_nombre=docente_nombre,
-        fecha_subida=enrollment.updated_at,
-        estado="pendiente_validacion",
-    )
-
-
-@router.get(
-    "/notas-pendientes",
-    response_model=NotasPendientesResponse,
-    summary="Listar notas pendientes de validación (CPD/Superadmin)",
-)
-async def listar_notas_pendientes(
-    *,
-    # F-070-FIX (2026-07-22): aceptar string vacío como None para no romper
-    # cuando el frontend envíe ?curso_id= o ?estudiante_query= vacíos.
-    # Usamos `str` y validamos manualmente. FastAPI/Pydantic intenta
-    # convertir "" a PydanticObjectId antes del handler y eso retornaba 422.
-    curso_id: Optional[str] = Query(None, description="Filtrar por curso (string vacío se ignora)"),
-    modulo_index: Optional[int] = Query(None, ge=0, description="Filtrar por índice de módulo"),
-    estudiante_query: Optional[str] = Query(None, description="Buscar por nombre, registro o CI"),
-    current_user: User = Depends(require_cpd)
-) -> Any:
-    """
-    F-070: Lista todos los enrollments con al menos un módulo en estado
-    `pendiente_validacion`. Pensado para que CPD/Superadmin haga una pasada
-    rápida de aprobación/rechazo.
-
-    Permisos: CPD, ADMIN, SUPERADMIN (mismo criterio que validar/rechazar
-    notas individuales).
-    """
-    # F-070-FIX: normalizar string vacío a None antes de validar el ObjectId
-    from bson import ObjectId as _ObjectId
-    if curso_id is not None and str(curso_id).strip() == "":
-        curso_id = None
-    if curso_id is not None:
-        try:
-            curso_id = _ObjectId(curso_id)
-        except Exception:
-            raise HTTPException(
-                status_code=400,
-                detail=f"curso_id inválido: '{curso_id}' no es un ObjectId válido.",
-            )
-    if estudiante_query is not None and estudiante_query.strip() == "":
-        estudiante_query = None
-    # Filtro base: cualquier modulo con nota_borrador pendiente
-    # (necesitamos un $elemMatch para que MongoDB evalúe cada elemento del array)
-    match_dict: dict = {
-        "modulos": {
-            "$elemMatch": {"estado_validacion_nota": "pendiente_validacion"}
-        }
-    }
-    if curso_id:
-        match_dict["curso_id"] = curso_id
-    if modulo_index is not None:
-        match_dict["modulos.$elemMatch.estado_validacion_nota"] = "pendiente_validacion"
-        match_dict["modulos"] = {
-            "$elemMatch": {
-                "estado_validacion_nota": "pendiente_validacion",
-            }
-        }
-        # Filtrar también por el índice específico requiere unwind; lo hacemos
-        # en Python después para mantener la query simple
-
-    # Filtro de encargado_curso
-    if current_user.rol == UserRole.ENCARGADO_CURSO and current_user.cursos_asignados:
-        match_dict["curso_id"] = {"$in": current_user.cursos_asignados}
-
-    # Buscar enrollments candidatos
-    raw = await Enrollment.find(match_dict).to_list()
-
-    # Si hay filtro por módulo_index, filtrar en Python
-    items: List[NotaPendienteItem] = []
-    for e in raw:
-        for idx, m in enumerate(e.modulos or []):
-            if m.estado_validacion_nota != "pendiente_validacion":
-                continue
-            if modulo_index is not None and idx != modulo_index:
-                continue
-            item = await _enriquecer_nota_pendiente(e, idx)
-            if not item:
-                continue
-            # filtro de búsqueda por texto
-            if estudiante_query:
-                q = estudiante_query.lower()
-                hay = (
-                    q in (item.estudiante_nombre or "").lower()
-                    or q in (item.estudiante_registro or "")
-                    or q in (item.estudiante_ci or "")
-                )
-                if not hay:
-                    continue
-            items.append(item)
-
-    # Ordenar por curso + estudiante para hacerlo predecible
-    items.sort(key=lambda x: (x.curso_codigo, x.estudiante_nombre or ""))
-
-    return NotasPendientesResponse(
-        total=len(items),
-        items=items,
-        filtros_aplicados={
-            "curso_id": str(curso_id) if curso_id else None,
-            "modulo_index": modulo_index,
-            "estudiante_query": estudiante_query,
-        },
-    )
-
-
-@router.post(
-    "/notas/bulk-validar",
-    response_model=BulkValidarResponse,
-    summary="Aprobar en bulk notas pendientes (CPD/Superadmin)",
-)
-async def bulk_validar_notas(
-    *,
-    payload: BulkValidarRequest,
-    current_user: User = Depends(require_cpd)
-) -> Any:
-    """
-    F-070: aprueba (valida) varias notas pendientes en una sola llamada.
-    Cada item es (enrollment_id, modulo_index). Devuelve un resumen con
-    éxitos/fallos por item para que el frontend pueda mostrar cuáles pasaron
-    y cuáles no.
-    """
-    resultados: List[BulkValidarResultado] = []
-    exitosos = 0
-    fallidos = 0
-
-    for item in payload.items:
-        try:
-            eid = PydanticObjectId(item.enrollment_id)
-            # Validar primero que existe y está pendiente
-            e = await Enrollment.get(eid)
-            if not e:
-                raise ValueError("Inscripción no encontrada")
-            if item.modulo_index < 0 or item.modulo_index >= len(e.modulos):
-                raise ValueError(f"Índice de módulo {item.modulo_index} fuera de rango")
-            mod = e.modulos[item.modulo_index]
-            if mod.estado_validacion_nota != "pendiente_validacion":
-                raise ValueError(f"El módulo no está en estado 'pendiente_validacion' (actual: {mod.estado_validacion_nota})")
-
-            # Validar (reutiliza la lógica existente)
-            updated = await enrollment_service.validar_nota_borrador(
-                enrollment_id=eid,
-                modulo_index=item.modulo_index,
-                evaluador_username=current_user.nombre_funcional or current_user.username,
-            )
-            resultados.append(BulkValidarResultado(
-                enrollment_id=item.enrollment_id,
-                modulo_index=item.modulo_index,
-                ok=True,
-                nota_final=updated.nota_final,
-            ))
-            exitosos += 1
-        except Exception as ex:
-            resultados.append(BulkValidarResultado(
-                enrollment_id=item.enrollment_id,
-                modulo_index=item.modulo_index,
-                ok=False,
-                error=str(ex),
-            ))
-            fallidos += 1
-
-    return BulkValidarResponse(
-        total=len(payload.items),
-        exitosos=exitosos,
-        fallidos=fallidos,
-        resultados=resultados,
-    )
-
-
-@router.put(
-    "/{id}/modulos/{index}/nota",
-    response_model=EnrollmentResponse,
-    summary="Editar nota validada (CPD/Superadmin)",
-)
-async def editar_nota_validada(
-    *,
-    id: PydanticObjectId,
-    index: int = Path(..., ge=0),
-    payload: EditarNotaRequest,
-    current_user: User = Depends(require_cpd)
-) -> Any:
-    """
-    F-070: edita una nota que ya fue validada (estado_validacion_nota='validada'
-    o sin_borrador). Solo CPD/Superadmin. Registra quién y cuándo la modificó
-    para auditoría.
-
-    Aplica la misma lógica que `actualizar_nota_modulo` (recalcula promedio,
-    beca, estado académico Aprobado/Reprobado) y notifica al estudiante.
-    """
-    try:
-        enrollment = await Enrollment.get(id)
-        if not enrollment:
-            raise HTTPException(status_code=404, detail="Inscripción no encontrada")
-        if not enrollment.modulos or len(enrollment.modulos) == 0:
-            raise HTTPException(status_code=400, detail="Inscripción sin módulos")
-        if index >= len(enrollment.modulos):
-            raise HTTPException(status_code=400, detail=f"Índice {index} fuera de rango (hay {len(enrollment.modulos)} módulos)")
-
-        modulo = enrollment.modulos[index]
-        nota_anterior = modulo.nota
-        # Solo permitir editar si la nota ya está validada o el módulo no tiene borrador pendiente
-        if modulo.estado_validacion_nota == "pendiente_validacion":
-            raise HTTPException(
-                status_code=400,
-                detail="No se puede editar una nota pendiente de validación. Use el flujo validar/rechazar primero."
-            )
-
-        modulo.nota = round(payload.nota, 2)
-        modulo.estado_academico = "Aprobado" if payload.nota >= 51 else "Reprobado"
-        enrollment.updated_at = utcnow_naive()
-
-        # Recalcular promedio
-        notas_evaluadas = [m.nota for m in enrollment.modulos if m.nota is not None]
-        if notas_evaluadas:
-            promedio = sum(notas_evaluadas) / len(notas_evaluadas)
-            enrollment.nota_final = round(promedio, 2)
-        else:
-            enrollment.nota_final = None
-
-        await enrollment.save()
-
-        # Notificar al estudiante
-        try:
-            from services.notification_service import create_notification
-            nombre_modulo = modulo.nombre if hasattr(modulo, "nombre") else f"Módulo {index + 1}"
-            await create_notification(
-                destinatario_id=enrollment.estudiante_id,
-                tipo_destinatario="student",
-                titulo="Nota ajustada por CPD",
-                mensaje=(
-                    f"Tu nota de '{nombre_modulo}' fue ajustada de {nota_anterior} a {modulo.nota} "
-                    f"por {current_user.nombre_funcional or current_user.username}. "
-                    + (f"Motivo: {payload.motivo}. " if payload.motivo else "")
-                    + f"Tu promedio final es ahora {enrollment.nota_final}."
-                ),
-                tipo_alerta="info",
-                ruta="/app/enrollments",
-                referencia_tipo="enrollment",
-                referencia_id=enrollment.id,
-            )
-        except Exception as e:
-            print(f"Error notificando edición de nota: {str(e)}")
-
-        return await enrollment_service.enrich_enrollment_dates(enrollment)
-    except HTTPException:
-        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

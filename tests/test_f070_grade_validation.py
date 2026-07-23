@@ -225,6 +225,22 @@ class TestF070BusinessLogic:
 class TestF070PageRoute:
     """F-070: verifica que la página del sidebar existe en el frontend."""
 
+    def test_listar_notas_pendientes_endpoint_antes_de_get_by_id(self):
+        """F-070-FIX-2: el endpoint /notas-pendientes DEBE estar declarado ANTES
+        que @router.get('/{id}') para que FastAPI matchee el path específico
+        en vez de tratarlo como id='notas-pendientes' (que falla con 422 al
+        convertir a PydanticObjectId)."""
+        content = read(API_FILE)
+        idx_notas = content.find('"/notas-pendientes"')
+        idx_get_by_id = content.find('"/{id}",\n    response_model=EnrollmentResponse,\n    summary="Ver Inscripción"')
+        assert idx_notas > 0, "F-070: No se encuentra el endpoint /notas-pendientes"
+        assert idx_get_by_id > 0, "F-070: No se encuentra @router.get('/{id}') con summary 'Ver Inscripción'"
+        assert idx_notas < idx_get_by_id, (
+            f"F-070-FIX-2: /notas-pendientes (línea aprox {idx_notas}) debe estar "
+            f"ANTES que /{{id}} (línea aprox {idx_get_by_id}). Si está después, "
+            f"FastAPI matchea 'notas-pendientes' como id y retorna 422."
+        )
+
     def test_pagina_grade_validation_existe(self):
         page_file = (
             Path(__file__).parent.parent.parent
