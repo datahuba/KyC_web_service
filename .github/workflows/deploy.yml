@@ -55,13 +55,21 @@ jobs:
 
             echo "🚀 === RECONSTRUYENDO DOCKER === 🚀"
             cd /root/postgrado
-            # F-ACTIONS-DEPLOY-FIX (2026-07-23): eliminamos el container viejo
-            # con `docker compose down` + `docker rm -f` directo para evitar el
-            # error "Conflict. The container name '/kyc-backend' is already
-            # in use" que pasa cuando el `up -d --force-recreate` no puede
-            # recrear el container. El frontend workflow ya tenía este fix.
-            docker compose down backend 2>/dev/null || true
+            # F-ACTIONS-DEPLOY-FIX-2 (2026-07-23): el `docker compose down`
+            # no alcanza porque el container tiene `restart: always` en
+            # docker-compose.yml y Docker lo REINICIA automáticamente.
+            # Solución: desactivar restart policy + stop + kill + remove
+            # + verificar que NO existe antes de continuar.
+            docker update --restart=no kyc-backend 2>/dev/null || true
+            docker compose stop backend 2>/dev/null || true
+            docker kill kyc-backend 2>/dev/null || true
             docker rm -f kyc-backend 2>/dev/null || true
+            sleep 1
+            if docker ps -a --format '{{.Names}}' | grep -q '^kyc-backend$'; then
+                echo "❌ ERROR: kyc-backend todavía existe después de kill+rm, abortando"
+                docker ps -a --format 'table {{.Names}} | {{.Status}}' | grep kyc-backend
+                exit 1
+            fi
             docker rmi -f $(docker images -q postgrado-backend) 2>/dev/null || true
             docker compose build --no-cache backend
 
