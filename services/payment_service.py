@@ -141,6 +141,14 @@ async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dic
         else:
             p_dict = payment.model_dump(by_alias=True)
 
+        # F-075-FIX-7 (2026-07-23): convertir PydanticObjectId a string para
+        # que se pueda serializar a JSON. Sin esto, FastAPI lanza 500 porque
+        # no sabe serializar PydanticObjectId.
+        from beanie import PydanticObjectId
+        for key, val in list(p_dict.items()):
+            if isinstance(val, PydanticObjectId):
+                p_dict[key] = str(val)
+
         estudiante_id = _get(payment, "estudiante_id")
         inscripcion_id = _get(payment, "inscripcion_id")
 
