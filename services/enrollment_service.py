@@ -21,6 +21,12 @@ from schemas.enrollment import EnrollmentCreate
 from beanie import PydanticObjectId
 from models.discount import Discount
 from beanie.operators import In, Or
+# F-046 FIX: helpers de tiempo estaban solo importados localmente en
+# enrich_enrollment_dates; al refactorizar core/timezone_utils se rompió
+# el uso en 9 funciones (subir_nota_borrador, actualizar_saldo_enrollment,
+# cambiar_estado_inscripcion, eximir_matricula, rechazar_nota_borrador).
+# El síntoma fue 500 al calificar módulo (Sandra, audio 22/7 19:12).
+from core.timezone_utils import utcnow_naive
 
 async def create_enrollment(
     enrollment_in: EnrollmentCreate,
