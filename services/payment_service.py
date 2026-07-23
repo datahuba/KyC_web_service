@@ -1222,7 +1222,7 @@ async def get_matriz_pagos(
     courses_list: list = [
         {
             "_id": str(c.id),
-            "nombre": c.nombre,
+            "nombre": c.nombre_programa,
             "codigo": c.codigo,
             "modulos": [m.nombre for m in (c.modulos or [])],
         }
