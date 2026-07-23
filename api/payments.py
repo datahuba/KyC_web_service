@@ -1031,8 +1031,13 @@ async def generar_reporte_excel_pagos(
         # negativo en la columna "Monto", de modo que la SUMA al pie del Excel
         # (o la fórmula SUM del usuario) coincida con el extracto bancario
         # sin necesidad de restar manualmente.
+        # F-048 (2026-07-22, audio Sandra): los RECHAZADOS también deben ser
+        # negativos. Regla de Kevin: Débitos = anulados/rechazados, Créditos = aprobados.
+        # Caso Luis Valdez (CI 5384101): pago 288 Bs RECHAZADO aparecía como +288
+        # en el XLSX, confundiendo a cobranza. "Aparece como rechazado pero no
+        # esta su contraparte" (audio 18:51).
         monto_exportar = payment.cantidad_pago
-        if payment.estado_pago == EstadoPago.ANULADO and monto_exportar > 0:
+        if payment.estado_pago in (EstadoPago.ANULADO, EstadoPago.RECHAZADO) and monto_exportar > 0:
             monto_exportar = -monto_exportar
 
         row = [

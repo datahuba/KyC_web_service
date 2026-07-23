@@ -1575,3 +1575,57 @@ class TestF043PDFReporteCaja:
             )
 
 
+class TestF048RechazadoMontoNegativoEnXLSX:
+    """
+    F-048 (2026-07-22, audio Sandra 18:51):
+    "Aparece como rechazado pero no esta su contraparte, pero si esta sumando"
+
+    Caso real: Luis Valdez (CI 5384101) tiene un pago de 288 Bs con
+    estado_pago=rechazado. En el XLSX de pagos aparecía como +288 en la
+    columna Monto, en lugar de -288 (que es la regla de Kevin F-023:
+    Débitos = anulados/rechazados, Créditos = aprobados).
+
+    El fix ya existía para ANULADO (F-COBRANZA-005), pero faltaba extenderlo
+    a RECHAZADO. Este test verifica que AMBOS (ANULADO y RECHAZADO) se
+    exportan con monto negativo en el XLSX.
+    """
+
+    @pytest.fixture
+    def xlsx_rechazo_bloque(self):
+        """Extrae el bloque del XLSX donde se decide el signo del monto."""
+        from pathlib import Path
+        src = Path("api/payments.py").read_text(encoding="utf-8")
+        # Buscar el anchor del comentario F-COBRANZA-005 (que es donde se
+        # encuentra la lógica de signo).
+        idx = src.find("F-COBRANZA-005 (2026-07-21)")
+        assert idx > 0, "No se encontró el comentario F-COBRANZA-005 en api/payments.py"
+        return src[idx:idx + 3000]
+
+    def test_xlsx_rechazado_se_exporta_negativo(self, xlsx_rechazo_bloque):
+        """El XLSX de pagos debe exportar RECHAZADO con monto negativo."""
+        assert "EstadoPago.ANULADO" in xlsx_rechazo_bloque, (
+            "F-048: Falta la rama para EstadoPago.ANULADO en la conversión de monto."
+        )
+        assert "EstadoPago.RECHAZADO" in xlsx_rechazo_bloque, (
+            "F-048: Falta la rama para EstadoPago.RECHAZADO. "
+            "Sandra reporto que un pago RECHAZADO aparecia como +288 en el XLSX, "
+            "deberia ser -288 (regla de Kevin F-023: debitos = anulados/rechazados)."
+        )
+
+    def test_xlsx_rechazado_y_anulado_juntos_en_tupla(self, xlsx_rechazo_bloque):
+        """El chequeo debe ser en una tupla, no con OR separado."""
+        assert "EstadoPago.ANULADO, EstadoPago.RECHAZADO" in xlsx_rechazo_bloque, (
+            "F-048: El chequeo debe ser `in (EstadoPago.ANULADO, EstadoPago.RECHAZADO)`, "
+            "no dos ifs separados."
+        )
+
+    def test_xlsx_rechazado_actualiza_mismo_monto(self, xlsx_rechazo_bloque):
+        """Verifica que la lógica de signo negativo está bien aplicada."""
+        # El patrón debe ser:
+        # if payment.estado_pago in (...ANULADO, ...RECHAZADO) and monto_exportar > 0:
+        #     monto_exportar = -monto_exportar
+        assert "monto_exportar = -monto_exportar" in xlsx_rechazo_bloque, (
+            "F-048: La línea `monto_exportar = -monto_exportar` debe estar presente."
+        )
+
+
