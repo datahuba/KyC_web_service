@@ -13,7 +13,7 @@ from models.payment import Payment
 from models.enrollment import Enrollment
 from models.student import Student
 from models.course import Course
-from models.enums import EstadoPago
+from models.enums import EstadoPago, EstadoInscripcion
 from schemas.payment import PaymentCreate
 from beanie import PydanticObjectId
 from beanie.operators import In, Or
@@ -1112,11 +1112,25 @@ async def get_resumen_economico(
 
     total_ingresos = ingreso_matricula + ingreso_colegiatura
 
+    # F-COBRANZA-POR-COBRAR: "Por Cobrar" NO incluye inscripciones suspendidas
+    # (congelado, pasivo, abandono), completadas ni canceladas. Sandra Cobranza
+    # reportó (2026-07-23) que el sistema le sumaba Bs 13.230 de 3 pasivos al
+    # "Por Cobrar", desalineándolo de su Excel. El `total_esperado` se mantiene
+    # intacto porque es la suma teórica de lo que TODOS los inscritos deberían
+    # pagar (incluye pasivos porque al reactivarse vuelven a deber).
+    estados_excluidos_por_cobrar = {
+        EstadoInscripcion.SUSPENDIDO,
+        EstadoInscripcion.COMPLETADO,
+        EstadoInscripcion.CANCELADO,
+    }
+
     total_esperado = 0.0
     por_cobrar = 0.0
     cobros_pendientes = 0
     for e in enrollments:
         total_esperado += e.total_a_pagar or 0.0
+        if e.estado in estados_excluidos_por_cobrar:
+            continue
         saldo = e.saldo_pendiente or 0.0
         por_cobrar += saldo
         if saldo > 0.01:
