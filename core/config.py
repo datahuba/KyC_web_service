@@ -53,8 +53,10 @@ class Settings(BaseSettings):
     # ISSUE-P-CONGELADO: montos y plazos configurables sin tocar código
     TASA_CONGELAMIENTO_BS: float = Field(default=150.0, env="TASA_CONGELAMIENTO_BS")
     MULTA_REINCORPORACION_BS: float = Field(default=300.0, env="MULTA_REINCORPORACION_BS")
-    DIAS_INACTIVIDAD_MORA: int = Field(default=20, env="DIAS_INACTIVIDAD_MORA")  # ISSUE-R-NOTIFICACION-MORA
-    DIAS_INACTIVIDAD_ABANDONO: int = Field(default=30, env="DIAS_INACTIVIDAD_ABANDONO")
+    # F-051 (2026-07-22, regla de Kevin): "1 mes sin pagar = en mora;
+    # 2 meses = abandono automático". Antes era 20/30 días, ahora 30/60.
+    DIAS_INACTIVIDAD_MORA: int = Field(default=30, env="DIAS_INACTIVIDAD_MORA")  # 1 mes
+    DIAS_INACTIVIDAD_ABANDONO: int = Field(default=60, env="DIAS_INACTIVIDAD_ABANDONO")  # 2 meses
     # Apaga el job automático en background (útil en desarrollo local para no
     # afectar la base compartida con producción por accidente en cada reload).
     # Por defecto ACTIVO; poner en False explícitamente en .env local si se

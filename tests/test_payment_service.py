@@ -1694,6 +1694,83 @@ class TestF048RechazadoMontoNegativoEnXLSX:
         )
 
 
+class TestF051ReglaMoraAbandonoKevin:
+    """
+    F-051 (2026-07-22, regla de Kevin del audio 8/7 12:36):
+    "1 mes sin pagar = en mora; 2 meses = abandono automático"
+
+    Config defaults (core/config.py):
+    - DIAS_INACTIVIDAD_MORA = 30 (1 mes)
+    - DIAS_INACTIVIDAD_ABANDONO = 60 (2 meses)
+
+    El job periódico (`verificar_inactividad_pagos` en
+    services/congelado_service.py) corre cada 24h y aplica estas reglas.
+    """
+
+    @pytest.fixture
+    def config_src(self):
+        from pathlib import Path
+        return Path("core/config.py").read_text(encoding="utf-8")
+
+    def test_mora_default_es_30_dias(self, config_src):
+        """1 mes = 30 días según la regla de Kevin."""
+        assert "DIAS_INACTIVIDAD_MORA: int = Field(default=30," in config_src, (
+            "F-051: DIAS_INACTIVIDAD_MORA debe ser 30 días (1 mes) por "
+            "regla de Kevin. Antes era 20."
+        )
+
+    def test_abandono_default_es_60_dias(self, config_src):
+        """2 meses = 60 días según la regla de Kevin."""
+        assert "DIAS_INACTIVIDAD_ABANDONO: int = Field(default=60," in config_src, (
+            "F-051: DIAS_INACTIVIDAD_ABANDONO debe ser 60 días (2 meses) por "
+            "regla de Kevin. Antes era 30."
+        )
+
+    def test_mora_menor_que_abandono(self, config_src):
+        """MORA (30) debe ser < ABANDONO (60). Sino no tiene sentido."""
+        import re
+        m = re.search(r"DIAS_INACTIVIDAD_MORA: int = Field\(default=(\d+),", config_src)
+        a = re.search(r"DIAS_INACTIVIDAD_ABANDONO: int = Field\(default=(\d+),", config_src)
+        assert m and a, "No se pudieron parsear los defaults"
+        mora = int(m.group(1))
+        abandono = int(a.group(1))
+        assert mora < abandono, (
+            f"F-051: MORA ({mora}) debe ser < ABANDONO ({abandono}). "
+            "Sino no se puede notificar antes de marcar abandono."
+        )
+
+    def test_job_existe_en_main(self):
+        """El job debe estar referenciado en main.py."""
+        from pathlib import Path
+        main = Path("main.py").read_text(encoding="utf-8")
+        assert "verificar_inactividad_pagos" in main, (
+            "F-051: El job `verificar_inactividad_pagos` debe estar en main.py."
+        )
+        assert "JOB_CONGELADO_ACTIVO" in main, (
+            "F-051: El job debe tener flag JOB_CONGELADO_ACTIVO configurable."
+        )
+
+    def test_servicio_tiene_funciones_necesarias(self):
+        """El servicio congelado_service debe tener las funciones clave."""
+        from pathlib import Path
+        content = Path("services/congelado_service.py").read_text(encoding="utf-8")
+        assert "async def verificar_inactividad_pagos" in content, (
+            "F-051: Falta la función principal `verificar_inactividad_pagos`."
+        )
+        assert "DIAS_INACTIVIDAD_MORA" in content, (
+            "F-051: El servicio debe usar la config DIAS_INACTIVIDAD_MORA."
+        )
+        assert "DIAS_INACTIVIDAD_ABANDONO" in content, (
+            "F-051: El servicio debe usar la config DIAS_INACTIVIDAD_ABANDONO."
+        )
+        assert "mora_notificada" in content, (
+            "F-051: El servicio debe usar el flag `mora_notificada` para no spamear."
+        )
+        assert "motivo_suspension" in content, (
+            "F-051: El servicio debe marcar motivo_suspension='abandono' al detectar inactividad."
+        )
+
+
 class TestF050RechazarBorradorRecalculaPromedio:
     """
     F-050 (2026-07-22, audios viejos): cuando CPD rechaza un borrador de nota,
