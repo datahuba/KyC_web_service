@@ -492,6 +492,17 @@ async def get_reporte_caja_endpoint(
     enriched = await payment_service.enrich_payments_with_details_bulk(resultado["payments"])
 
     # Los pagos enriquecidos vienen de model_dump() y conservan campos PyObjectId
+    # F-075-FIX-7 (2026-07-23): faltaba el `return` (bug pre-existente). El
+    # endpoint respondia 200 con body null porque no retornaba nada. Aqui se
+    # retorna la estructura completa: lista paginada + resumen + total.
+    return {
+        "items": enriched,
+        "total_count": resultado["total_count"],
+        "total_pages": total_pages,
+        "page": page,
+        "per_page": per_page,
+        "resumen": resultado["resumen"],
+    }
 
 
 @router.get(
