@@ -1147,6 +1147,358 @@ async def get_resumen_economico(
     }
 
 
+# ============================================================================
+# F-074 (2026-07-23): VISTA MATRICIAL DE PAGOS
+# ============================================================================
+# Estructura visual estilo Excel de Sandra (Cobranza):
+#   Filas = estudiantes
+#   Columnas = MATRÍCULA | MONTO | MODULO 1 | MODULO 2 | ... | TOTAL INGRESOS | POR COBRAR
+# Fuente de datos: `Enrollment.modulos[]` (snapshot por estudiante del curso).
+# Cada `ModuloEstado` tiene `costo`, `monto_pagado` y `estado` ('Pendiente'|'Parcial'|'Pagado').
+# Para la matrícula usamos `Enrollment.costo_matricula` y `Enrollment.total_pagado`
+# (cascada greedy: primero se imputa a matrícula, luego a módulos en orden).
+
+
+async def get_matriz_pagos(
+    cursos_permitidos: Optional[List[PydanticObjectId]] = None,
+    modulo_index: Optional[int] = None,
+) -> dict:
+    """
+    F-074: devuelve la matriz estudiante-vs-módulos para vista alternativa de
+    Gestión de Pagos (replica el Excel de Sandra).
+
+    Reglas:
+    - Excluye enrollments SUSPENDIDO/COMPLETADO/CANCELADO de las columnas
+      monetarias (igual que F-073, regla de Kevin/Sandra: "Por Cobrar" no
+      incluye congelados/pasivos).
+    - `total_ingresos` = suma de pagos APROBADOS del enrollment (cualquier
+      estado de enrollment, refleja lo realmente recaudado).
+    - `por_cobrar` = saldo_pendiente del enrollment (excluye suspendidos).
+    - Si `modulo_index` viene, la respuesta incluye solo ese módulo en
+      `estudiantes[].modulos` para que el frontend pueda resaltar la columna
+      sin traer todas.
+
+    Estructura:
+    {
+      "cursos": [{"_id", "nombre", "codigo", "modulos": ["Módulo 1", ...]}],
+      "estudiantes": [
+        {
+          "estudiante_id": str,
+          "nombre": str,
+          "registro": str,
+          "curso_id": str,
+          "estado_inscripcion": "activo",
+          "matricula_pagada": bool,
+          "matricula_monto": float,       # costo_matricula
+          "matricula_pagado": float,      # cuánto se imputó a matrícula
+          "modulos": [
+            {"i": 0, "nombre": "Módulo 1", "costo": float, "monto_pagado": float, "estado": "Pagado", "por_cobrar": float}
+          ],
+          "total_ingresos": float,
+          "por_cobrar": float,
+        }
+      ],
+      "totales_por_columna": {
+        "matricula": {"costo_total": float, "pagado": float, "pendiente": float, "estudiantes_pagaron": int},
+        "modulos": [
+          {"i": 0, "nombre": "Módulo 1", "costo_total": float, "pagado": float, "pendiente": float, "estudiantes_pagaron": int, "estudiantes_pendientes": int}
+        ],
+        "total_ingresos": float,
+        "por_cobrar": float,
+        "total_inscritos": int,
+      },
+      "filtros_aplicados": {"modulo_index": int|None, "cursos_count": int},
+    }
+    """
+    match_enroll: dict = {}
+    if cursos_permitidos is not None:
+        match_enroll["curso_id"] = {"$in": cursos_permitidos}
+
+    enrollments_task = Enrollment.find(match_enroll).to_list()
+    courses_task = Course.find({}).to_list()
+    enrollments, courses = await asyncio.gather(enrollments_task, courses_task)
+
+    courses_map = {c.id: c for c in courses}
+    courses_list: list = [
+        {
+            "_id": str(c.id),
+            "nombre": c.nombre,
+            "codigo": c.codigo,
+            "modulos": [m.nombre for m in (c.modulos or [])],
+        }
+        for c in courses
+    ]
+
+    # Estados que NO cuentan para "Por Cobrar" (regla F-073)
+    estados_excluidos = {
+        EstadoInscripcion.SUSPENDIDO,
+        EstadoInscripcion.COMPLETADO,
+        EstadoInscripcion.CANCELADO,
+    }
+
+    # Acumuladores de totales por columna
+    tot_mat_costo = 0.0
+    tot_mat_pagado = 0.0
+    tot_mat_pendiente = 0.0
+    tot_mat_pagaron = 0
+    tot_modulos: dict = {}  # i -> {costo_total, pagado, pendiente, pagaron, pendientes}
+    tot_ingresos = 0.0
+    tot_por_cobrar = 0.0
+    tot_inscritos = 0
+
+    # Carga batch de estudiantes para resolver nombres
+    student_ids = list({e.estudiante_id for e in enrollments if e.estudiante_id})
+    students = await Student.find({"_id": {"$in": student_ids}}).to_list() if student_ids else []
+    students_map = {s.id: s for s in students}
+
+    estudiantes_out: list = []
+
+    for e in enrollments:
+        curso = courses_map.get(e.curso_id)
+        if not curso:
+            continue  # curso borrado, skip defensivo
+
+        student = students_map.get(e.estudiante_id)
+        nombre = (student.nombre if student and getattr(student, "nombre", None) else None) or "Sin nombre"
+        registro = (student.registro if student and getattr(student, "registro", None) else None) or ""
+
+        # Para ingresos siempre se cuentan pagos APROBADOS (es lo recaudado)
+        total_ingresos_e = float(e.total_pagado or 0.0)
+        tot_ingresos += total_ingresos_e
+
+        # Por cobrar solo si NO está excluido
+        if e.estado in estados_excluidos:
+            por_cobrar_e = 0.0
+        else:
+            por_cobrar_e = float(e.saldo_pendiente or 0.0)
+            tot_por_cobrar += por_cobrar_e
+            tot_inscritos += 1
+
+        # Matrícula
+        costo_mat = float(e.costo_matricula or 0.0)
+        # Cuánto se imputó realmente a matrícula: min(total_pagado, costo_matricula)
+        mat_pagado = min(total_ingresos_e, costo_mat)
+        mat_pendiente = max(0.0, costo_mat - mat_pagado)
+        tot_mat_costo += costo_mat
+        tot_mat_pagado += mat_pagado
+        if e.estado not in estados_excluidos:
+            tot_mat_pendiente += mat_pendiente
+            if mat_pagado + 0.01 >= costo_mat:
+                tot_mat_pagaron += 1
+
+        # Módulos
+        modulos_out: list = []
+        for i, mod in enumerate(e.modulos or []):
+            costo = float(mod.costo or 0.0)
+            pagado = float(mod.monto_pagado or 0.0)
+            pendiente = max(0.0, costo - pagado)
+
+            # Si la columna específica no está en el filtro, skip
+            if modulo_index is not None and modulo_index != i:
+                continue
+
+            if i not in tot_modulos:
+                tot_modulos[i] = {
+                    "i": i,
+                    "nombre": mod.nombre,
+                    "costo_total": 0.0,
+                    "pagado": 0.0,
+                    "pendiente": 0.0,
+                    "estudiantes_pagaron": 0,
+                    "estudiantes_pendientes": 0,
+                }
+            tot_mod = tot_modulos[i]
+            tot_mod["costo_total"] += costo
+            tot_mod["pagado"] += pagado
+            if e.estado not in estados_excluidos:
+                tot_mod["pendiente"] += pendiente
+                if pendiente <= 0.01:
+                    tot_mod["estudiantes_pagaron"] += 1
+                else:
+                    tot_mod["estudiantes_pendientes"] += 1
+
+            modulos_out.append({
+                "i": i,
+                "nombre": mod.nombre,
+                "costo": round(costo, 2),
+                "monto_pagado": round(pagado, 2),
+                "estado": mod.estado,
+                "por_cobrar": round(pendiente, 2) if e.estado not in estados_excluidos else 0.0,
+            })
+
+        # Si modulo_index es 0, lo representamos como "matrícula" en la columna
+        # NOTA: por convención del Excel de Sandra, Módulo 0 visual = MATRÍCULA.
+        # Pero los módulos del curso empiezan en 0 = Módulo 1. El frontend debe
+        # mostrar la columna "MATRÍCULA" usando matricula_monto/matricula_pagado,
+        # y las columnas Módulo 1..N usando modulos[0..N-1].
+
+        estudiantes_out.append({
+            "estudiante_id": str(e.estudiante_id) if e.estudiante_id else "",
+            "nombre": nombre,
+            "registro": registro,
+            "curso_id": str(e.curso_id) if e.curso_id else "",
+            "curso_nombre": curso.nombre,
+            "estado_inscripcion": e.estado.value if hasattr(e.estado, "value") else str(e.estado),
+            "matricula_pagada": bool(e.matricula_pagada),
+            "matricula_monto": round(costo_mat, 2),
+            "matricula_pagado": round(mat_pagado, 2),
+            "modulos": modulos_out,
+            "total_ingresos": round(total_ingresos_e, 2),
+            "por_cobrar": round(por_cobrar_e, 2),
+        })
+
+    # Ordenar estudiantes por nombre
+    estudiantes_out.sort(key=lambda x: x["nombre"].lower())
+
+    # Construir totales_por_columna
+    # Si modulo_index filtra, ajustamos la respuesta para reflejar solo esa columna
+    totales = {
+        "matricula": {
+            "costo_total": round(tot_mat_costo, 2),
+            "pagado": round(tot_mat_pagado, 2),
+            "pendiente": round(tot_mat_pendiente, 2),
+            "estudiantes_pagaron": tot_mat_pagaron,
+        },
+        "modulos": [
+            {
+                "i": idx,
+                "nombre": d["nombre"],
+                "costo_total": round(d["costo_total"], 2),
+                "pagado": round(d["pagado"], 2),
+                "pendiente": round(d["pendiente"], 2),
+                "estudiantes_pagaron": d["estudiantes_pagaron"],
+                "estudiantes_pendientes": d["estudiantes_pendientes"],
+            }
+            for idx, d in sorted(tot_modulos.items())
+        ],
+        "total_ingresos": round(tot_ingresos, 2),
+        "por_cobrar": round(tot_por_cobrar, 2),
+        "total_inscritos": tot_inscritos,
+    }
+
+    return {
+        "cursos": courses_list,
+        "estudiantes": estudiantes_out,
+        "totales_por_columna": totales,
+        "filtros_aplicados": {
+            "modulo_index": modulo_index,
+            "cursos_count": len(courses_list),
+        },
+    }
+
+
+async def get_resumen_modulos(
+    cursos_permitidos: Optional[List[PydanticObjectId]] = None,
+) -> dict:
+    """
+    F-074: resumen por módulo para KPI cards de la vista Matriz.
+
+    Devuelve la cantidad de pagos, monto total y monto pendiente por módulo,
+    excluyendo suspendidos (regla F-073).
+
+    Estructura:
+    {
+      "modulos": [
+        {
+          "i": 0,
+          "nombre": "Módulo 1",
+          "cantidad_pagos": int,        # pagos APROBADOS con numero_cuota == i+1
+          "monto_total": float,          # suma pagos APROBADOS
+          "monto_pendiente": float,      # costo_total - pagado (solo no-suspendidos)
+          "estudiantes_cursando": int,   # inscritos no-suspendidos con este módulo
+        }
+      ],
+      "matricula": {
+        "cantidad_pagos": int,
+        "monto_total": float,
+        "monto_pendiente": float,
+        "estudiantes_cursando": int,
+      },
+    }
+    """
+    match_enroll: dict = {}
+    if cursos_permitidos is not None:
+        match_enroll["curso_id"] = {"$in": cursos_permitidos}
+
+    enrollments = await Enrollment.find(match_enroll).to_list()
+
+    estados_excluidos = {
+        EstadoInscripcion.SUSPENDIDO,
+        EstadoInscripcion.COMPLETADO,
+        EstadoInscripcion.CANCELADO,
+    }
+
+    # Acumuladores
+    mat_cant = 0
+    mat_monto = 0.0
+    mat_pendiente = 0.0
+    mat_cursando = 0
+    modulos_acc: dict = {}
+
+    for e in enrollments:
+        en_curso = e.estado not in estados_excluidos
+
+        # Matrícula
+        costo_mat = float(e.costo_matricula or 0.0)
+        pagado_mat = min(float(e.total_pagado or 0.0), costo_mat)
+        pendiente_mat = max(0.0, costo_mat - pagado_mat) if en_curso else 0.0
+        # Conteo de pagos APROBADOS con concepto 'matrícula'
+        # (lo aproximamos: si el estudiante tiene pagos y el total_pagado cubre
+        # la matrícula, contamos 1 pago de matrícula; refinado si el sistema
+        # tiene `numero_cuota=0` o concepto='Matrícula' lo usamos)
+        if e.total_pagado and e.total_pagado > 0 and pagado_mat + 0.01 >= costo_mat:
+            mat_cant += 1
+        mat_monto += pagado_mat
+        if en_curso:
+            mat_pendiente += pendiente_mat
+            mat_cursando += 1
+
+        # Módulos
+        for i, mod in enumerate(e.modulos or []):
+            if i not in modulos_acc:
+                modulos_acc[i] = {
+                    "i": i,
+                    "nombre": mod.nombre,
+                    "cantidad_pagos": 0,
+                    "monto_total": 0.0,
+                    "monto_pendiente": 0.0,
+                    "estudiantes_cursando": 0,
+                }
+            d = modulos_acc[i]
+            costo = float(mod.costo or 0.0)
+            pagado = float(mod.monto_pagado or 0.0)
+            pendiente = max(0.0, costo - pagado)
+            # Aproximación: si el módulo está Pagado o tiene monto_pagado>0, contamos 1 pago
+            if pagado + 0.01 >= costo:
+                d["cantidad_pagos"] += 1
+            elif pagado > 0.01:
+                d["cantidad_pagos"] += 1  # también pagos parciales cuentan
+            d["monto_total"] += pagado
+            if en_curso:
+                d["monto_pendiente"] += pendiente
+                d["estudiantes_cursando"] += 1
+
+    return {
+        "matricula": {
+            "cantidad_pagos": mat_cant,
+            "monto_total": round(mat_monto, 2),
+            "monto_pendiente": round(mat_pendiente, 2),
+            "estudiantes_cursando": mat_cursando,
+        },
+        "modulos": [
+            {
+                "i": d["i"],
+                "nombre": d["nombre"],
+                "cantidad_pagos": d["cantidad_pagos"],
+                "monto_total": round(d["monto_total"], 2),
+                "monto_pendiente": round(d["monto_pendiente"], 2),
+                "estudiantes_cursando": d["estudiantes_cursando"],
+            }
+            for d in sorted(modulos_acc.values(), key=lambda x: x["i"])
+        ],
+    }
+
+
 def _construir_filtro_reporte_caja(
     fecha_desde_dt: datetime,
     fecha_hasta_dt: datetime,

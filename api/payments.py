@@ -369,427 +369,6 @@ async def list_payments(
     }
 
 
-@router.get(
-    "/{id}",
-    response_model=PaymentResponse,
-    summary="Ver Pago"
-)
-async def get_payment(
-    *,
-    id: PydanticObjectId,
-    current_user: User | Student = Depends(get_current_user)
-) -> Any:
-    payment = await payment_service.get_payment(id)
-    if not payment:
-        raise HTTPException(status_code=404, detail="Pago no encontrado")
-    
-    if isinstance(current_user, Student):
-        if payment.estudiante_id != current_user.id:
-            raise HTTPException(
-                status_code=403,
-                detail="No tienes permiso para ver este pago"
-            )
-            
-    if isinstance(current_user, User):
-        # AUDITORÍA (CRÍTICO #1): mismo guard general que en list_payments.
-        if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
-            raise HTTPException(status_code=403, detail="No autorizado para ver este pago")
-
-        # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados no puede ver pagos de otros cursos.
-        filtro_rol = filtro_cursos_por_rol(current_user)
-        if filtro_rol and payment.curso_id not in filtro_rol["curso_id"]["$in"]:
-            raise HTTPException(status_code=403, detail="No tienes asignado el curso de este pago")
-
-        concepto_lower = (payment.concepto or "").lower().strip()
-        is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
-        
-        if current_user.rol == "cpd" and not is_matricula:
-            raise HTTPException(status_code=403, detail="El rol CPD solo tiene acceso a pagos de concepto Matrícula")
-    
-    return await payment_service.enrich_payment_with_details(payment)
-
-
-@router.put(
-    "/{id}/aprobar",
-    response_model=PaymentResponse,
-    summary="Aprobar Pago"
-)
-async def aprobar_pago(
-    *,
-    id: PydanticObjectId,
-    current_user: User = Depends(require_staff)
-) -> Any:
-    if current_user.rol not in ["superadmin", "admin", "cpd", "cobranza"]:
-        raise HTTPException(status_code=403, detail="Su rol no tiene permisos para aprobar pagos")
-        
-    payment = await payment_service.get_payment(id)
-    if not payment:
-        raise HTTPException(status_code=404, detail="Pago no encontrado")
-
-    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados no puede aprobar pagos de otros cursos.
-    filtro_rol = filtro_cursos_por_rol(current_user)
-    if filtro_rol and payment.curso_id not in filtro_rol["curso_id"]["$in"]:
-        raise HTTPException(status_code=403, detail="No tienes asignado el curso de este pago")
-        
-    concepto_lower = (payment.concepto or "").lower().strip()
-    is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
-    
-    if current_user.rol == "cpd" and not is_matricula:
-        raise HTTPException(status_code=403, detail="El rol CPD solo puede aprobar pagos con concepto de Matrícula.")
-        
-    try:
-        payment = await payment_service.aprobar_pago(
-            payment_id=id,
-            # ISSUE-R-PERFIL-GENERICO: nombre_visible en vez de username, para
-            # que Cobranza (rol rotativo) quede identificado por función.
-            admin_username=current_user.nombre_visible
-        )
-        return await payment_service.enrich_payment_with_details(payment)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@router.put(
-    "/{id}/rechazar",
-    response_model=PaymentResponse,
-    summary="Rechazar Pago"
-)
-async def rechazar_pago(
-    *,
-    id: PydanticObjectId,
-    rejection: PaymentRejection,
-    current_user: User = Depends(require_staff)
-) -> Any:
-    if current_user.rol not in ["superadmin", "admin", "cpd", "cobranza"]:
-        raise HTTPException(status_code=403, detail="Su rol no tiene permisos para rechazar pagos")
-        
-    payment = await payment_service.get_payment(id)
-    if not payment:
-        raise HTTPException(status_code=404, detail="Pago no encontrado")
-
-    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados no puede rechazar pagos de otros cursos.
-    filtro_rol = filtro_cursos_por_rol(current_user)
-    if filtro_rol and payment.curso_id not in filtro_rol["curso_id"]["$in"]:
-        raise HTTPException(status_code=403, detail="No tienes asignado el curso de este pago")
-        
-    concepto_lower = (payment.concepto or "").lower().strip()
-    is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
-    
-    if current_user.rol == "cpd" and not is_matricula:
-        raise HTTPException(status_code=403, detail="El rol CPD solo puede rechazar pagos con concepto de Matrícula.")
-        
-    try:
-        payment = await payment_service.rechazar_pago(
-            payment_id=id,
-            admin_username=current_user.nombre_visible,  # ISSUE-R-PERFIL-GENERICO
-            motivo=rejection.motivo
-        )
-        return await payment_service.enrich_payment_with_details(payment)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@router.put(
-    "/{id}/anular",
-    response_model=PaymentResponse,
-    summary="Anular Pago (Rollback Financiero)"
-)
-async def anular_pago(
-    *,
-    id: PydanticObjectId,
-    reversion: PaymentReversion,
-    current_user: User = Depends(require_staff)
-) -> Any:
-    """
-    ISSUE-P-CANALES: Anula un pago previamente aprobado y restaura las deudas del estudiante.
-    Solo disponible para Cobranzas, Admin y SuperAdmin. El CPD no maneja flujos de caja.
-    """
-    if current_user.rol not in ["superadmin", "admin", "cobranza"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, 
-            detail="Solo el personal financiero (Cobranzas/Administrador) puede realizar reversiones de caja."
-        )
-
-    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados no puede anular pagos de otros cursos.
-    filtro_rol = filtro_cursos_por_rol(current_user)
-    if filtro_rol:
-        target_payment = await payment_service.get_payment(id)
-        if not target_payment or target_payment.curso_id not in filtro_rol["curso_id"]["$in"]:
-            raise HTTPException(status_code=403, detail="No tienes asignado el curso de este pago")
-        
-    try:
-        payment = await payment_service.anular_pago(
-            payment_id=id,
-            admin_username=current_user.nombre_visible,  # ISSUE-R-PERFIL-GENERICO
-            motivo=reversion.motivo
-        )
-        return await payment_service.enrich_payment_with_details(payment)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@router.post(
-    "/{id}/upload-by-encargado",
-    response_model=PaymentResponse,
-    summary="Subir Comprobante de Pago (Encargado de Programa)"
-)
-async def upload_comprobante_by_encargado(
-    *,
-    id: PydanticObjectId,
-    file: UploadFile = File(..., description="Comprobante de pago (imagen o PDF)"),
-    numero_transaccion: Optional[str] = Form(None, description="Número de transacción (opcional)"),
-    remitente: Optional[str] = Form(None, description="Remitente del pago (opcional)"),
-    fecha_comprobante: Optional[str] = Form(None, description="Fecha del comprobante (YYYY-MM-DD, opcional)"),
-    current_user: User = Depends(require_staff)
-) -> Any:
-    """
-    F-COBRANZA-011 (2026-07-21): el personal de COBRANZA puede subir el
-    comprobante de pago del estudiante cuando este no puede hacerlo por
-    sí mismo (problemas técnicos, falta de acceso, etc.).
-
-    Roles permitidos: SUPERADMIN, ADMIN, COBRANZA.
-    Roles NO permitidos: CPD, COORDINADOR, ENCARGADO_CURSO, DOCENTE, ESTUDIANTE.
-
-    Decisión de Joel (2026-07-21 20:30): "debería subirlo el de cobranzas, y
-    que esté en el modal de gestión de pagos [...] no esté en el del encargado
-    porque sería confuncion por ahora". Encargado de programa NO sube: lo hace
-    cobranza. La UI expone este endpoint solo en /app/payments con el botón
-    "Subir comprobante del estudiante".
-
-    Diferencias vs `create_payment`:
-    - El pago YA EXISTE (creado por el estudiante con o sin comprobante).
-    - Solo se actualiza el comprobante_url y datos opcionales.
-    - Se registra en auditoría con `subido_por=cobranza_id`.
-    - El estudiante ve en su perfil quién subió el comprobante.
-    - Al subir, el pago ya estaba APROBADO (F-COBRANZA-004), así que el saldo
-      del enrollment NO se vuelve a tocar.
-    """
-    # 1. Validar rol: SOLO personal financiero (cobranza) y administrativos.
-    roles_permitidos = ["superadmin", "admin", "cobranza"]
-    if current_user.rol not in roles_permitidos:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Su rol ({current_user.rol}) no puede subir comprobantes en nombre de estudiantes. Solo cobranza, admin y superadmin están autorizados."
-        )
-
-    # 2. Obtener el pago
-    payment = await payment_service.get_payment(id)
-    if not payment:
-        raise HTTPException(status_code=404, detail="Pago no encontrado")
-
-    # 3. ISSUE-P-SEGMENTACION: encargado con cursos_asignados solo puede
-    #    subir comprobantes de SUS cursos asignados.
-    filtro_rol = filtro_cursos_por_rol(current_user)
-    if filtro_rol and payment.curso_id not in filtro_rol["curso_id"]["$in"]:
-        raise HTTPException(
-            status_code=403,
-            detail="No tienes asignado el curso de este pago"
-        )
-
-    # 4. Validar que el pago no esté anulado
-    if payment.estado_pago == EstadoPago.ANULADO:
-        raise HTTPException(
-            status_code=400,
-            detail="No se puede subir comprobante a un pago anulado."
-        )
-
-    # 5. Subir el archivo a Cloudinary
-    from core.cloudinary_utils import upload_image, upload_pdf
-    folder = f"payments/{payment.estudiante_id}"
-    safe_transaction = (numero_transaccion or f"encargado_{current_user.id}").replace(' ', '_').replace('/', '_')
-    public_id = f"voucher_{safe_transaction}"
-
-    image_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
-    pdf_type = "application/pdf"
-
-    try:
-        if file.content_type in image_types:
-            comprobante_url = await upload_image(file, folder, public_id)
-        elif file.content_type == pdf_type:
-            from core.cloudinary_utils import upload_pdf
-            comprobante_url = await upload_pdf(file, folder, public_id)
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Tipo de archivo no soportado: {file.content_type}. Use JPEG, PNG, WEBP o PDF."
-            )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error al subir el archivo: {str(e)}"
-        )
-
-    # 6. Actualizar el pago
-    from datetime import datetime
-    from core.timezone_utils import utcnow_naive
-    try:
-        update_dict = {
-            "comprobante_url": comprobante_url,
-            "updated_at": utcnow_naive()
-        }
-        if numero_transaccion:
-            update_dict["numero_transaccion"] = numero_transaccion
-        if remitente:
-            update_dict["remitente"] = remitente
-        if fecha_comprobante:
-            try:
-                update_dict["fecha_comprobante"] = datetime.strptime(fecha_comprobante, "%Y-%m-%d")
-            except ValueError:
-                raise HTTPException(
-                    status_code=400,
-                    detail="fecha_comprobante debe tener formato YYYY-MM-DD"
-                )
-
-        await Payment.find_one({"_id": id}).update({"$set": update_dict})
-
-        # Re-leer el pago actualizado
-        payment = await payment_service.get_payment(id)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al actualizar el pago: {str(e)}")
-
-    # 7. Audit log
-    await payment_service._registrar_auditoria_financiera(
-        accion="UPLOAD COMPROBANTE BY ENCARGADO",
-        payment_id=payment.id,
-        estudiante_id=payment.estudiante_id,
-        monto=payment.cantidad_pago,
-        admin_username=current_user.nombre_visible,
-        detalles=f"Comprobante subido por {current_user.nombre_visible} (rol={current_user.rol}) en nombre del estudiante. URL={comprobante_url[:80]}..."
-    )
-
-    # 8. Notificar al estudiante
-    try:
-        from services.notification_service import create_notification
-        await create_notification(
-            destinatario_id=payment.estudiante_id,
-            tipo_destinatario="student",
-            titulo="Comprobante subido por tu encargado",
-            mensaje=f"El encargado {current_user.nombre_visible} subió el comprobante de tu pago de Bs. {payment.cantidad_pago} por el concepto '{payment.concepto}'.",
-            tipo_alerta="info",
-            ruta="/app/payments",
-            referencia_tipo="payment",
-            referencia_id=payment.id
-        )
-    except Exception as e:
-        print(f"Error al enviar notificación de comprobante subido: {str(e)}")
-
-    return await payment_service.enrich_payment_with_details(payment)
-
-
-@router.delete(
-    "/{id}",
-    summary="Eliminar Pago (Borrado Definitivo)"
-)
-async def eliminar_pago(
-    *,
-    id: PydanticObjectId,
-    current_user: User = Depends(require_superadmin)
-) -> Any:
-    """
-    Elimina físicamente un pago de la base de datos. Operación destructiva y
-    financiera, restringida a SUPERADMIN (mismo criterio que eliminar usuarios
-    o cursos). Pensado para limpiar pagos de prueba o registros erróneos que no
-    deben computar en la contabilidad.
-
-    Tras el borrado se recalcula el saldo/estado de la inscripción desde los
-    pagos APROBADOS restantes, para que los totales económicos queden
-    consistentes.
-    """
-    payment = await payment_service.get_payment(id)
-    if not payment:
-        raise HTTPException(status_code=404, detail="Pago no encontrado")
-
-    try:
-        resultado = await payment_service.eliminar_pago(
-            payment_id=id,
-            admin_username=current_user.nombre_visible  # ISSUE-R-PERFIL-GENERICO
-        )
-        return resultado
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@router.get("/enrollment/{enrollment_id}", response_model=List[PaymentResponse])
-async def get_payments_by_enrollment(
-    *,
-    enrollment_id: PydanticObjectId,
-    current_user: User | Student = Depends(get_current_user)
-) -> Any:
-    if isinstance(current_user, Student):
-        from services import enrollment_service
-        enrollment = await enrollment_service.get_enrollment(enrollment_id)
-        if not enrollment:
-            raise HTTPException(status_code=404, detail="Inscripción no encontrada")
-        if enrollment.estudiante_id != current_user.id:
-            raise HTTPException(status_code=403, detail="No tienes permiso")
-            
-    if isinstance(current_user, User):
-        if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
-            raise HTTPException(status_code=403, detail="No autorizado para ver los pagos de esta inscripción")
-
-        # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve inscripciones de esos cursos.
-        filtro_rol = filtro_cursos_por_rol(current_user)
-        if filtro_rol:
-            from services import enrollment_service
-            target_enrollment = await enrollment_service.get_enrollment(enrollment_id)
-            if not target_enrollment or target_enrollment.curso_id not in filtro_rol["curso_id"]["$in"]:
-                raise HTTPException(status_code=403, detail="No tienes asignado el curso de esta inscripción")
-    
-    payments = await payment_service.get_payments_by_enrollment(enrollment_id)
-    
-    filtered_payments = []
-    for p in payments:
-        if isinstance(current_user, User):
-            concepto_lower = (p.concepto or "").lower().strip()
-            is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
-            if current_user.rol == "cpd" and not is_matricula:
-                continue
-        filtered_payments.append(p)
-        
-    return await payment_service.enrich_payments_with_details_bulk(filtered_payments)
-
-
-@router.get("/enrollment/{enrollment_id}/resumen")
-async def get_resumen_pagos(
-    *,
-    enrollment_id: PydanticObjectId,
-    current_user: User | Student = Depends(get_current_user)
-) -> Any:
-    if isinstance(current_user, Student):
-        from services import enrollment_service
-        enrollment = await enrollment_service.get_enrollment(enrollment_id)
-        if not enrollment:
-            raise HTTPException(status_code=404, detail="Inscripción no encontrada")
-        if enrollment.estudiante_id != current_user.id:
-            raise HTTPException(status_code=403, detail="No tienes permiso")
-            
-    if isinstance(current_user, User):
-        # AUDITORÍA (CRÍTICO #1): mismo guard general, además de la restricción específica de CPD.
-        if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
-            raise HTTPException(status_code=403, detail="No autorizado para ver el resumen de pagos")
-
-        if current_user.rol == "cpd":
-            raise HTTPException(
-                status_code=403,
-                detail="El rol CPD tiene estrictamente prohibido visualizar flujos de caja y estados financieros"
-            )
-
-        # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve inscripciones de esos cursos.
-        filtro_rol = filtro_cursos_por_rol(current_user)
-        if filtro_rol:
-            from services import enrollment_service
-            target_enrollment = await enrollment_service.get_enrollment(enrollment_id)
-            if not target_enrollment or target_enrollment.curso_id not in filtro_rol["curso_id"]["$in"]:
-                raise HTTPException(status_code=403, detail="No tienes asignado el curso de esta inscripción")
-    
-    resumen = await payment_service.get_resumen_pagos_enrollment(enrollment_id)
-    return resumen
-
-
 @router.get("/pendientes/list", response_model=List[PaymentResponse])
 async def get_payments_pendientes(
     *,
@@ -1862,3 +1441,485 @@ async def export_payments_excel(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
+
+
+# ============================================================================
+# F-074 (2026-07-23): VISTA MATRICIAL DE PAGOS
+# ============================================================================
+# Endpoints para vista alternativa de Gestión de Pagos (estilo Excel de Sandra).
+# Filas = estudiantes, columnas = MATRÍCULA | MODULO 1..N | TOTAL INGRESOS | POR COBRAR.
+# Importante: rutas estáticas (matriz, resumen-modulos) declaradas ANTES de /{payment_id}
+# para evitar el bug FastAPI de matchear la palabra como ObjectId (F-070-FIX-2).
+
+
+@router.get(
+    "/matriz",
+    summary="F-074: Matriz estudiante-vs-módulos (vista alternativa Gestión de Pagos)",
+)
+async def get_matriz_pagos_endpoint(
+    modulo_index: Optional[int] = Query(
+        None,
+        ge=0,
+        description="Si viene, devuelve solo esa columna de módulo (0=matrícula virtual, 1=Módulo 1, etc.)",
+    ),
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    Devuelve la matriz de pagos estilo Excel de Sandra: cada estudiante con
+    el detalle de cuánto pagó en matrícula y en cada módulo. Respeta la
+    segmentación por curso del rol (Cobranza con cursos_asignados solo ve
+    su alcance).
+    """
+    if not puede_ver_economico(current_user):
+        raise HTTPException(status_code=403, detail="No autorizado para ver la matriz de pagos")
+
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
+    return await payment_service.get_matriz_pagos(
+        cursos_permitidos=cursos_permitidos,
+        modulo_index=modulo_index,
+    )
+
+
+@router.get(
+    "/resumen-modulos",
+    summary="F-074: Resumen por módulo (KPI cards vista Matriz)",
+)
+async def get_resumen_modulos_endpoint(
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    Resumen agregado por módulo (cantidad de pagos, monto total, monto
+    pendiente, estudiantes cursando). Excluye suspendidos (regla F-073).
+    """
+    if not puede_ver_economico(current_user):
+        raise HTTPException(status_code=403, detail="No autorizado para ver el resumen por módulos")
+
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
+    return await payment_service.get_resumen_modulos(
+        cursos_permitidos=cursos_permitidos,
+    )
+
+@router.get(
+    "/{id}",
+    response_model=PaymentResponse,
+    summary="Ver Pago"
+)
+async def get_payment(
+    *,
+    id: PydanticObjectId,
+    current_user: User | Student = Depends(get_current_user)
+) -> Any:
+    payment = await payment_service.get_payment(id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+    
+    if isinstance(current_user, Student):
+        if payment.estudiante_id != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="No tienes permiso para ver este pago"
+            )
+            
+    if isinstance(current_user, User):
+        # AUDITORÍA (CRÍTICO #1): mismo guard general que en list_payments.
+        if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
+            raise HTTPException(status_code=403, detail="No autorizado para ver este pago")
+
+        # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados no puede ver pagos de otros cursos.
+        filtro_rol = filtro_cursos_por_rol(current_user)
+        if filtro_rol and payment.curso_id not in filtro_rol["curso_id"]["$in"]:
+            raise HTTPException(status_code=403, detail="No tienes asignado el curso de este pago")
+
+        concepto_lower = (payment.concepto or "").lower().strip()
+        is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
+        
+        if current_user.rol == "cpd" and not is_matricula:
+            raise HTTPException(status_code=403, detail="El rol CPD solo tiene acceso a pagos de concepto Matrícula")
+    
+    return await payment_service.enrich_payment_with_details(payment)
+
+
+@router.put(
+    "/{id}/aprobar",
+    response_model=PaymentResponse,
+    summary="Aprobar Pago"
+)
+async def aprobar_pago(
+    *,
+    id: PydanticObjectId,
+    current_user: User = Depends(require_staff)
+) -> Any:
+    if current_user.rol not in ["superadmin", "admin", "cpd", "cobranza"]:
+        raise HTTPException(status_code=403, detail="Su rol no tiene permisos para aprobar pagos")
+        
+    payment = await payment_service.get_payment(id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+
+    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados no puede aprobar pagos de otros cursos.
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    if filtro_rol and payment.curso_id not in filtro_rol["curso_id"]["$in"]:
+        raise HTTPException(status_code=403, detail="No tienes asignado el curso de este pago")
+        
+    concepto_lower = (payment.concepto or "").lower().strip()
+    is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
+    
+    if current_user.rol == "cpd" and not is_matricula:
+        raise HTTPException(status_code=403, detail="El rol CPD solo puede aprobar pagos con concepto de Matrícula.")
+        
+    try:
+        payment = await payment_service.aprobar_pago(
+            payment_id=id,
+            # ISSUE-R-PERFIL-GENERICO: nombre_visible en vez de username, para
+            # que Cobranza (rol rotativo) quede identificado por función.
+            admin_username=current_user.nombre_visible
+        )
+        return await payment_service.enrich_payment_with_details(payment)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.put(
+    "/{id}/rechazar",
+    response_model=PaymentResponse,
+    summary="Rechazar Pago"
+)
+async def rechazar_pago(
+    *,
+    id: PydanticObjectId,
+    rejection: PaymentRejection,
+    current_user: User = Depends(require_staff)
+) -> Any:
+    if current_user.rol not in ["superadmin", "admin", "cpd", "cobranza"]:
+        raise HTTPException(status_code=403, detail="Su rol no tiene permisos para rechazar pagos")
+        
+    payment = await payment_service.get_payment(id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+
+    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados no puede rechazar pagos de otros cursos.
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    if filtro_rol and payment.curso_id not in filtro_rol["curso_id"]["$in"]:
+        raise HTTPException(status_code=403, detail="No tienes asignado el curso de este pago")
+        
+    concepto_lower = (payment.concepto or "").lower().strip()
+    is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
+    
+    if current_user.rol == "cpd" and not is_matricula:
+        raise HTTPException(status_code=403, detail="El rol CPD solo puede rechazar pagos con concepto de Matrícula.")
+        
+    try:
+        payment = await payment_service.rechazar_pago(
+            payment_id=id,
+            admin_username=current_user.nombre_visible,  # ISSUE-R-PERFIL-GENERICO
+            motivo=rejection.motivo
+        )
+        return await payment_service.enrich_payment_with_details(payment)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.put(
+    "/{id}/anular",
+    response_model=PaymentResponse,
+    summary="Anular Pago (Rollback Financiero)"
+)
+async def anular_pago(
+    *,
+    id: PydanticObjectId,
+    reversion: PaymentReversion,
+    current_user: User = Depends(require_staff)
+) -> Any:
+    """
+    ISSUE-P-CANALES: Anula un pago previamente aprobado y restaura las deudas del estudiante.
+    Solo disponible para Cobranzas, Admin y SuperAdmin. El CPD no maneja flujos de caja.
+    """
+    if current_user.rol not in ["superadmin", "admin", "cobranza"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="Solo el personal financiero (Cobranzas/Administrador) puede realizar reversiones de caja."
+        )
+
+    # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados no puede anular pagos de otros cursos.
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    if filtro_rol:
+        target_payment = await payment_service.get_payment(id)
+        if not target_payment or target_payment.curso_id not in filtro_rol["curso_id"]["$in"]:
+            raise HTTPException(status_code=403, detail="No tienes asignado el curso de este pago")
+        
+    try:
+        payment = await payment_service.anular_pago(
+            payment_id=id,
+            admin_username=current_user.nombre_visible,  # ISSUE-R-PERFIL-GENERICO
+            motivo=reversion.motivo
+        )
+        return await payment_service.enrich_payment_with_details(payment)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/{id}/upload-by-encargado",
+    response_model=PaymentResponse,
+    summary="Subir Comprobante de Pago (Encargado de Programa)"
+)
+async def upload_comprobante_by_encargado(
+    *,
+    id: PydanticObjectId,
+    file: UploadFile = File(..., description="Comprobante de pago (imagen o PDF)"),
+    numero_transaccion: Optional[str] = Form(None, description="Número de transacción (opcional)"),
+    remitente: Optional[str] = Form(None, description="Remitente del pago (opcional)"),
+    fecha_comprobante: Optional[str] = Form(None, description="Fecha del comprobante (YYYY-MM-DD, opcional)"),
+    current_user: User = Depends(require_staff)
+) -> Any:
+    """
+    F-COBRANZA-011 (2026-07-21): el personal de COBRANZA puede subir el
+    comprobante de pago del estudiante cuando este no puede hacerlo por
+    sí mismo (problemas técnicos, falta de acceso, etc.).
+
+    Roles permitidos: SUPERADMIN, ADMIN, COBRANZA.
+    Roles NO permitidos: CPD, COORDINADOR, ENCARGADO_CURSO, DOCENTE, ESTUDIANTE.
+
+    Decisión de Joel (2026-07-21 20:30): "debería subirlo el de cobranzas, y
+    que esté en el modal de gestión de pagos [...] no esté en el del encargado
+    porque sería confuncion por ahora". Encargado de programa NO sube: lo hace
+    cobranza. La UI expone este endpoint solo en /app/payments con el botón
+    "Subir comprobante del estudiante".
+
+    Diferencias vs `create_payment`:
+    - El pago YA EXISTE (creado por el estudiante con o sin comprobante).
+    - Solo se actualiza el comprobante_url y datos opcionales.
+    - Se registra en auditoría con `subido_por=cobranza_id`.
+    - El estudiante ve en su perfil quién subió el comprobante.
+    - Al subir, el pago ya estaba APROBADO (F-COBRANZA-004), así que el saldo
+      del enrollment NO se vuelve a tocar.
+    """
+    # 1. Validar rol: SOLO personal financiero (cobranza) y administrativos.
+    roles_permitidos = ["superadmin", "admin", "cobranza"]
+    if current_user.rol not in roles_permitidos:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Su rol ({current_user.rol}) no puede subir comprobantes en nombre de estudiantes. Solo cobranza, admin y superadmin están autorizados."
+        )
+
+    # 2. Obtener el pago
+    payment = await payment_service.get_payment(id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+
+    # 3. ISSUE-P-SEGMENTACION: encargado con cursos_asignados solo puede
+    #    subir comprobantes de SUS cursos asignados.
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    if filtro_rol and payment.curso_id not in filtro_rol["curso_id"]["$in"]:
+        raise HTTPException(
+            status_code=403,
+            detail="No tienes asignado el curso de este pago"
+        )
+
+    # 4. Validar que el pago no esté anulado
+    if payment.estado_pago == EstadoPago.ANULADO:
+        raise HTTPException(
+            status_code=400,
+            detail="No se puede subir comprobante a un pago anulado."
+        )
+
+    # 5. Subir el archivo a Cloudinary
+    from core.cloudinary_utils import upload_image, upload_pdf
+    folder = f"payments/{payment.estudiante_id}"
+    safe_transaction = (numero_transaccion or f"encargado_{current_user.id}").replace(' ', '_').replace('/', '_')
+    public_id = f"voucher_{safe_transaction}"
+
+    image_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
+    pdf_type = "application/pdf"
+
+    try:
+        if file.content_type in image_types:
+            comprobante_url = await upload_image(file, folder, public_id)
+        elif file.content_type == pdf_type:
+            from core.cloudinary_utils import upload_pdf
+            comprobante_url = await upload_pdf(file, folder, public_id)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tipo de archivo no soportado: {file.content_type}. Use JPEG, PNG, WEBP o PDF."
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al subir el archivo: {str(e)}"
+        )
+
+    # 6. Actualizar el pago
+    from datetime import datetime
+    from core.timezone_utils import utcnow_naive
+    try:
+        update_dict = {
+            "comprobante_url": comprobante_url,
+            "updated_at": utcnow_naive()
+        }
+        if numero_transaccion:
+            update_dict["numero_transaccion"] = numero_transaccion
+        if remitente:
+            update_dict["remitente"] = remitente
+        if fecha_comprobante:
+            try:
+                update_dict["fecha_comprobante"] = datetime.strptime(fecha_comprobante, "%Y-%m-%d")
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="fecha_comprobante debe tener formato YYYY-MM-DD"
+                )
+
+        await Payment.find_one({"_id": id}).update({"$set": update_dict})
+
+        # Re-leer el pago actualizado
+        payment = await payment_service.get_payment(id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al actualizar el pago: {str(e)}")
+
+    # 7. Audit log
+    await payment_service._registrar_auditoria_financiera(
+        accion="UPLOAD COMPROBANTE BY ENCARGADO",
+        payment_id=payment.id,
+        estudiante_id=payment.estudiante_id,
+        monto=payment.cantidad_pago,
+        admin_username=current_user.nombre_visible,
+        detalles=f"Comprobante subido por {current_user.nombre_visible} (rol={current_user.rol}) en nombre del estudiante. URL={comprobante_url[:80]}..."
+    )
+
+    # 8. Notificar al estudiante
+    try:
+        from services.notification_service import create_notification
+        await create_notification(
+            destinatario_id=payment.estudiante_id,
+            tipo_destinatario="student",
+            titulo="Comprobante subido por tu encargado",
+            mensaje=f"El encargado {current_user.nombre_visible} subió el comprobante de tu pago de Bs. {payment.cantidad_pago} por el concepto '{payment.concepto}'.",
+            tipo_alerta="info",
+            ruta="/app/payments",
+            referencia_tipo="payment",
+            referencia_id=payment.id
+        )
+    except Exception as e:
+        print(f"Error al enviar notificación de comprobante subido: {str(e)}")
+
+    return await payment_service.enrich_payment_with_details(payment)
+
+
+@router.delete(
+    "/{id}",
+    summary="Eliminar Pago (Borrado Definitivo)"
+)
+async def eliminar_pago(
+    *,
+    id: PydanticObjectId,
+    current_user: User = Depends(require_superadmin)
+) -> Any:
+    """
+    Elimina físicamente un pago de la base de datos. Operación destructiva y
+    financiera, restringida a SUPERADMIN (mismo criterio que eliminar usuarios
+    o cursos). Pensado para limpiar pagos de prueba o registros erróneos que no
+    deben computar en la contabilidad.
+
+    Tras el borrado se recalcula el saldo/estado de la inscripción desde los
+    pagos APROBADOS restantes, para que los totales económicos queden
+    consistentes.
+    """
+    payment = await payment_service.get_payment(id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+
+    try:
+        resultado = await payment_service.eliminar_pago(
+            payment_id=id,
+            admin_username=current_user.nombre_visible  # ISSUE-R-PERFIL-GENERICO
+        )
+        return resultado
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/enrollment/{enrollment_id}", response_model=List[PaymentResponse])
+async def get_payments_by_enrollment(
+    *,
+    enrollment_id: PydanticObjectId,
+    current_user: User | Student = Depends(get_current_user)
+) -> Any:
+    if isinstance(current_user, Student):
+        from services import enrollment_service
+        enrollment = await enrollment_service.get_enrollment(enrollment_id)
+        if not enrollment:
+            raise HTTPException(status_code=404, detail="Inscripción no encontrada")
+        if enrollment.estudiante_id != current_user.id:
+            raise HTTPException(status_code=403, detail="No tienes permiso")
+            
+    if isinstance(current_user, User):
+        if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
+            raise HTTPException(status_code=403, detail="No autorizado para ver los pagos de esta inscripción")
+
+        # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve inscripciones de esos cursos.
+        filtro_rol = filtro_cursos_por_rol(current_user)
+        if filtro_rol:
+            from services import enrollment_service
+            target_enrollment = await enrollment_service.get_enrollment(enrollment_id)
+            if not target_enrollment or target_enrollment.curso_id not in filtro_rol["curso_id"]["$in"]:
+                raise HTTPException(status_code=403, detail="No tienes asignado el curso de esta inscripción")
+    
+    payments = await payment_service.get_payments_by_enrollment(enrollment_id)
+    
+    filtered_payments = []
+    for p in payments:
+        if isinstance(current_user, User):
+            concepto_lower = (p.concepto or "").lower().strip()
+            is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
+            if current_user.rol == "cpd" and not is_matricula:
+                continue
+        filtered_payments.append(p)
+        
+    return await payment_service.enrich_payments_with_details_bulk(filtered_payments)
+
+
+@router.get("/enrollment/{enrollment_id}/resumen")
+async def get_resumen_pagos(
+    *,
+    enrollment_id: PydanticObjectId,
+    current_user: User | Student = Depends(get_current_user)
+) -> Any:
+    if isinstance(current_user, Student):
+        from services import enrollment_service
+        enrollment = await enrollment_service.get_enrollment(enrollment_id)
+        if not enrollment:
+            raise HTTPException(status_code=404, detail="Inscripción no encontrada")
+        if enrollment.estudiante_id != current_user.id:
+            raise HTTPException(status_code=403, detail="No tienes permiso")
+            
+    if isinstance(current_user, User):
+        # AUDITORÍA (CRÍTICO #1): mismo guard general, además de la restricción específica de CPD.
+        if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
+            raise HTTPException(status_code=403, detail="No autorizado para ver el resumen de pagos")
+
+        if current_user.rol == "cpd":
+            raise HTTPException(
+                status_code=403,
+                detail="El rol CPD tiene estrictamente prohibido visualizar flujos de caja y estados financieros"
+            )
+
+        # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve inscripciones de esos cursos.
+        filtro_rol = filtro_cursos_por_rol(current_user)
+        if filtro_rol:
+            from services import enrollment_service
+            target_enrollment = await enrollment_service.get_enrollment(enrollment_id)
+            if not target_enrollment or target_enrollment.curso_id not in filtro_rol["curso_id"]["$in"]:
+                raise HTTPException(status_code=403, detail="No tienes asignado el curso de esta inscripción")
+    
+    resumen = await payment_service.get_resumen_pagos_enrollment(enrollment_id)
+    return resumen
+
