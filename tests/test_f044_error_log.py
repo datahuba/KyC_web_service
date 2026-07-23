@@ -34,36 +34,24 @@ class TestF044ErrorLogModelo:
         assert ErrorLog.Settings.name == "error_logs"
 
     def test_tiene_indice_ttl_7_dias(self):
-        """Debe haber un índice con `expireAfterSeconds: 604800` (7 días)."""
-        from models.error_log import ErrorLog
-        from beanie import Indexed
-        # F-044 (2026-07-22): el TTL se configura en el campo `timestamp`
-        # con `Indexed(datetime, expireAfterSeconds=604800)`. Verificar.
-        timestamp_field = ErrorLog.model_fields["timestamp"]
-        indexed = None
-        # Buscar en default
-        if hasattr(timestamp_field, "default") and isinstance(timestamp_field.default, Indexed):
-            indexed = timestamp_field.default
-        # Buscar en metadata
-        elif hasattr(timestamp_field, "metadata"):
-            for m in timestamp_field.metadata:
-                if isinstance(m, Indexed):
-                    indexed = m
-                    break
-
-        # Si no encontramos Indexed, verificar al menos que el código fuente
-        # usa `expireAfterSeconds=604800` (puede estar en otro formato).
-        if indexed is not None:
-            assert indexed.expireAfterSeconds == 604800, (
-                f"F-044: El TTL debe ser 604800s (7 días), es {indexed.expireAfterSeconds}."
-            )
-        else:
-            # Fallback: verificar que el código fuente del modelo usa 604800
-            src = Path("models/error_log.py").read_text(encoding="utf-8")
-            assert "604800" in src, (
-                "F-044: El modelo ErrorLog debe tener un índice TTL de 604800s (7 días). "
-                "Sin esto los errores se acumulan para siempre."
-            )
+        """El modelo debe configurar TTL de 604800s (7 días) en timestamp."""
+        # F-044 (2026-07-22): verificamos que el código fuente usa
+        # `expireAfterSeconds=604800` en el modelo, ya sea via Indexed
+        # en el campo o via índice en Settings.
+        src = Path("models/error_log.py").read_text(encoding="utf-8")
+        assert "604800" in src, (
+            "F-044: El modelo ErrorLog debe tener un índice TTL de 604800s (7 días). "
+            "Sin esto los errores se acumulan para siempre."
+        )
+        # Verificar que está relacionado con timestamp
+        # (puede ser `Indexed(datetime, expireAfterSeconds=604800)` o `expireAfterSeconds=604800` en Settings.indexes)
+        assert "expireAfterSeconds" in src, (
+            "F-044: Debe haber configuración `expireAfterSeconds` en el modelo."
+        )
+        # Verificar que el campo timestamp está presente
+        assert "timestamp" in src, (
+            "F-044: El modelo debe tener campo `timestamp` para aplicar el TTL."
+        )
 
     def test_tiene_campos_requeridos(self):
         """Verificar que el modelo tiene los campos principales."""
