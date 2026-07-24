@@ -1713,17 +1713,30 @@ async def generar_lista_habilitados(
         Enrollment.curso_id == curso_id
     ).to_list()
 
-    # 4) Determinar el docente del módulo pedido
-    docente_nombre = ""
-    if modulo_index and 1 <= modulo_index <= len(curso.modulos or []):
-        mod = curso.modulos[modulo_index - 1]
-        if mod.docente_id:
-            from models.user import User
-            docente = await User.get(mod.docente_id)
-            if docente:
-                docente_nombre = docente.nombre_visible or docente.username or ""
+    # 3.5) BATCH LOADING (F-076 2026-07-23): cargar TODOS los estudiantes en 1 query.
+    # Antes era 1 query por enrollment (N+1 problem). 54 estudiantes = 54 queries.
+    estudiante_ids = list({e.estudiante_id for e in enrollments if e.estudiante_id})
+    estudiantes_map = {}
+    if estudiante_ids:
+        estudiantes = await Student.find(In(Student.id, estudiante_ids)).to_list()
+        estudiantes_map = {e.id: e for e in estudiantes}
 
-    # 5) Construir la lista de descuentos IDs únicos (para cargar nombres en batch)
+    # 3.6) BATCH LOADING: cargar TODOS los pagos aprobados de todos los enrollments
+    # en 1 sola query. Antes era 1 query por enrollment.
+    enrollment_ids = [e.id for e in enrollments]
+    pagos_por_enrollment = {}  # inscripcion_id -> lista de pagos
+    pagos_por_enrollment_mat = {}  # inscripcion_id -> lista de pagos SOLO de matrícula
+    if enrollment_ids:
+        todos_los_pagos = await Payment.find(
+            In(Payment.inscripcion_id, enrollment_ids),
+            Payment.estado_pago == EstadoPago.APROBADO
+        ).sort("-fecha_comprobante").to_list()
+        for p in todos_los_pagos:
+            pagos_por_enrollment.setdefault(p.inscripcion_id, []).append(p)
+            if p.concepto and "matrícula" in p.concepto.lower():
+                pagos_por_enrollment_mat.setdefault(p.inscripcion_id, []).append(p)
+
+    # 3.7) BATCH LOADING: cargar TODOS los descuentos en 1 query.
     discount_ids_set = set()
     for enr in enrollments:
         if enr.descuento_curso_id:
@@ -1735,6 +1748,25 @@ async def generar_lista_habilitados(
         descuentos = await Discount.find(In(Discount.id, list(discount_ids_set))).to_list()
         for d in descuentos:
             discounts_map[d.id] = d
+
+    # 3.8) BATCH LOADING: cargar TODOS los docentes (uno por módulo) en 1 query.
+    from models.user import User
+    docente_ids_set = set()
+    for mod in (curso.modulos or []):
+        if mod.docente_id:
+            docente_ids_set.add(mod.docente_id)
+    docente_nombre_map = {}
+    if docente_ids_set:
+        docentes = await User.find(In(User.id, list(docente_ids_set))).to_list()
+        for d in docentes:
+            docente_nombre_map[d.id] = d.nombre_visible or d.username or ""
+
+    # 4) Docente del módulo pedido (lookup en map, sin query)
+    docente_nombre = ""
+    if modulo_index and 1 <= modulo_index <= len(curso.modulos or []):
+        mod = curso.modulos[modulo_index - 1]
+        if mod.docente_id:
+            docente_nombre = docente_nombre_map.get(mod.docente_id, "")
 
     # 6) Etiqueta del tipo de programa para el encabezado
     tipo_curso_str = str(curso.tipo_curso.value) if hasattr(curso.tipo_curso, 'value') else str(curso.tipo_curso)
@@ -1759,12 +1791,13 @@ async def generar_lista_habilitados(
     # - Si NO pagó: estado_pago='PENDIENTE', importe=0, monto_pendiente=costo_total
     # Orden: 2 grupos (PAGADOS primero alfabético, luego PENDIENTES alfabético).
     # Beca: siempre incluida (puede ser null si no tiene).
+    # F-076 (2026-07-23): refactor N+1 -> batch loading. 600+ queries -> 5 queries.
     rows = []
     total_importe = 0.0
     total_pendiente = 0.0
 
-    async def _build_row(
-        estudiante, enr, modulo_idx, mod_nombre, mod_label, docente_n,
+    def _build_row(
+        estudiante, modulo_idx, mod_nombre, mod_label, docente_n,
         monto_pagado, costo_total, fecha, boleta, beca_nombre, beca_pct, beca_tiene
     ):
         """Helper para construir un row. Se usa tanto para pagados como pendientes."""
@@ -1798,9 +1831,14 @@ async def generar_lista_habilitados(
             "beca_porcentaje": round(beca_pct, 1) if beca_tiene else 0.0,
         }
 
+    def _costo_modulo(i):
+        if i == 0:
+            return float(curso.matricula_interno or 0)
+        return float(curso.modulos[i - 1].costo or 0)
+
     for enr in enrollments:
-        # Datos del estudiante
-        estudiante = await Student.get(enr.estudiante_id)
+        # Datos del estudiante (lookup en map, sin query)
+        estudiante = estudiantes_map.get(enr.estudiante_id)
         if not estudiante:
             continue
 
@@ -1815,11 +1853,14 @@ async def generar_lista_habilitados(
             beca_nombre = discounts_map[enr.descuento_curso_id].nombre
             beca_tiene = True
 
-        # Costo total del módulo o matrícula (para calcular pendiente)
-        def _costo_modulo(i):
-            if i == 0:
-                return float(curso.matricula_interno or 0)
-            return float(curso.modulos[i - 1].costo or 0)
+        # Pagos del enrollment (lookup en map, sin query)
+        pagos_del_enr = pagos_por_enrollment.get(enr.id, [])
+        fecha = None
+        boleta = None
+        if pagos_del_enr:
+            p = pagos_del_enr[0]  # ya está ordenado por -fecha_comprobante
+            fecha = p.fecha_comprobante or p.fecha_subida
+            boleta = p.numero_transaccion
 
         # Para "Todos los módulos", generamos UN registro por CADA MÓDULO del
         # estudiante (no solo los pagados).
@@ -1829,28 +1870,13 @@ async def generar_lista_habilitados(
                 monto_pagado_mod = float(mod_estado.monto_pagado) if mod_estado else 0.0
                 costo_total = _costo_modulo(i)
 
-                # Fecha del último pago aprobado de este enrollment
-                pagos_aprobados = await Payment.find(
-                    Payment.inscripcion_id == enr.id,
-                    Payment.estado_pago == EstadoPago.APROBADO
-                ).sort("-fecha_comprobante").to_list()
-                fecha = None
-                boleta = None
-                if pagos_aprobados:
-                    p = pagos_aprobados[0]
-                    fecha = p.fecha_comprobante or p.fecha_subida
-                    boleta = p.numero_transaccion
-
-                # Nombre del docente de este módulo
+                # Docente del módulo (lookup en map, sin query)
                 docente_mod_nombre = ""
                 if mod.docente_id:
-                    from models.user import User
-                    docente_mod = await User.get(mod.docente_id)
-                    if docente_mod:
-                        docente_mod_nombre = docente_mod.nombre_visible or docente_mod.username or ""
+                    docente_mod_nombre = docente_nombre_map.get(mod.docente_id, "")
 
-                row = await _build_row(
-                    estudiante, enr, i, mod.nombre, f"Módulo {i}", docente_mod_nombre,
+                row = _build_row(
+                    estudiante, i, mod.nombre, f"Módulo {i}", docente_mod_nombre,
                     monto_pagado_mod, costo_total, fecha, boleta,
                     beca_nombre, beca_pct_total, beca_tiene
                 )
@@ -1860,12 +1886,8 @@ async def generar_lista_habilitados(
         else:
             # Módulo específico: 1 solo registro por estudiante (pagado O pendiente)
             if modulo_index == 0:
-                # Matrícula: sumar pagos con concepto "Matrícula"
-                pagos_mat = await Payment.find(
-                    Payment.inscripcion_id == enr.id,
-                    Payment.estado_pago == EstadoPago.APROBADO,
-                    {"concepto": {"$regex": "Matrícula", "$options": "i"}}
-                ).to_list()
+                # Matrícula: sumar pagos con concepto "Matrícula" (del map)
+                pagos_mat = pagos_por_enrollment_mat.get(enr.id, [])
                 monto_pagado = sum(p.cantidad_pago for p in pagos_mat)
                 costo_total = _costo_modulo(0)
             else:
@@ -1873,24 +1895,12 @@ async def generar_lista_habilitados(
                 monto_pagado = float(mod_estado.monto_pagado) if mod_estado else 0.0
                 costo_total = _costo_modulo(modulo_index)
 
-            # Fecha del último pago aprobado (puede ser null si no pagó)
-            pagos_aprobados = await Payment.find(
-                Payment.inscripcion_id == enr.id,
-                Payment.estado_pago == EstadoPago.APROBADO
-            ).sort("-fecha_comprobante").to_list()
-            fecha = None
-            boleta = None
-            if pagos_aprobados:
-                p = pagos_aprobados[0]
-                fecha = p.fecha_comprobante or p.fecha_subida
-                boleta = p.numero_transaccion
-
             mod_nombre = ""
             if modulo_index <= len(curso.modulos or []):
                 mod_nombre = curso.modulos[modulo_index - 1].nombre
 
-            row = await _build_row(
-                estudiante, enr, modulo_index, mod_nombre, modulo_label, docente_nombre,
+            row = _build_row(
+                estudiante, modulo_index, mod_nombre, modulo_label, docente_nombre,
                 monto_pagado, costo_total, fecha, boleta,
                 beca_nombre, beca_pct_total, beca_tiene
             )
