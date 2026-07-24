@@ -1792,18 +1792,37 @@ async def generar_lista_habilitados(
     # Orden: 2 grupos (PAGADOS primero alfabético, luego PENDIENTES alfabético).
     # Beca: siempre incluida (puede ser null si no tiene).
     # F-076 (2026-07-23): refactor N+1 -> batch loading. 600+ queries -> 5 queries.
+    # F-077 (2026-07-24): si el estudiante TIENE beca, el "costo del módulo" que
+    # se usa para calcular estado_pago y monto_pendiente es el costo CON
+    # DESCUENTO (no el costo sin descuento). Ej: Anselmo beca 50%, costo
+    # módulo Bs 588, costo con descuento Bs 294. Si paga Bs 294 -> PAGADO
+    # (es el total que le corresponde), NO parcial.
+    # La beca aplica SOLO a módulos, NUNCA a matrícula (regla F-074-FIX-4).
     rows = []
     total_importe = 0.0
     total_pendiente = 0.0
 
     def _build_row(
         estudiante, modulo_idx, mod_nombre, mod_label, docente_n,
-        monto_pagado, costo_total, fecha, boleta, beca_nombre, beca_pct, beca_tiene
+        monto_pagado, costo_total, fecha, boleta, beca_nombre, beca_pct, beca_tiene, es_matricula=False
     ):
-        """Helper para construir un row. Se usa tanto para pagados como pendientes."""
+        """Helper para construir un row. Se usa tanto para pagados como pendientes.
+
+        Args:
+            costo_total: costo SIN descuento del módulo o matrícula.
+            beca_pct: porcentaje de beca (0 si no tiene). SOLO aplica a módulos.
+            es_matricula: True si es la fila de matrícula (NUNCA tiene beca).
+        """
         monto_pagado = round(monto_pagado, 2)
-        costo_total = round(costo_total, 2)
-        monto_pendiente = round(max(0, costo_total - monto_pagado), 2)
+        costo_sin_desc = round(costo_total, 2)
+
+        # F-077: calcular costo_con_descuento SOLO si tiene beca Y NO es matrícula
+        if beca_tiene and beca_pct > 0 and not es_matricula:
+            costo_con_desc = round(costo_sin_desc * (1 - beca_pct / 100.0), 2)
+        else:
+            costo_con_desc = costo_sin_desc
+
+        monto_pendiente = round(max(0, costo_con_desc - monto_pagado), 2)
 
         if monto_pagado <= 0:
             estado_pago = "PENDIENTE"
@@ -1826,7 +1845,8 @@ async def generar_lista_habilitados(
             "numero_boleta": boleta or ("" if monto_pagado <= 0 else "S/N"),
             "importe": monto_pagado,
             "monto_pendiente": monto_pendiente,
-            "costo_total": costo_total,
+            "costo_total": costo_con_desc,  # F-077: para becados, este es el costo que DEBEN pagar
+            "costo_sin_descuento": costo_sin_desc,  # F-077: nuevo, el costo original sin beca
             "beca": beca_nombre,
             "beca_porcentaje": round(beca_pct, 1) if beca_tiene else 0.0,
         }
@@ -1875,10 +1895,11 @@ async def generar_lista_habilitados(
                 if mod.docente_id:
                     docente_mod_nombre = docente_nombre_map.get(mod.docente_id, "")
 
+                # F-077: NUNCA es matrícula en este loop (solo modulos)
                 row = _build_row(
                     estudiante, i, mod.nombre, f"Módulo {i}", docente_mod_nombre,
                     monto_pagado_mod, costo_total, fecha, boleta,
-                    beca_nombre, beca_pct_total, beca_tiene
+                    beca_nombre, beca_pct_total, beca_tiene, es_matricula=False
                 )
                 rows.append(row)
                 total_importe += row["importe"]
@@ -1899,10 +1920,11 @@ async def generar_lista_habilitados(
             if modulo_index <= len(curso.modulos or []):
                 mod_nombre = curso.modulos[modulo_index - 1].nombre
 
+            # F-077: marcar si es matrícula para no aplicar beca
             row = _build_row(
                 estudiante, modulo_index, mod_nombre, modulo_label, docente_nombre,
                 monto_pagado, costo_total, fecha, boleta,
-                beca_nombre, beca_pct_total, beca_tiene
+                beca_nombre, beca_pct_total, beca_tiene, es_matricula=(modulo_index == 0)
             )
             rows.append(row)
             total_importe += row["importe"]

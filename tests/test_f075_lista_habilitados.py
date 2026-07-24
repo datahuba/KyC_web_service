@@ -474,3 +474,185 @@ async def test_generar_lista_habilitados_orden_3_estados():
     assert rows[1]["nombre"] == "PEDRO PARCIAL"
     assert rows[2]["estado_pago"] == "PENDIENTE"
     assert rows[2]["nombre"] == "LUIS PENDIENTE"
+
+
+# =============================================================================
+# F-077 (2026-07-24): becados que pagan el costo CON descuento aparecen como
+# PAGADO (no PARCIAL). El estado se calcula contra el costo con descuento,
+# no contra el costo sin descuento.
+# Regla Kevin: "porque dice parcial si es el total pero con descuento"
+# =============================================================================
+@pytest.mark.asyncio
+async def test_f077_becado_paga_total_con_descuento_es_pagado():
+    """Becado 50% que paga Bs 294 (costo con descuento) en módulo de Bs 588 = PAGADO."""
+    curso_id = ObjectId()
+    est_id = ObjectId()
+    beca_id = ObjectId()
+    curso = _make_course(curso_id)
+    # Beca 50%, pagó Bs 294 en M1 (costo módulo Bs 588, costo con descuento Bs 294)
+    enrollment = _make_enrollment(
+        est_id, curso_id,
+        modulos_pagados=(294.0, 0, 0, 0, 0),  # pagó el costo CON descuento
+        descuento_curso=0.0,
+        descuento_personal=50.0,
+        beca_id=beca_id,
+    )
+    student = _make_student(est_id, nombre="Anselmo Becado")
+    pago = _make_payment(cantidad=294.0, inscripcion_id=enrollment.id)
+    discount = MagicMock()
+    discount.id = beca_id
+    discount.nombre = "Descuento Docente"
+
+    with patch.object(payment_service, 'Course') as MockCourse, \
+         patch.object(payment_service, 'Enrollment') as MockEnrollment, \
+         patch.object(payment_service, 'Student') as MockStudent, \
+         patch.object(payment_service, 'Payment') as MockPayment, \
+         patch.object(payment_service, 'Discount') as MockDiscount, \
+         patch.object(payment_service, 'In', lambda *args: MagicMock()), \
+         patch('models.user.User') as MockUser:
+
+        _setup_mocks(MockCourse, MockEnrollment, MockStudent, MockPayment, MockDiscount, MockUser,
+                     curso, [enrollment], [student], [pago], descuentos=[discount])
+
+        result = await payment_service.generar_lista_habilitados(curso_id=curso_id, modulo_index=1)
+
+    row = result["rows"][0]
+    # El becado pagó Bs 294 que es SU costo total (con descuento). Es PAGADO.
+    assert row["estado_pago"] == "PAGADO", \
+        f"Becado 50% que paga Bs 294 (su costo con descuento) debe ser PAGADO, fue {row['estado_pago']}"
+    assert row["importe"] == 294.0
+    assert row["monto_pendiente"] == 0.0
+    # F-077: el costo_total es el costo CON descuento (lo que el becado debe pagar)
+    assert row["costo_total"] == 294.0, f"costo_total debe ser 294 (con descuento), fue {row['costo_total']}"
+    # F-077: nuevo campo costo_sin_descuento guarda el costo original
+    assert row["costo_sin_descuento"] == 588.0
+    assert row["beca_porcentaje"] == 50.0
+    assert row["beca"] == "Descuento Docente"
+
+
+@pytest.mark.asyncio
+async def test_f077_becado_paga_parcial_con_descuento_es_parcial():
+    """Becado 50% que paga Bs 100 de Bs 294 (costo con descuento) = PARCIAL."""
+    curso_id = ObjectId()
+    est_id = ObjectId()
+    beca_id = ObjectId()
+    curso = _make_course(curso_id)
+    # Beca 50%, pagó Bs 100 (parcial de Bs 294)
+    enrollment = _make_enrollment(
+        est_id, curso_id,
+        modulos_pagados=(100.0, 0, 0, 0, 0),
+        descuento_curso=0.0,
+        descuento_personal=50.0,
+        beca_id=beca_id,
+    )
+    student = _make_student(est_id, nombre="Becado Parcial")
+    pago = _make_payment(cantidad=100.0, inscripcion_id=enrollment.id)
+    discount = MagicMock()
+    discount.id = beca_id
+    discount.nombre = "Beca Media"
+
+    with patch.object(payment_service, 'Course') as MockCourse, \
+         patch.object(payment_service, 'Enrollment') as MockEnrollment, \
+         patch.object(payment_service, 'Student') as MockStudent, \
+         patch.object(payment_service, 'Payment') as MockPayment, \
+         patch.object(payment_service, 'Discount') as MockDiscount, \
+         patch.object(payment_service, 'In', lambda *args: MagicMock()), \
+         patch('models.user.User') as MockUser:
+
+        _setup_mocks(MockCourse, MockEnrollment, MockStudent, MockPayment, MockDiscount, MockUser,
+                     curso, [enrollment], [student], [pago], descuentos=[discount])
+
+        result = await payment_service.generar_lista_habilitados(curso_id=curso_id, modulo_index=1)
+
+    row = result["rows"][0]
+    # Pagó 100, le faltan 194 del costo con descuento (294)
+    assert row["estado_pago"] == "PARCIAL"
+    assert row["importe"] == 100.0
+    assert row["monto_pendiente"] == 194.0
+    assert row["costo_total"] == 294.0
+    assert row["costo_sin_descuento"] == 588.0
+
+
+@pytest.mark.asyncio
+async def test_f077_sin_beca_paga_total_sin_descuento_es_pagado():
+    """Sin beca, paga el costo total sin descuento = PAGADO (regression check)."""
+    curso_id = ObjectId()
+    est_id = ObjectId()
+    curso = _make_course(curso_id)
+    # Sin beca, pagó Bs 588 (total)
+    enrollment = _make_enrollment(est_id, curso_id, modulos_pagados=(588.0, 0, 0, 0, 0))
+    student = _make_student(est_id, nombre="Normal Pagado")
+    pago = _make_payment(cantidad=588.0, inscripcion_id=enrollment.id)
+
+    with patch.object(payment_service, 'Course') as MockCourse, \
+         patch.object(payment_service, 'Enrollment') as MockEnrollment, \
+         patch.object(payment_service, 'Student') as MockStudent, \
+         patch.object(payment_service, 'Payment') as MockPayment, \
+         patch.object(payment_service, 'Discount') as MockDiscount, \
+         patch.object(payment_service, 'In', lambda *args: MagicMock()), \
+         patch('models.user.User') as MockUser:
+
+        _setup_mocks(MockCourse, MockEnrollment, MockStudent, MockPayment, MockDiscount, MockUser,
+                     curso, [enrollment], [student], [pago])
+
+        result = await payment_service.generar_lista_habilitados(curso_id=curso_id, modulo_index=1)
+
+    row = result["rows"][0]
+    assert row["estado_pago"] == "PAGADO"
+    assert row["importe"] == 588.0
+    assert row["monto_pendiente"] == 0.0
+    assert row["costo_total"] == 588.0
+    assert row["costo_sin_descuento"] == 588.0  # sin beca, son iguales
+
+
+@pytest.mark.asyncio
+async def test_f077_beca_no_aplica_a_matricula():
+    """F-074-FIX-4: la beca NUNCA aplica a la matrícula, solo a módulos."""
+    curso_id = ObjectId()
+    est_id = ObjectId()
+    beca_id = ObjectId()
+    curso = _make_course(curso_id)
+    # Becado, pagó Bs 300 de matrícula (costo sin descuento = 300)
+    enrollment = _make_enrollment(
+        est_id, curso_id,
+        modulos_pagados=(0, 0, 0, 0, 0),  # no pagó módulos
+        descuento_curso=0.0,
+        descuento_personal=50.0,
+        beca_id=beca_id,
+    )
+    student = _make_student(est_id, nombre="Becado En Matricula")
+    pago_mat = MagicMock()
+    pago_mat.estado_pago = "aprobado"
+    pago_mat.cantidad_pago = 300.0
+    pago_mat.concepto = "Matrícula Diplomado"
+    pago_mat.numero_transaccion = "MAT-BEC-001"
+    pago_mat.fecha_comprobante = datetime(2026, 6, 1)
+    pago_mat.fecha_subida = datetime(2026, 6, 1)
+    pago_mat.inscripcion_id = enrollment.id
+    pago_mat.estudiante_id = est_id
+    discount = MagicMock()
+    discount.id = beca_id
+    discount.nombre = "Descuento Docente"
+
+    with patch.object(payment_service, 'Course') as MockCourse, \
+         patch.object(payment_service, 'Enrollment') as MockEnrollment, \
+         patch.object(payment_service, 'Student') as MockStudent, \
+         patch.object(payment_service, 'Payment') as MockPayment, \
+         patch.object(payment_service, 'Discount') as MockDiscount, \
+         patch.object(payment_service, 'In', lambda *args: MagicMock()), \
+         patch('models.user.User') as MockUser:
+
+        _setup_mocks(MockCourse, MockEnrollment, MockStudent, MockPayment, MockDiscount, MockUser,
+                     curso, [enrollment], [student], [pago_mat], descuentos=[discount])
+
+        result = await payment_service.generar_lista_habilitados(curso_id=curso_id, modulo_index=0)
+
+    row = result["rows"][0]
+    # F-074-FIX-4: la beca NO aplica a matrícula
+    # costo_total = 300 (costo original, sin descuento)
+    # costo_sin_descuento = 300 (también)
+    assert row["costo_total"] == 300.0, f"Matrícula NO debe tener descuento, fue {row['costo_total']}"
+    assert row["costo_sin_descuento"] == 300.0
+    assert row["importe"] == 300.0
+    assert row["estado_pago"] == "PAGADO"  # pagó el costo total de matrícula
+    assert row["monto_pendiente"] == 0.0
