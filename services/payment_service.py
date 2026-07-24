@@ -1954,6 +1954,7 @@ async def generar_lista_habilitados(
 
 async def get_reporte_caja(
     fecha_desde_dt: datetime,
+    fecha_hasta_dt: Optional[datetime] = None,
     page: int = 1,
     per_page: int = 20,
     curso_id: Optional[PydanticObjectId] = None,
