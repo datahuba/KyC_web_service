@@ -563,6 +563,383 @@ async def get_lista_habilitados(
     )
 
 
+# =============================================================================
+# F-078 (2026-07-24): Exportar Lista de Postgraduantes Habilitados como XLSX/PDF
+# =============================================================================
+# Kevin pidio: "mejores los excel como excel no como csv, y aparte que
+# puedas sacar PDF, directamente los mejores pdf". El frontend antes generaba
+# un CSV manual con BOM. Ahora el backend genera XLSX (openpyxl) y PDF
+# (reportlab) nativos, con formato "papel Sandra":
+#
+# - Encabezado: titulo + tipo + programa + modulo + periodo + docente
+# - Tabla con todas las columnas (N°, Nombre, CI, Estado, Fecha, N° Boleta,
+#   Importe, Pendiente, Beca %)
+# - Totales al pie: cant. estudiantes + total importe + total pendiente
+# - PDF landscape A4 con estilos (colores por estado)
+# =============================================================================
+@router.get(
+    "/reportes/lista-habilitados/xlsx",
+    summary="F-078: Lista de Postgraduantes Habilitados - Export XLSX (estilo papel Sandra)",
+)
+async def get_lista_habilitados_xlsx(
+    *,
+    curso_id: PydanticObjectId = Query(..., description="ID del curso (obligatorio)"),
+    modulo_index: Optional[int] = Query(
+        None,
+        ge=0,
+        description=(
+            "0 = solo matrícula, 1..N = solo ese módulo, None/omitido = TODOS los módulos"
+        ),
+    ),
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """F-078: Genera el archivo XLSX nativo (openpyxl) con el formato papel Sandra."""
+    from fastapi.responses import StreamingResponse
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from io import BytesIO
+
+    if not puede_ver_economico(current_user):
+        raise HTTPException(status_code=403, detail="No autorizado para ver informes")
+
+    data = await payment_service.generar_lista_habilitados(
+        curso_id=curso_id, modulo_index=modulo_index
+    )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Lista Habilitados"
+
+    # ====== ESTILOS ======
+    title_font = Font(bold=True, size=14, color="1F4E78")
+    subtitle_font = Font(bold=True, size=11, color="1F4E78")
+    header_font = Font(bold=True, color="FFFFFF", size=10)
+    header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    cell_font = Font(size=9)
+    pagado_fill = PatternFill(start_color="D1FAE5", end_color="D1FAE5", fill_type="solid")  # verde
+    parcial_fill = PatternFill(start_color="FEF3C7", end_color="FEF3C7", fill_type="solid")  # amarillo
+    pendiente_fill = PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid")  # rojo
+    total_font = Font(bold=True, size=10, color="1F4E78")
+    total_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+    thin = Side(border_style="thin", color="A0A0A0")
+    cell_border = Border(top=thin, left=thin, right=thin, bottom=thin)
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    right = Alignment(horizontal="right", vertical="center")
+
+    # ====== ENCABEZADO ======
+    enc = data["encabezado"]
+    ws.merge_cells("A1:I1")
+    ws["A1"] = enc["titulo"]
+    ws["A1"].font = title_font
+    ws["A1"].alignment = center
+
+    ws.merge_cells("A2:I2")
+    ws["A2"] = f"{enc['programa_tipo']}: {enc['programa_nombre']}"
+    ws["A2"].font = subtitle_font
+    ws["A2"].alignment = center
+
+    ws.merge_cells("A3:I3")
+    ws["A3"] = f"MÓDULO: {enc['modulo']}"
+    ws["A3"].font = subtitle_font
+    ws["A3"].alignment = center
+
+    ws.merge_cells("A4:I4")
+    ws["A4"] = f"PERÍODO: {enc['periodo'] or 'N/A'}"
+    ws["A4"].font = subtitle_font
+    ws["A4"].alignment = center
+
+    ws.merge_cells("A5:I5")
+    ws["A5"] = f"DOCENTE: {enc['docente'] or 'N/A'}"
+    ws["A5"].font = subtitle_font
+    ws["A5"].alignment = center
+
+    # Línea vacía
+    ws.row_dimensions[6].height = 5
+
+    # ====== TABLA DE ESTUDIANTES ======
+    header_row = 7
+    headers = ["N°", "Apellido y Nombre", "C.I.", "Estado", "Fecha", "N° Boleta", "Importe Bs.", "Pendiente Bs.", "Beca"]
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=header_row, column=col, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center
+        cell.border = cell_border
+
+    rows = data.get("rows", [])
+    for i, r in enumerate(rows, 1):
+        row = header_row + i
+        fecha = r.get("fecha_pago")
+        fecha_str = ""
+        if fecha:
+            try:
+                d = datetime.fromisoformat(fecha.replace("Z", "+00:00") if isinstance(fecha, str) else fecha.isoformat())
+                fecha_str = d.strftime("%d/%m/%Y")
+            except Exception:
+                fecha_str = str(fecha)
+        beca_str = f"{r.get('beca')} ({r.get('beca_porcentaje', 0)}%)" if r.get('beca') else "Sin beca"
+
+        values = [
+            i,
+            r.get("nombre", ""),
+            r.get("ci", ""),
+            r.get("estado_pago", "PENDIENTE"),
+            fecha_str,
+            r.get("numero_boleta") or "",
+            float(r.get("importe") or 0),
+            float(r.get("monto_pendiente") or 0),
+            beca_str,
+        ]
+        for col, v in enumerate(values, 1):
+            cell = ws.cell(row=row, column=col, value=v)
+            cell.font = cell_font
+            cell.border = cell_border
+            if col in (1, 4, 5, 6):
+                cell.alignment = center
+            elif col in (7, 8):
+                cell.alignment = right
+                cell.number_format = "#,##0.00"
+            else:
+                cell.alignment = left
+            # Color de fila segun estado
+            estado = r.get("estado_pago", "")
+            if estado == "PAGADO":
+                cell.fill = pagado_fill
+            elif estado == "PARCIAL":
+                cell.fill = parcial_fill
+            elif estado == "PENDIENTE":
+                cell.fill = pendiente_fill
+
+    # ====== TOTALES AL PIE ======
+    total_row = header_row + len(rows) + 1
+    ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=6)
+    ws.cell(row=total_row, column=1, value="TOTALES").font = total_font
+    ws.cell(row=total_row, column=1).alignment = right
+    ws.cell(row=total_row, column=1).fill = total_fill
+    ws.cell(row=total_row, column=7, value=float(data.get("total_importe") or 0))
+    ws.cell(row=total_row, column=7).font = total_font
+    ws.cell(row=total_row, column=7).fill = total_fill
+    ws.cell(row=total_row, column=7).number_format = "#,##0.00"
+    ws.cell(row=total_row, column=7).alignment = right
+    ws.cell(row=total_row, column=7).border = cell_border
+    ws.cell(row=total_row, column=8, value=float(data.get("total_pendiente") or 0))
+    ws.cell(row=total_row, column=8).font = total_font
+    ws.cell(row=total_row, column=8).fill = total_fill
+    ws.cell(row=total_row, column=8).number_format = "#,##0.00"
+    ws.cell(row=total_row, column=8).alignment = right
+    ws.cell(row=total_row, column=8).border = cell_border
+    ws.cell(row=total_row, column=9, value=f"{data.get('total_estudiantes', 0)} est.")
+    ws.cell(row=total_row, column=9).font = total_font
+    ws.cell(row=total_row, column=9).fill = total_fill
+    ws.cell(row=total_row, column=9).alignment = center
+    ws.cell(row=total_row, column=9).border = cell_border
+
+    # ====== ANCHOS DE COLUMNA ======
+    widths = [5, 35, 15, 12, 12, 18, 14, 14, 25]
+    for col, w in enumerate(widths, 1):
+        ws.column_dimensions[chr(64 + col)].width = w
+
+    # Generar archivo
+    excel_file = BytesIO()
+    wb.save(excel_file)
+    excel_file.seek(0)
+
+    # Nombre del archivo
+    modulo_safe = enc["modulo"].replace(" ", "_").replace(":", "").replace("/", "_")[:40]
+    fname = f"lista_habilitados_{modulo_safe}.xlsx"
+
+    return StreamingResponse(
+        excel_file,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'}
+    )
+
+
+@router.get(
+    "/reportes/lista-habilitados/pdf",
+    summary="F-078: Lista de Postgraduantes Habilitados - Export PDF (estilo papel Sandra, landscape)",
+)
+async def get_lista_habilitados_pdf(
+    *,
+    curso_id: PydanticObjectId = Query(..., description="ID del curso (obligatorio)"),
+    modulo_index: Optional[int] = Query(
+        None,
+        ge=0,
+        description=(
+            "0 = solo matrícula, 1..N = solo ese módulo, None/omitido = TODOS los módulos"
+        ),
+    ),
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """F-078: Genera el PDF landscape A4 con el formato papel Sandra."""
+    from fastapi.responses import StreamingResponse
+    from io import BytesIO
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer,
+    )
+
+    if not puede_ver_economico(current_user):
+        raise HTTPException(status_code=403, detail="No autorizado para ver informes")
+
+    data = await payment_service.generar_lista_habilitados(
+        curso_id=curso_id, modulo_index=modulo_index
+    )
+
+    pdf_file = BytesIO()
+    doc = SimpleDocTemplate(
+        pdf_file,
+        pagesize=landscape(A4),
+        leftMargin=10*mm, rightMargin=10*mm,
+        topMargin=10*mm, bottomMargin=10*mm,
+        title="Lista de Postgraduantes Habilitados - KYC DataHub",
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "TitleStyle", parent=styles["Title"],
+        fontSize=16, textColor=colors.HexColor("#0c4a6e"),
+        spaceAfter=2*mm, alignment=1,  # center
+    )
+    subtitle_style = ParagraphStyle(
+        "SubtitleStyle", parent=styles["Normal"],
+        fontSize=10, textColor=colors.HexColor("#475569"),
+        spaceAfter=1*mm, alignment=1,  # center
+    )
+
+    enc = data["encabezado"]
+    elements = []
+    elements.append(Paragraph(enc["titulo"], title_style))
+    elements.append(Paragraph(
+        f"<b>{enc['programa_tipo']}:</b> {enc['programa_nombre']}", subtitle_style
+    ))
+    elements.append(Paragraph(f"<b>MÓDULO:</b> {enc['modulo']}", subtitle_style))
+    elements.append(Paragraph(f"<b>PERÍODO:</b> {enc['periodo'] or 'N/A'}", subtitle_style))
+    elements.append(Paragraph(f"<b>DOCENTE:</b> {enc['docente'] or 'N/A'}", subtitle_style))
+    elements.append(Spacer(1, 4*mm))
+
+    # Tabla
+    header_row = ["N°", "Apellido y Nombre", "C.I.", "Estado", "Fecha", "N° Boleta", "Importe", "Pendiente", "Beca"]
+    table_data = [header_row]
+
+    rows = data.get("rows", [])
+    for i, r in enumerate(rows, 1):
+        fecha = r.get("fecha_pago")
+        fecha_str = ""
+        if fecha:
+            try:
+                d = datetime.fromisoformat(
+                    fecha.replace("Z", "+00:00") if isinstance(fecha, str) else fecha.isoformat()
+                )
+                fecha_str = d.strftime("%d/%m/%Y")
+            except Exception:
+                fecha_str = str(fecha)[:10]
+        beca_str = f"{r.get('beca')} ({r.get('beca_porcentaje', 0)}%)" if r.get('beca') else ""
+
+        table_data.append([
+            str(i),
+            r.get("nombre", ""),
+            r.get("ci", ""),
+            r.get("estado_pago", "PENDIENTE"),
+            fecha_str,
+            r.get("numero_boleta") or "",
+            f"{float(r.get('importe') or 0):.2f}",
+            f"{float(r.get('monto_pendiente') or 0):.2f}",
+            beca_str,
+        ])
+
+    # Fila de totales
+    table_data.append([
+        "", "", "", "", "", "TOTALES:",
+        f"{float(data.get('total_importe') or 0):.2f}",
+        f"{float(data.get('total_pendiente') or 0):.2f}",
+        f"{data.get('total_estudiantes', 0)} est.",
+    ])
+
+    # Anchos de columna (landscape A4 ~ 277mm utiles)
+    col_widths = [
+        10*mm,  # N°
+        70*mm,  # Nombre
+        22*mm,  # CI
+        18*mm,  # Estado
+        20*mm,  # Fecha
+        30*mm,  # N° Boleta
+        20*mm,  # Importe
+        22*mm,  # Pendiente
+        50*mm,  # Beca
+    ]
+
+    t = Table(table_data, colWidths=col_widths, repeatRows=1)
+    style_cmds = [
+        # Header
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E78")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 8),
+        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        # Body
+        ("FONTSIZE", (0, 1), (-1, -1), 7),
+        ("ALIGN", (0, 1), (0, -1), "CENTER"),  # N° centrado
+        ("ALIGN", (3, 1), (3, -1), "CENTER"),  # Estado centrado
+        ("ALIGN", (4, 1), (4, -1), "CENTER"),  # Fecha centrado
+        ("ALIGN", (5, 1), (5, -1), "CENTER"),  # N° Boleta centrado
+        ("ALIGN", (6, 1), (6, -1), "RIGHT"),   # Importe right
+        ("ALIGN", (7, 1), (7, -1), "RIGHT"),   # Pendiente right
+        # Grid
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#A0A0A0")),
+        ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor("#1F4E78")),
+    ]
+    # Color de filas por estado
+    for i, r in enumerate(rows, 1):
+        estado = r.get("estado_pago", "")
+        if estado == "PAGADO":
+            style_cmds.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#D1FAE5")))
+        elif estado == "PARCIAL":
+            style_cmds.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#FEF3C7")))
+        elif estado == "PENDIENTE":
+            style_cmds.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#FEE2E2")))
+
+    # Fila de totales
+    total_row_idx = len(rows) + 1
+    style_cmds.extend([
+        ("BACKGROUND", (0, total_row_idx), (-1, total_row_idx), colors.HexColor("#D9E1F2")),
+        ("FONTNAME", (0, total_row_idx), (-1, total_row_idx), "Helvetica-Bold"),
+        ("ALIGN", (0, total_row_idx), (5, total_row_idx), "RIGHT"),
+    ])
+
+    t.setStyle(TableStyle(style_cmds))
+    elements.append(t)
+
+    # Footer
+    elements.append(Spacer(1, 5*mm))
+    footer_style = ParagraphStyle(
+        "FooterStyle", parent=styles["Normal"],
+        fontSize=7, textColor=colors.HexColor("#94a3b8"),
+        alignment=1,  # center
+    )
+    elements.append(Paragraph(
+        f"Generado por KYC DataHub el {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+        footer_style
+    ))
+
+    doc.build(elements)
+    pdf_file.seek(0)
+
+    modulo_safe = enc["modulo"].replace(" ", "_").replace(":", "").replace("/", "_")[:40]
+    fname = f"lista_habilitados_{modulo_safe}.pdf"
+
+    return StreamingResponse(
+        pdf_file,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'}
+    )
+
+
 @router.get(
     "/reportes/excel",
     summary="Generar Reporte Excel de Pagos"
