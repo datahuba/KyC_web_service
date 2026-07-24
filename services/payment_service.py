@@ -1750,22 +1750,61 @@ async def generar_lista_habilitados(
     tipo_label = tipo_label_map.get(tipo_curso_str.lower(), tipo_curso_str.upper())
 
     # 7) Para cada enrollment, calcular los pagos aplicados al módulo pedido
+    # F-075-FIX-8 (2026-07-23): AHORA se incluyen TODOS los estudiantes del curso,
+    # no solo los que pagaron. Los que NO pagaron aparecen con estado_pago='PENDIENTE'
+    # y los campos económicos (fecha, N° boleta, importe) en null/0.
+    # Reglas:
+    # - Si pagó completo: estado_pago='PAGADO', importe=monto_pagado, monto_pendiente=0
+    # - Si pagó parcial: estado_pago='PARCIAL', importe=monto_pagado, monto_pendiente=restante
+    # - Si NO pagó: estado_pago='PENDIENTE', importe=0, monto_pendiente=costo_total
+    # Orden: 2 grupos (PAGADOS primero alfabético, luego PENDIENTES alfabético).
+    # Beca: siempre incluida (puede ser null si no tiene).
     rows = []
     total_importe = 0.0
+    total_pendiente = 0.0
+
+    async def _build_row(
+        estudiante, enr, modulo_idx, mod_nombre, mod_label, docente_n,
+        monto_pagado, costo_total, fecha, boleta, beca_nombre, beca_pct, beca_tiene
+    ):
+        """Helper para construir un row. Se usa tanto para pagados como pendientes."""
+        monto_pagado = round(monto_pagado, 2)
+        costo_total = round(costo_total, 2)
+        monto_pendiente = round(max(0, costo_total - monto_pagado), 2)
+
+        if monto_pagado <= 0:
+            estado_pago = "PENDIENTE"
+        elif monto_pendiente > 0.01:
+            estado_pago = "PARCIAL"
+        else:
+            estado_pago = "PAGADO"
+
+        return {
+            "estudiante_id": str(estudiante.id),
+            "registro": estudiante.registro,
+            "nombre": (estudiante.nombre or "").upper(),
+            "ci": f"{estudiante.carnet or ''}{('-' + estudiante.complemento_carnet) if estudiante.complemento_carnet else ''}",
+            "modulo_index": modulo_idx,
+            "modulo_nombre": mod_nombre,
+            "modulo_label": mod_label,
+            "docente": docente_n,
+            "estado_pago": estado_pago,
+            "fecha_pago": fecha.isoformat() if fecha else None,
+            "numero_boleta": boleta or ("" if monto_pagado <= 0 else "S/N"),
+            "importe": monto_pagado,
+            "monto_pendiente": monto_pendiente,
+            "costo_total": costo_total,
+            "beca": beca_nombre,
+            "beca_porcentaje": round(beca_pct, 1) if beca_tiene else 0.0,
+        }
 
     for enr in enrollments:
         # Datos del estudiante
         estudiante = await Student.get(enr.estudiante_id)
         if not estudiante:
             continue
-        # Nombre del estudiante en MAYÚSCULAS (estilo papel)
-        nombre = (estudiante.nombre or "").upper()
-        # Carnet con complemento si tiene
-        ci = estudiante.carnet or ""
-        if estudiante.complemento_carnet:
-            ci = f"{ci}-{estudiante.complemento_carnet}"
 
-        # Becas del estudiante
+        # Becas del estudiante (siempre incluir, no condicional)
         beca_pct_total = float(enr.descuento_curso_aplicado or 0) + float(enr.descuento_personalizado or 0)
         beca_nombre = None
         beca_tiene = False
@@ -1776,36 +1815,31 @@ async def generar_lista_habilitados(
             beca_nombre = discounts_map[enr.descuento_curso_id].nombre
             beca_tiene = True
 
-        # Costo original (sin descuento) del módulo o matrícula
-        if modulo_index == 0:
-            # Matrícula
-            costo_original = float(curso.matricula_interno or 0)
-        elif modulo_index and 1 <= modulo_index <= len(curso.modulos or []):
-            mod = curso.modulos[modulo_index - 1]
-            costo_original = float(mod.costo or 0)
-        else:
-            # Todos los módulos: usamos el costo total del curso sin descuentos
-            costo_original = float(curso.costo_total_interno or 0)
+        # Costo total del módulo o matrícula (para calcular pendiente)
+        def _costo_modulo(i):
+            if i == 0:
+                return float(curso.matricula_interno or 0)
+            return float(curso.modulos[i - 1].costo or 0)
 
-        # Para "Todos los módulos", generamos UN registro por cada módulo pagado
+        # Para "Todos los módulos", generamos UN registro por CADA MÓDULO del
+        # estudiante (no solo los pagados).
         if modulo_index is None:
-            # Iterar por todos los módulos del curso
             for i, mod in enumerate(curso.modulos or [], start=1):
-                # Pagos aprobados de este estudiante para el módulo i
-                # Como los pagos no se prorratean limpiamente a un módulo específico
-                # (pueden ser parciales), usamos el `modulos[i-1].monto_pagado` del
-                # enrollment que es la fuente de verdad después del prorrateo.
                 mod_estado = enr.modulos[i - 1] if i - 1 < len(enr.modulos) else None
                 monto_pagado_mod = float(mod_estado.monto_pagado) if mod_estado else 0.0
-                if monto_pagado_mod <= 0:
-                    continue
+                costo_total = _costo_modulo(i)
+
                 # Fecha del último pago aprobado de este enrollment
                 pagos_aprobados = await Payment.find(
                     Payment.inscripcion_id == enr.id,
                     Payment.estado_pago == EstadoPago.APROBADO
                 ).sort("-fecha_comprobante").to_list()
-                fecha = pagos_aprobados[0].fecha_comprobante if pagos_aprobados and pagos_aprobados[0].fecha_comprobante else pagos_aprobados[0].fecha_subida if pagos_aprobados else None
-                boleta = pagos_aprobados[0].numero_transaccion if pagos_aprobados else None
+                fecha = None
+                boleta = None
+                if pagos_aprobados:
+                    p = pagos_aprobados[0]
+                    fecha = p.fecha_comprobante or p.fecha_subida
+                    boleta = p.numero_transaccion
 
                 # Nombre del docente de este módulo
                 docente_mod_nombre = ""
@@ -1815,70 +1849,62 @@ async def generar_lista_habilitados(
                     if docente_mod:
                         docente_mod_nombre = docente_mod.nombre_visible or docente_mod.username or ""
 
-                rows.append({
-                    "estudiante_id": str(estudiante.id),
-                    "registro": estudiante.registro,
-                    "nombre": nombre,
-                    "ci": ci,
-                    "modulo_index": i,
-                    "modulo_nombre": mod.nombre,
-                    "modulo_label": f"Módulo {i}",
-                    "docente": docente_mod_nombre,
-                    "fecha_pago": fecha.isoformat() if fecha else None,
-                    "numero_boleta": boleta or "S/N",
-                    "importe": round(monto_pagado_mod, 2),
-                    "costo_original_modulo": float(mod.costo or 0),
-                    "beca": beca_nombre,
-                    "beca_porcentaje": round(beca_pct_total, 1) if beca_tiene else 0.0,
-                })
-                total_importe += monto_pagado_mod
+                row = await _build_row(
+                    estudiante, enr, i, mod.nombre, f"Módulo {i}", docente_mod_nombre,
+                    monto_pagado_mod, costo_total, fecha, boleta,
+                    beca_nombre, beca_pct_total, beca_tiene
+                )
+                rows.append(row)
+                total_importe += row["importe"]
+                total_pendiente += row["monto_pendiente"]
         else:
-            # Módulo específico: 1 solo registro por estudiante si pagó
-            # Calcular monto pagado del módulo
+            # Módulo específico: 1 solo registro por estudiante (pagado O pendiente)
             if modulo_index == 0:
-                monto_pagado = float(enr.costo_matricula or 0) - float(getattr(enr, 'saldo_pendiente_matricula', 0) or 0)
-                # Más fiable: usar la suma de pagos de concepto "Matrícula"
+                # Matrícula: sumar pagos con concepto "Matrícula"
                 pagos_mat = await Payment.find(
                     Payment.inscripcion_id == enr.id,
                     Payment.estado_pago == EstadoPago.APROBADO,
                     {"concepto": {"$regex": "Matrícula", "$options": "i"}}
                 ).to_list()
                 monto_pagado = sum(p.cantidad_pago for p in pagos_mat)
+                costo_total = _costo_modulo(0)
             else:
                 mod_estado = enr.modulos[modulo_index - 1] if modulo_index - 1 < len(enr.modulos) else None
                 monto_pagado = float(mod_estado.monto_pagado) if mod_estado else 0.0
+                costo_total = _costo_modulo(modulo_index)
 
-            if monto_pagado <= 0:
-                continue
-
-            # Fecha del último pago aprobado
+            # Fecha del último pago aprobado (puede ser null si no pagó)
             pagos_aprobados = await Payment.find(
                 Payment.inscripcion_id == enr.id,
                 Payment.estado_pago == EstadoPago.APROBADO
             ).sort("-fecha_comprobante").to_list()
-            fecha = pagos_aprobados[0].fecha_comprobante if pagos_aprobados and pagos_aprobados[0].fecha_comprobante else (pagos_aprobados[0].fecha_subida if pagos_aprobados else None)
-            boleta = pagos_aprobados[0].numero_transaccion if pagos_aprobados else None
+            fecha = None
+            boleta = None
+            if pagos_aprobados:
+                p = pagos_aprobados[0]
+                fecha = p.fecha_comprobante or p.fecha_subida
+                boleta = p.numero_transaccion
 
-            rows.append({
-                "estudiante_id": str(estudiante.id),
-                "registro": estudiante.registro,
-                "nombre": nombre,
-                "ci": ci,
-                "modulo_index": modulo_index,
-                "modulo_nombre": (curso.modulos[modulo_index - 1].nombre if modulo_index <= len(curso.modulos) else ""),
-                "modulo_label": modulo_label,
-                "docente": docente_nombre,
-                "fecha_pago": fecha.isoformat() if fecha else None,
-                "numero_boleta": boleta or "S/N",
-                "importe": round(monto_pagado, 2),
-                "costo_original_modulo": costo_original,
-                "beca": beca_nombre,
-                "beca_porcentaje": round(beca_pct_total, 1) if beca_tiene else 0.0,
-            })
-            total_importe += monto_pagado
+            mod_nombre = ""
+            if modulo_index <= len(curso.modulos or []):
+                mod_nombre = curso.modulos[modulo_index - 1].nombre
 
-    # Ordenar por nombre
-    rows.sort(key=lambda r: r["nombre"])
+            row = await _build_row(
+                estudiante, enr, modulo_index, mod_nombre, modulo_label, docente_nombre,
+                monto_pagado, costo_total, fecha, boleta,
+                beca_nombre, beca_pct_total, beca_tiene
+            )
+            rows.append(row)
+            total_importe += row["importe"]
+            total_pendiente += row["monto_pendiente"]
+
+    # F-075-FIX-8: ordenar 2 grupos (PAGADOS primero alfabético, luego PENDIENTES alfabético)
+    # Dentro de PAGADO, los PARCIALES van al final del grupo PAGADO.
+    def _sort_key(r):
+        # Grupo 0 = PAGADO, Grupo 1 = PARCIAL, Grupo 2 = PENDIENTE
+        grupo = {"PAGADO": 0, "PARCIAL": 1, "PENDIENTE": 2}.get(r["estado_pago"], 3)
+        return (grupo, r["nombre"])
+    rows.sort(key=_sort_key)
 
     # 8) Calcular período (rango de fechas de los pagos del módulo)
     periodo_label = ""
@@ -1911,13 +1937,13 @@ async def generar_lista_habilitados(
         },
         "rows": rows,
         "total_importe": round(total_importe, 2),
+        "total_pendiente": round(total_pendiente, 2),
         "total_estudiantes": len(rows),
     }
 
 
 async def get_reporte_caja(
     fecha_desde_dt: datetime,
-    fecha_hasta_dt: datetime,
     page: int = 1,
     per_page: int = 20,
     curso_id: Optional[PydanticObjectId] = None,

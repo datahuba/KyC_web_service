@@ -133,8 +133,8 @@ async def test_generar_lista_habilitados_estructura_response():
 
 
 @pytest.mark.asyncio
-async def test_generar_lista_habilitados_excluye_sin_pago():
-    """Estudiantes sin pago aprobado NO aparecen en la lista."""
+async def test_generar_lista_habilitados_incluye_todos():
+    """F-075-FIX-8: TODOS los estudiantes aparecen, pagados Y no pagados."""
     curso_id = ObjectId()
     est1_id = ObjectId()  # este pagó
     est2_id = ObjectId()  # este NO pagó
@@ -155,14 +155,35 @@ async def test_generar_lista_habilitados_excluye_sin_pago():
         MockEnrollment.find = MagicMock()
         MockEnrollment.find.return_value.to_list = AsyncMock(return_value=[enr1, enr2])
         MockStudent.get = AsyncMock(side_effect=lambda id: s1 if id == est1_id else s2)
+        # Pago1 pertenece a enr1 (PAGÓ), enr2 (NO PAGÓ) no tiene pagos
         MockPayment.find = MagicMock()
         MockPayment.find.return_value.sort = MagicMock()
-        MockPayment.find.return_value.sort.return_value.to_list = AsyncMock(return_value=[pago1])
+        MockPayment.find.return_value.sort.return_value.to_list = AsyncMock(side_effect=[
+            [pago1],  # pago del PAGÓ
+            [],        # NO PAGÓ no tiene pagos
+        ])
 
         result = await payment_service.generar_lista_habilitados(curso_id=curso_id, modulo_index=1)
 
-    assert result["total_estudiantes"] == 1
-    assert result["rows"][0]["nombre"] == "PAGÓ"
+    # Ambos estudiantes deben aparecer
+    assert result["total_estudiantes"] == 2
+    nombres = [r["nombre"] for r in result["rows"]]
+    assert "PAGÓ" in nombres
+    assert "NO PAGÓ" in nombres
+
+    # El pagador debe tener estado PAGADO e importe > 0
+    row_pagado = next(r for r in result["rows"] if r["nombre"] == "PAGÓ")
+    assert row_pagado["estado_pago"] == "PAGADO"
+    assert row_pagado["importe"] == 588.0
+    assert row_pagado["monto_pendiente"] == 0.0
+
+    # El no-pagador debe tener estado PENDIENTE, importe=0 y monto_pendiente=costo
+    row_pendiente = next(r for r in result["rows"] if r["nombre"] == "NO PAGÓ")
+    assert row_pendiente["estado_pago"] == "PENDIENTE"
+    assert row_pendiente["importe"] == 0.0
+    assert row_pendiente["monto_pendiente"] == 588.0
+    assert row_pendiente["fecha_pago"] is None
+    assert row_pendiente["numero_boleta"] == ""
 
 
 @pytest.mark.asyncio
@@ -210,13 +231,14 @@ async def test_generar_lista_habilitados_con_beca():
 
 @pytest.mark.asyncio
 async def test_generar_lista_habilitados_modulo_none_genera_registro_por_modulo():
-    """Si modulo_index=None, se genera UN registro por cada módulo pagado."""
+    """Si modulo_index=None, se genera UN registro por CADA modulo (pagado o no)."""
     curso_id = ObjectId()
     est_id = ObjectId()
     curso = _make_course(curso_id, n_modulos=5)
+    # Pago M1 y M2, pendiente M3-M5
     enrollment = _make_enrollment(
         est_id, curso_id,
-        modulos_pagados=(588.0, 588.0, 0, 0, 0)  # pagó M1 y M2
+        modulos_pagados=(588.0, 588.0, 0, 0, 0)
     )
     student = _make_student(est_id)
     pago1 = _make_payment(cantidad=588.0, fecha=datetime(2026, 7, 10), trans="BOL1")
@@ -238,13 +260,20 @@ async def test_generar_lista_habilitados_modulo_none_genera_registro_por_modulo(
 
         result = await payment_service.generar_lista_habilitados(curso_id=curso_id, modulo_index=None)
 
-    # El estudiante pagó M1 y M2, debe aparecer DOS veces (una por módulo)
-    assert result["total_estudiantes"] == 2
+    # El estudiante aparece 5 veces (1 por cada módulo)
+    assert result["total_estudiantes"] == 5
     modulos = [r["modulo_index"] for r in result["rows"]]
-    assert 1 in modulos
-    assert 2 in modulos
-    # Total = 588 + 588
+    assert sorted(modulos) == [1, 2, 3, 4, 5]
+    # M1 y M2 pagados
+    rows_m1_m2 = [r for r in result["rows"] if r["modulo_index"] in (1, 2)]
+    assert all(r["estado_pago"] == "PAGADO" for r in rows_m1_m2)
+    # M3-M5 pendientes
+    rows_m3_m5 = [r for r in result["rows"] if r["modulo_index"] in (3, 4, 5)]
+    assert all(r["estado_pago"] == "PENDIENTE" for r in rows_m3_m5)
+    # Total importe = 588 + 588 = 1176
     assert result["total_importe"] == 1176.0
+    # Total pendiente = 588 * 3 = 1764
+    assert result["total_pendiente"] == 1764.0
 
 
 @pytest.mark.asyncio
