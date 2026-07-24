@@ -1653,7 +1653,9 @@ def _construir_filtro_reporte_caja(
 
 
 # =============================================================================
-# F-075 (2026-07-23): LISTA DE POSTGRADUANTES HABILITADOS
+# F-075 (2026-07-23): INFORME ECONOMICO (antes "Lista de Postgraduantes Habilitados")
+# F-079 (2026-07-24): Kevin pidio cambiar el titulo del documento a
+# "INFORME ECONOMICO" (mas corto y claro). Aplica a JSON, XLSX y PDF.
 # =============================================================================
 async def generar_lista_habilitados(
     curso_id: PydanticObjectId,
@@ -1960,7 +1962,11 @@ async def generar_lista_habilitados(
             "tipo_label": tipo_label,
         },
         "encabezado": {
-            "titulo": "LISTA DE POSTGRADUANTES HABILITADOS",
+            # F-079 (2026-07-24): Kevin pidio cambiar el titulo del documento.
+            # Antes era "LISTA DE POSTGRADUANTES HABILITADOS", ahora es
+            # "INFORME ECONOMICO" (mas corto, mas claro, aplica a los 3
+            # formatos: JSON para el frontend, XLSX y PDF).
+            "titulo": "INFORME ECONOMICO",
             "programa_tipo": tipo_label,
             "programa_nombre": curso.nombre_programa,
             "modulo": modulo_label,

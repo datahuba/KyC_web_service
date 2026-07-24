@@ -144,7 +144,7 @@ async def test_generar_lista_habilitados_estructura_response():
     assert "rows" in result
     assert "total_importe" in result
     assert "total_estudiantes" in result
-    assert result["encabezado"]["titulo"] == "LISTA DE POSTGRADUANTES HABILITADOS"
+    assert result["encabezado"]["titulo"] == "INFORME ECONOMICO"
     assert result["curso"]["codigo"] == "DIPL-IA-2026"
     assert result["total_estudiantes"] == 1
     assert result["total_importe"] == 294.0
