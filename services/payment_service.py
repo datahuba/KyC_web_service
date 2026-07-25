@@ -579,9 +579,45 @@ async def create_payment(
     await payment.insert()
 
     if not auto_approve:
-        # Si NO se auto-aprueba, retornamos ya — los efectos colaterales
-        # (actualizar saldo, auditoría APROBACION) se ejecutan cuando
-        # el coord. financiero apruebe el pago explícitamente.
+        # Si NO se auto-aprueba, notificar a los revisores (Cobranza, CPD, Admin, Superadmin, Encargados)
+        # para que revisen y aprueben el comprobante. Los efectos colaterales (saldo, auditoría)
+        # se ejecutarán cuando staff apruebe el pago explícitamente.
+        try:
+            from services.notification_service import create_notification
+            from beanie.operators import Or as _Or
+            from models.user import User, UserRole
+            from models.student import Student
+
+            _est = await Student.get(payment.estudiante_id)
+            nombre_est = (_est.nombre or _est.registro) if _est else "Un estudiante"
+
+            revisores = await User.find(
+                User.activo == True,
+                _Or(
+                    User.rol == UserRole.COBRANZA,
+                    User.rol == UserRole.CPD,
+                    User.rol == UserRole.ADMIN,
+                    User.rol == UserRole.SUPERADMIN,
+                    User.rol == UserRole.ENCARGADO_CURSO
+                )
+            ).to_list()
+
+            for revisor in revisores:
+                if revisor.rol == UserRole.ENCARGADO_CURSO and payment.curso_id not in revisor.cursos_asignados:
+                    continue
+                await create_notification(
+                    destinatario_id=revisor.id,
+                    tipo_destinatario="user",
+                    titulo="Nuevo Pago Pendiente de Revisión",
+                    mensaje=f"{nombre_est} subió un comprobante de pago por Bs. {payment.cantidad_pago} ('{payment.concepto}') y espera tu aprobación.",
+                    tipo_alerta="info",
+                    ruta="/app/payments",
+                    referencia_tipo="payment",
+                    referencia_id=payment.id
+                )
+        except Exception as e:
+            print(f"Error notificando nuevo pago pendiente: {str(e)}")
+
         return payment
 
     # ========================================================================

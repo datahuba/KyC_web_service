@@ -129,7 +129,8 @@ async def create_payment(
         
         payment = await payment_service.create_payment(
             payment_in=payment_in,
-            student_id=current_user.id
+            student_id=current_user.id,
+            auto_approve=False
         )
         
         return await payment_service.enrich_payment_with_details(payment)
