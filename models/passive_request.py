@@ -45,6 +45,19 @@ class PassiveRequest(MongoBaseModel):
     revisado_por: Optional[str] = Field(None, description="Username del CPD que revisó la solicitud")
     fecha_revision: Optional[datetime] = Field(None, description="Fecha de aprobación/rechazo")
 
+    # F-061 (2026-07-23, regla de Kevin): auditoría de la ventana de gracia.
+    # `dias_desde_inscripcion_al_solicitar` se congela al momento de crear la
+    # solicitud, así si después cambian los settings la auditoría no se pierde.
+    # `multa_aplicada_bs` indica el monto que el estudiante deberá pagar al
+    # reactivarse (0 si está dentro de la ventana de gracia).
+    dias_desde_inscripcion_al_solicitar: Optional[int] = Field(
+        None, description="F-061: días entre fecha_inscripcion y la solicitud (snapshot)"
+    )
+    multa_aplicada_bs: Optional[float] = Field(
+        None, ge=0,
+        description="F-061: multa de reincorporación aplicada al aprobar (0 si está en ventana de gracia)"
+    )
+
     class Settings:
         name = "passive_requests"
         # AUDITORÍA (MEDIO): use_revision protege contra pisadas de la MISMA

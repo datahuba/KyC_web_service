@@ -118,9 +118,100 @@ app.add_middleware(
 # las excepciones no manejadas, pero este handler las registra con un
 # mensaje consistente en logs del servidor también, y devuelve un 500
 # genérico al cliente (sin filtrar detalles internos).
+# F-044 (2026-07-22): Además de loggear, persistir el error en MongoDB
+# (colección error_logs con TTL 7 días) para que admin/superadmin pueda
+# verlos en /app/admin/errors sin tener que revisar logs del contenedor.
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+
+async def _persist_error_log(request: Request, exc: Exception, status_code: int = 500):
+    """F-044: persiste el error en MongoDB para el visor de admin.
+
+    Falla silenciosamente si no puede persistir (no debe romper la respuesta
+    al cliente). Captura todos los errores HTTP >= 400 (4xx y 5xx).
+    """
+    if status_code < 400:
+        return
+
+    try:
+        import traceback
+        import json
+        from models.error_log import ErrorLog
+        from models.user import User
+        from models.student import Student
+        from beanie import PydanticObjectId
+
+        # Extraer info del usuario desde el state del request
+        user_id = None
+        user_type = None
+        user_email = None
+        try:
+            current_user = getattr(request.state, "user", None)
+            if current_user is not None:
+                if isinstance(current_user, User):
+                    user_id = current_user.id
+                    user_type = "user"
+                    user_email = current_user.email
+                elif isinstance(current_user, Student):
+                    user_id = current_user.id
+                    user_type = "student"
+                    user_email = getattr(current_user, "email", None)
+        except Exception:
+            pass
+
+        # Serializar el body de forma segura (puede ser bytes o None)
+        request_body = None
+        try:
+            body_bytes = await request.body()
+            if body_bytes:
+                # Truncar a 2000 chars para no inflar la BD
+                body_text = body_bytes.decode("utf-8", errors="replace")[:2000]
+                request_body = body_text
+        except Exception:
+            pass
+
+        msg_detail = getattr(exc, "detail", str(exc))
+        error_log = ErrorLog(
+            path=str(request.url.path),
+            method=request.method,
+            status_code=status_code,
+            error_type=type(exc).__name__,
+            message=str(msg_detail)[:1000],
+            stack_trace=traceback.format_exc()[:10000],
+            user_id=user_id,
+            user_type=user_type,
+            user_email=user_email,
+            request_body=request_body,
+            query_params=str(request.url.query)[:500] if request.url.query else None,
+            environment=settings.SENTRY_ENVIRONMENT or "production",
+        )
+        await error_log.insert()
+    except Exception as persist_error:
+        # Si falla la persistencia, solo loggear (no romper la respuesta)
+        logger.error(f"[F-044] No se pudo persistir error log: {persist_error}")
+
+
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    if exc.status_code >= 400:
+        await _persist_error_log(request, exc, status_code=exc.status_code)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers=getattr(exc, "headers", None)
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    await _persist_error_log(request, exc, status_code=422)
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+    )
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -130,6 +221,8 @@ async def global_exception_handler(request: Request, exc: Exception):
         f"[500] {request.method} {request.url.path}: {type(exc).__name__}: {exc}\n"
         f"{traceback.format_exc()}"
     )
+    # F-044: persistir en BD para el visor de admin (no bloquea la respuesta)
+    await _persist_error_log(request, exc, status_code=500)
     return JSONResponse(
         status_code=500,
         content={"detail": "Error interno del servidor. El equipo técnico ha sido notificado."},

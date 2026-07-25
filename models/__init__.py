@@ -38,12 +38,13 @@ from .discount import Discount
 from .title import Title
 from .user import User
 from .requisito import Requisito, RequisitoTemplate  # Nuevo
+from .error_log import ErrorLog  # F-044 (2026-07-22)
 
 __all__ = [
     # Base
     "MongoBaseModel",
     "PyObjectId",
-    
+
     # Enums
     "TipoCurso",
     "Modalidad",
@@ -53,7 +54,7 @@ __all__ = [
     "TipoTitulo",
     "EstadoRequisito",  # Nuevo
     "UserRole",
-    
+
     # Models
     "Student",
     "Course",
@@ -63,7 +64,8 @@ __all__ = [
     "Discount",
     "Title",
     "User",
-    
+    "ErrorLog",  # F-044
+
     # Embedded Models
     "Requisito",          # Nuevo
     "RequisitoTemplate",  # Nuevo

@@ -21,6 +21,12 @@ from schemas.enrollment import EnrollmentCreate
 from beanie import PydanticObjectId
 from models.discount import Discount
 from beanie.operators import In, Or
+# F-046 FIX: helpers de tiempo estaban solo importados localmente en
+# enrich_enrollment_dates; al refactorizar core/timezone_utils se rompió
+# el uso en 9 funciones (subir_nota_borrador, actualizar_saldo_enrollment,
+# cambiar_estado_inscripcion, eximir_matricula, rechazar_nota_borrador).
+# El síntoma fue 500 al calificar módulo (Sandra, audio 22/7 19:12).
+from core.timezone_utils import utcnow_naive
 
 async def create_enrollment(
     enrollment_in: EnrollmentCreate,
@@ -463,8 +469,16 @@ async def actualizar_saldo_enrollment(
     pagos_aprobados: Optional[list] = None
 ):
     """
-    Reconstruye el saldo de la inscripción sumando todos los pagos históricos aprobados.
-    Distribuye los fondos en cascada (Waterfall) reparando cualquier inconsistencia de base de datos.
+    Reconstruye el saldo de la inscripción sumando todos los pagos históricos aprobados
+    menos los anulados. Distribuye los fondos aprobados en cascada (Waterfall) reparando
+    cualquier inconsistencia de base de datos.
+
+    F-COBRANZA-014 (2026-07-21): ahora descuenta los pagos ANULADOS del `total_pagado`
+    y `saldo_pendiente`. Antes, esos campos reflejaban solo la suma de aprobados,
+    dejando un desfase de 3,534 BOB en producción que Joel detectó. La distribución
+    de módulos (waterfall) sigue basándose en aprobados, ya que los módulos
+    representan el estado ACADÉMICO histórico (un módulo que se pagó y luego se
+    anuló queda en "Pagado" hasta que se reinscribe o se vuelve a pagar).
 
     OPTIMIZACIÓN DE IMPORTACIÓN MASIVA (2026-07-09, ISSUE-Q-IMPORT-TIMEOUT):
     `enrollment`/`pagos_aprobados` permiten pasar el documento y los pagos ya
@@ -487,8 +501,21 @@ async def actualizar_saldo_enrollment(
             Payment.estado_pago == EstadoPago.APROBADO
         ).to_list()
 
-    dinero_historico_total = sum(p.cantidad_pago for p in pagos_aprobados)
-    tanque_de_agua = round(dinero_historico_total, 2)
+    # F-COBRANZA-014: también recolectar los anulados para descontarlos del total.
+    # Sin esto, `total_pagado` quedaba inflado y el reporte de caja no cuadraba
+    # con el extracto bancario.
+    pagos_anulados = await Payment.find(
+        Payment.inscripcion_id == enrollment_id,
+        Payment.estado_pago == EstadoPago.ANULADO
+    ).to_list()
+
+    dinero_aprobado_bruto = sum(p.cantidad_pago for p in pagos_aprobados)
+    dinero_anulado = sum(p.cantidad_pago for p in pagos_anulados)
+    # NETO = lo que realmente cuenta para "total_pagado" del enrollment y para
+    # los reportes de caja. El waterfall usa `dinero_aprobado_bruto` (estado
+    # histórico académico de los módulos).
+    dinero_neto_pagado = round(dinero_aprobado_bruto - dinero_anulado, 2)
+    tanque_de_agua = round(dinero_aprobado_bruto, 2)  # waterfall con aprobados
 
     # 2. Reiniciar los contadores de la inscripción a cero para reconstruirlos
     enrollment.matricula_pagada = False
@@ -500,7 +527,7 @@ async def actualizar_saldo_enrollment(
     if tanque_de_agua >= enrollment.costo_matricula:
         tanque_de_agua = round(tanque_de_agua - enrollment.costo_matricula, 2)
         enrollment.matricula_pagada = True
-        
+
         # REGLA DE NEGOCIO UAGRM: Al pagar matrícula, el alumno pasa a ser "Activo"
         if enrollment.estado == EstadoInscripcion.PENDIENTE_PAGO:
             enrollment.estado = EstadoInscripcion.ACTIVO
@@ -516,7 +543,7 @@ async def actualizar_saldo_enrollment(
                 break # Se acabó el dinero
 
             costo_modulo = round(mod.costo, 2)
-            
+
             if tanque_de_agua >= costo_modulo:
                 # El dinero cubre este módulo completamente
                 mod.monto_pagado = costo_modulo
@@ -529,8 +556,11 @@ async def actualizar_saldo_enrollment(
                 tanque_de_agua = 0.0
 
     # 5. Actualizar los totales globales (Total Pagado y Saldo Pendiente)
-    enrollment.total_pagado = round(dinero_historico_total, 2)
-    enrollment.saldo_pendiente = max(0.0, round(enrollment.total_a_pagar - dinero_historico_total, 2))
+    # F-COBRANZA-014: usar el NETO (aprobados - anulados) en vez del bruto.
+    # Antes: enrollment.total_pagado = round(dinero_aprobado_bruto, 2) → inflaba
+    # el contador y descuadraba el reporte de caja.
+    enrollment.total_pagado = dinero_neto_pagado
+    enrollment.saldo_pendiente = max(0.0, round(enrollment.total_a_pagar - dinero_neto_pagado, 2))
     
     # 6. Evolución a "Completado" si la deuda llegó a cero
     if enrollment.esta_completamente_pagado() and enrollment.matricula_pagada:
@@ -786,6 +816,11 @@ async def rechazar_nota_borrador(
     """
     CPD rechaza el borrador propuesto por el docente. No toca la nota oficial
     (que puede mantener un valor validado previamente, si existía).
+
+    F-050 (2026-07-22, audios viejos): antes NO recalculaba `nota_final`
+    (promedio) tras rechazar, así que el promedio podía seguir sumando el
+    borrador rechazado. Fix: recalcular SIEMPRE el promedio, igual que
+    `validar_nota_borrador` y `actualizar_nota_modulo`.
     """
     enrollment = await Enrollment.get(enrollment_id)
     if not enrollment:
@@ -799,6 +834,18 @@ async def rechazar_nota_borrador(
 
     modulo.nota_borrador = None
     modulo.estado_validacion_nota = "sin_borrador"
+
+    # F-050 FIX: recalcular el promedio igual que en actualizar_nota_modulo
+    # y validar_nota_borrador. Sin esto, el promedio podía seguir sumando
+    # la nota rechazada en alguna vista de UI / reportes.
+    notas_evaluadas = [m.nota for m in enrollment.modulos if m.nota is not None]
+    if notas_evaluadas:
+        promedio = sum(notas_evaluadas) / len(notas_evaluadas)
+        enrollment.nota_final = round(promedio, 2)
+    else:
+        # Sin notas válidas, no hay promedio. Mantener como None.
+        enrollment.nota_final = None
+
     enrollment.updated_at = utcnow_naive()
     await enrollment.save()
     return enrollment

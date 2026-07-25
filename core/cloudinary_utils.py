@@ -5,6 +5,7 @@ Utilidades para subir archivos a Cloudinary
 Funciones para subir y gestionar archivos en Cloudinary.
 """
 
+import os
 import cloudinary
 import cloudinary.uploader
 from fastapi import UploadFile, HTTPException
@@ -20,6 +21,35 @@ cloudinary.config(
 )
 
 
+def _normalizar_public_id(file: UploadFile, public_id: Optional[str]) -> Optional[str]:
+    """Asegura que el public_id contenga la extensión adecuada del archivo (.pdf, .jpg, .png, .webp).
+    Esto evita que Cloudinary genere URLs de archivos sin extensión al ser descargados en Windows/Mac."""
+    if not public_id:
+        return public_id
+    
+    ext = ""
+    filename = file.filename or ""
+    if "." in filename:
+        candidate = os.path.splitext(filename)[1].lower()
+        if candidate in [".pdf", ".jpg", ".jpeg", ".png", ".webp", ".doc", ".docx"]:
+            ext = candidate
+
+    if not ext:
+        ctype = (file.content_type or "").lower()
+        if "pdf" in ctype:
+            ext = ".pdf"
+        elif "jpeg" in ctype or "jpg" in ctype:
+            ext = ".jpg"
+        elif "png" in ctype:
+            ext = ".png"
+        elif "webp" in ctype:
+            ext = ".webp"
+
+    if ext and not public_id.lower().endswith(ext):
+        return f"{public_id}{ext}"
+    return public_id
+
+
 async def upload_pdf(
     file: UploadFile,
     folder: str,
@@ -31,13 +61,10 @@ async def upload_pdf(
     Args:
         file: Archivo a subir
         folder: Carpeta en Cloudinary (ej: "students/cv")
-        public_id: ID público (nombre del archivo sin extensión)
+        public_id: ID público (nombre del archivo)
         
     Returns:
-        URL del archivo subido
-        
-    Raises:
-        HTTPException: Si el archivo no es PDF o hay error al subir
+        URL del archivo subido con extensión .pdf
     """
     # Validar que sea PDF
     if not file.content_type == "application/pdf":
@@ -58,16 +85,20 @@ async def upload_pdf(
         )
     
     try:
+        final_public_id = _normalizar_public_id(file, public_id)
         # Subir a Cloudinary
         result = cloudinary.uploader.upload(
             file.file,
             folder=folder,
-            public_id=public_id,
+            public_id=final_public_id,
             resource_type="raw",  # Para PDFs
             overwrite=True
         )
         
-        return result["secure_url"]
+        secure_url = result["secure_url"]
+        if not secure_url.lower().endswith(".pdf"):
+            secure_url = f"{secure_url}.pdf"
+        return secure_url
     
     except Exception as e:
         raise HTTPException(
@@ -115,11 +146,12 @@ async def upload_image(
         )
     
     try:
+        final_public_id = _normalizar_public_id(file, public_id)
         # Subir a Cloudinary con transformaciones
         result = cloudinary.uploader.upload(
             file.file,
             folder=folder,
-            public_id=public_id,
+            public_id=final_public_id,
             resource_type="image",
             overwrite=True,
             transformation=[
@@ -194,20 +226,27 @@ async def upload_document(
 
         file_content = await file.read()
         loop = asyncio.get_event_loop()
+        final_public_id = _normalizar_public_id(file, public_id)
 
         result = await loop.run_in_executor(
             None,
             lambda: cloudinary.uploader.upload(
                 file_content,
                 folder=folder,
-                public_id=public_id,
+                public_id=final_public_id,
                 resource_type=resource_type,
                 overwrite=True,
             ),
         )
 
+        url = result["secure_url"]
+        if resource_type == "raw" and not any(url.lower().endswith(ext) for ext in [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"]):
+            ext = os.path.splitext(file.filename or "")[1].lower() or (".pdf" if content_type == "application/pdf" else "")
+            if ext and not url.endswith(ext):
+                url = f"{url}{ext}"
+
         return {
-            "url": result["secure_url"],
+            "url": url,
             "public_id": result["public_id"],
             "resource_type": resource_type,
             "mime_type": content_type,

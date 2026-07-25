@@ -28,6 +28,8 @@ from models.bank_statement_entry import BankStatementEntry
 from models.enrollment_request import EnrollmentRequest
 # ISSUE-Q-PRE-REGISTRO-FORM (2026-07-17): formularios dinámicos de pre-inscripción.
 from models.pre_registration import PreRegistrationForm, PreRegistration
+# F-044 (2026-07-22): log de errores 500 con TTL 7 días.
+from models.error_log import ErrorLog
 
 
 async def _sanitize_legacy_database(db):
@@ -194,6 +196,8 @@ async def init_db():
             ClassroomMaterial,
             Assignment,
             Submission,
+            # F-044 (2026-07-22)
+            ErrorLog,
         ]
     )
     print(f"[OK] Conectado a MongoDB ({settings.DATABASE_NAME}) y Beanie inicializado con Connection Pool optimizado.")
