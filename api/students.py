@@ -351,18 +351,17 @@ async def upload_student_titulo(
     *, id: PydanticObjectId, file: UploadFile, titulo: str = Form(...), numero_titulo: str = Form(...),
     año_expedicion: str = Form(...), universidad: str = Form(...), current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
-    from core.cloudinary_utils import upload_pdf
     student = await student_service.get_student(id=id)
     if not student: raise HTTPException(404, "Estudiante no encontrado")
     if isinstance(current_user, Student) and current_user.id != id: raise HTTPException(403, "No tienes permiso")
     
     folder = f"students/{id}/titulo"
     public_id = f"titulo_{id}"
-    titulo_url = await upload_pdf(file, folder, public_id)
+    titulo_url = await _subir_documento_estudiante(file, folder, public_id)
     
     student.titulo = {
         "titulo": titulo, "numero_titulo": numero_titulo, "año_expedicion": año_expedicion,
-        "universidad": universidad, "estado": "pendiente", "url": titulo_url, "motivo_rechazo": None
+        "universidad": universidad, "estado": "pendiente", "titulo_url": titulo_url, "url": titulo_url, "motivo_rechazo": None
     }
     await student.save()
 

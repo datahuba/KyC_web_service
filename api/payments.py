@@ -7,7 +7,7 @@ Endpoints para gestionar pagos de estudiantes, incluyendo
 rollback financiero y control de Caja/Bancos.
 """
 
-from typing import List, Any, Optional
+from typing import List, Any, Optional, Union
 import asyncio
 import re
 from datetime import datetime
@@ -64,24 +64,20 @@ async def create_payment(
     # metodos, incluyendo Caja.
     file: UploadFile = File(..., description="Comprobante obligatorio (imagen o PDF)"),
 
-    current_user: Student = Depends(get_current_user)
+    current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
     """
     Registrar un nuevo pago.
     Soporta pagos digitales (exige voucher/número) y pagos físicos (Caja).
-    F-COBRANZA-026: el comprobante es OBLIGATORIO para todos los metodos.
+    - Si lo sube un Estudiante: entra obligatoriamente como PENDIENTE.
+    - Si lo registra un Perfil Autorizado (User/Staff): se AUTO-VALIDA de inmediato.
     """
     from core.cloudinary_utils import upload_image, upload_pdf
     from schemas.payment import PaymentCreate
 
-    if not isinstance(current_user, Student):
-        raise HTTPException(
-            status_code=403,
-            detail="Solo los estudiantes pueden subir comprobantes de pago"
-        )
+    is_staff = isinstance(current_user, User)
 
     # 1. Validaciones rígidas según el Método de Pago
-    # F-COBRANZA-026: el comprobante es obligatorio SIEMPRE (no opcional para Caja)
     if not file:
         raise HTTPException(status_code=400, detail="El comprobante es obligatorio (imagen o PDF) para todos los métodos de pago.")
     if metodo_pago != "Caja":
@@ -93,9 +89,10 @@ async def create_payment(
     comprobante_url = None
     
     try:
-        # 2. Subida de Archivo a la Nube (si existe)
+        # 2. Subida de Archivo a la Nube
+        student_id_for_folder = current_user.id if not is_staff else "staff_upload"
         if file:
-            folder = f"payments/{current_user.id}"
+            folder = f"payments/{student_id_for_folder}"
             safe_transaction = (numero_transaccion or "caja_pago").replace(' ', '_').replace('/', '_')
             public_id = f"voucher_{safe_transaction}"
             
@@ -118,7 +115,7 @@ async def create_payment(
             metodo_pago=metodo_pago,
             monto_comprobante=monto_comprobante,
             concepto=concepto,
-            cantidad_pago=monto_comprobante, # Aseguramos que la cantidad refleje el monto
+            cantidad_pago=monto_comprobante,
             numero_transaccion=numero_transaccion,
             remitente=remitente,
             banco=banco,
@@ -127,11 +124,29 @@ async def create_payment(
             comprobante_url=comprobante_url
         )
         
-        payment = await payment_service.create_payment(
-            payment_in=payment_in,
-            student_id=current_user.id,
-            auto_approve=False
-        )
+        if is_staff:
+            # Obtener el student_id desde la inscripción
+            from models.enrollment import Enrollment
+            from beanie import PydanticObjectId as _POI
+            enr_oid = _POI(inscripcion_id) if not isinstance(inscripcion_id, _POI) else inscripcion_id
+            enrollment_obj = await Enrollment.get(enr_oid)
+            if not enrollment_obj:
+                raise HTTPException(status_code=404, detail="Inscripción no encontrada.")
+            target_student_id = enrollment_obj.estudiante_id
+            
+            payment = await payment_service.create_payment(
+                payment_in=payment_in,
+                student_id=target_student_id,
+                auto_approve=True,
+                approved_by=current_user.username,
+                skip_ownership_check=True
+            )
+        else:
+            payment = await payment_service.create_payment(
+                payment_in=payment_in,
+                student_id=current_user.id,
+                auto_approve=False
+            )
         
         return await payment_service.enrich_payment_with_details(payment)
 
