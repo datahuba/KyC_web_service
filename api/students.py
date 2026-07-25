@@ -315,7 +315,7 @@ async def upload_student_cv(*, id: PydanticObjectId, file: UploadFile, current_u
     
     cv_url = await _subir_documento_estudiante(file, f"students/{id}/cv", f"cv_{id}")
     student.cv_url = cv_url
-    student.cv_estado = "pendiente"
+    student.cv_estado = "verificado"
     student.cv_motivo_rechazo = None
     await student.save()
     return student
@@ -328,7 +328,7 @@ async def upload_student_carnet(*, id: PydanticObjectId, file: UploadFile, curre
     
     carnet_url = await _subir_documento_estudiante(file, f"students/{id}/carnet", f"carnet_{id}")
     student.carnet_url = carnet_url
-    student.carnet_estado = "pendiente"
+    student.carnet_estado = "verificado"
     student.carnet_motivo_rechazo = None
     await student.save()
     return student
@@ -341,7 +341,7 @@ async def upload_student_afiliacion(*, id: PydanticObjectId, file: UploadFile, c
     
     afiliacion_url = await _subir_documento_estudiante(file, f"students/{id}/afiliacion", f"afiliacion_{id}")
     student.afiliacion_url = afiliacion_url
-    student.afiliacion_estado = "pendiente"
+    student.afiliacion_estado = "verificado"
     student.afiliacion_motivo_rechazo = None
     await student.save()
     return student
@@ -361,7 +361,7 @@ async def upload_student_titulo(
     
     student.titulo = {
         "titulo": titulo, "numero_titulo": numero_titulo, "año_expedicion": año_expedicion,
-        "universidad": universidad, "estado": "pendiente", "titulo_url": titulo_url, "url": titulo_url, "motivo_rechazo": None
+        "universidad": universidad, "estado": "verificado", "titulo_url": titulo_url, "url": titulo_url, "motivo_rechazo": None
     }
     await student.save()
 
