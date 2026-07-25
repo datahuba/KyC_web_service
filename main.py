@@ -129,10 +129,10 @@ async def _persist_error_log(request: Request, exc: Exception, status_code: int 
     """F-044: persiste el error en MongoDB para el visor de admin.
 
     Falla silenciosamente si no puede persistir (no debe romper la respuesta
-    al cliente). Solo captura errores 500+ (errores del servidor, no 4xx).
+    al cliente). Captura todos los errores HTTP >= 400 (4xx y 5xx).
     """
-    if status_code < 500:
-        return  # no capturar 4xx (son errores del cliente, no del servidor)
+    if status_code < 400:
+        return
 
     try:
         import traceback
@@ -171,12 +171,13 @@ async def _persist_error_log(request: Request, exc: Exception, status_code: int 
         except Exception:
             pass
 
+        msg_detail = getattr(exc, "detail", str(exc))
         error_log = ErrorLog(
             path=str(request.url.path),
             method=request.method,
             status_code=status_code,
             error_type=type(exc).__name__,
-            message=str(exc)[:1000],
+            message=str(msg_detail)[:1000],
             stack_trace=traceback.format_exc()[:10000],
             user_id=user_id,
             user_type=user_type,
@@ -190,6 +191,27 @@ async def _persist_error_log(request: Request, exc: Exception, status_code: int 
         # Si falla la persistencia, solo loggear (no romper la respuesta)
         logger.error(f"[F-044] No se pudo persistir error log: {persist_error}")
 
+
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    if exc.status_code >= 400:
+        await _persist_error_log(request, exc, status_code=exc.status_code)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers=getattr(exc, "headers", None)
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    await _persist_error_log(request, exc, status_code=422)
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+    )
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):

@@ -1,4 +1,4 @@
-﻿"""
+"""
 API de Inscripciones (Enrollments)
 ==================================
 
@@ -1259,6 +1259,44 @@ async def subir_formulario_inscripcion(
         enrollment.formulario_inscripcion_url = url
         enrollment.updated_at = utcnow_naive()
         await enrollment.save()
+
+        # Notificar a revisores (CPD, Admin, Superadmin y Encargado)
+        try:
+            from services.notification_service import create_notification
+            from beanie.operators import Or as _Or
+
+            if isinstance(current_user, Student):
+                nombre_est = current_user.nombre or current_user.registro
+            else:
+                _est = await Student.get(enrollment.estudiante_id)
+                nombre_est = (_est.nombre or _est.registro) if _est else "Un estudiante"
+
+            revisores = await User.find(
+                User.activo == True,
+                _Or(
+                    User.rol == UserRole.CPD,
+                    User.rol == UserRole.ADMIN,
+                    User.rol == UserRole.SUPERADMIN,
+                    User.rol == UserRole.ENCARGADO_CURSO
+                )
+            ).to_list()
+
+            for revisor in revisores:
+                if revisor.rol == UserRole.ENCARGADO_CURSO and enrollment.curso_id not in revisor.cursos_asignados:
+                    continue
+                await create_notification(
+                    destinatario_id=revisor.id,
+                    tipo_destinatario="user",
+                    titulo="Formulario de Inscripción por revisar",
+                    mensaje=f"{nombre_est} subió su Formulario de Inscripción y requiere tu revisión.",
+                    tipo_alerta="info",
+                    ruta="/app/enrollments",
+                    referencia_tipo="enrollment",
+                    referencia_id=enrollment.id
+                )
+        except Exception as e:
+            print(f"Error notificando formulario de inscripcion a revisores: {str(e)}")
+
         return await enrollment_service.enrich_enrollment_dates(enrollment)
     except HTTPException:
         raise

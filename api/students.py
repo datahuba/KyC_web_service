@@ -365,6 +365,44 @@ async def upload_student_titulo(
         "universidad": universidad, "estado": "pendiente", "url": titulo_url, "motivo_rechazo": None
     }
     await student.save()
+
+    # Notificar a revisores (CPD, Admin, Superadmin y Encargados)
+    try:
+        from services.notification_service import create_notification
+        from beanie.operators import Or as _Or
+        from models.enrollment import Enrollment
+
+        nombre_est = student.nombre or student.registro
+        enrollments = await Enrollment.find(Enrollment.estudiante_id == student.id).to_list()
+        curso_ids = [e.curso_id for e in enrollments]
+
+        revisores = await User.find(
+            User.activo == True,
+            _Or(
+                User.rol == UserRole.CPD,
+                User.rol == UserRole.ADMIN,
+                User.rol == UserRole.SUPERADMIN,
+                User.rol == UserRole.ENCARGADO_CURSO
+            )
+        ).to_list()
+
+        for revisor in revisores:
+            if revisor.rol == UserRole.ENCARGADO_CURSO:
+                if not any(c_id in revisor.cursos_asignados for c_id in curso_ids):
+                    continue
+            await create_notification(
+                destinatario_id=revisor.id,
+                tipo_destinatario="user",
+                titulo="Título Profesional por revisar",
+                mensaje=f"{nombre_est} subió su Título Profesional ('{titulo}') y requiere tu revisión.",
+                tipo_alerta="info",
+                ruta="/app/students",
+                referencia_tipo="student",
+                referencia_id=student.id
+            )
+    except Exception as e:
+        print(f"Error notificando subida de titulo a revisores: {str(e)}")
+
     return student
 
 @router.put("/{id}/titulo/verificar", response_model=StudentResponse)
