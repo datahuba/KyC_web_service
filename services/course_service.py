@@ -5,8 +5,9 @@ Servicio de Cursos
 Lógica de negocio para cursos (Funciones).
 """
 
+from datetime import datetime
 from typing import List, Optional, Dict, Any, Union
-from models.course import Course
+from models.course import Course, calcular_estado_actual
 from models.enrollment import Enrollment
 from models.student import Student
 from models.discount import Discount
@@ -39,11 +40,12 @@ async def get_courses(
     q: Optional[str] = None,
     activo: Optional[bool] = None,
     tipo_curso: Optional[TipoCurso] = None,
-    modalidad: Optional[Modalidad] = None
+    modalidad: Optional[Modalidad] = None,
+    estado: Optional[str] = None,
 ) -> tuple[List[Course], int]:
     """
     Obtiene múltiples cursos con paginación y filtros
-    
+
     Args:
         page: Número de página
         per_page: Elementos por página
@@ -51,9 +53,13 @@ async def get_courses(
         activo: Filtrar por estado activo/inactivo
         tipo_curso: Filtrar por tipo de curso
         modalidad: Filtrar por modalidad
+        estado: F-080 — filtrar por estado calculado del programa
+            (programado | en_ejecucion | cerrado). Como el estado se
+            calcula en runtime según fechas, se trae un set más amplio
+            y se filtra en memoria (es aceptable hasta ~500 cursos).
     """
     query = Course.find()
-    
+
     # 1. Búsqueda por texto (q)
     if q:
         regex_pattern = {"$regex": q, "$options": "i"}
@@ -63,22 +69,27 @@ async def get_courses(
                 Course.codigo == regex_pattern
             )
         )
-        
+
     # 2. Filtro Activo
     if activo is not None:
         query = query.find(Course.activo == activo)
-        
+
     # 3. Filtro Tipo Curso
     if tipo_curso:
         query = query.find(Course.tipo_curso == tipo_curso)
-        
+
     # 4. Filtro Modalidad
     if modalidad:
         query = query.find(Course.modalidad == modalidad)
-    
+
     total_count = await query.count()
     skip = (page - 1) * per_page
     courses = await query.sort("-created_at").skip(skip).limit(per_page).to_list()
+
+    # F-080: filtro en memoria por estado calculado
+    if estado:
+        courses = [c for c in courses if c.get_estado_actual() == estado]
+
     return courses, total_count
 
 async def create_course(course_in: CourseCreate) -> Course:
@@ -177,32 +188,32 @@ async def get_course_students(course_id: PydanticObjectId) -> List[CourseEnrolle
     """
     # 1. Obtener todas las inscripciones del curso
     enrollments = await Enrollment.find(Enrollment.curso_id == course_id).to_list()
-    
+
     if not enrollments:
         return []
-        
+
     # 2. Obtener IDs de estudiantes
     student_ids = [e.estudiante_id for e in enrollments]
-    
+
     # 3. Obtener estudiantes en una sola consulta (optimización)
     from beanie.operators import In
     students = await Student.find(In(Student.id, student_ids)).to_list()
     students_map = {s.id: s for s in students}
-    
+
     # 4. Construir reporte
     report = []
     for enrollment in enrollments:
         student = students_map.get(enrollment.estudiante_id)
         if not student:
             continue  # Skip si no se encuentra el estudiante (caso raro de inconsistencia)
-            
+
         # Calcular porcentaje de avance
         avance = 0.0
         if enrollment.total_a_pagar > 0:
             avance = (enrollment.total_pagado / enrollment.total_a_pagar) * 100
         elif enrollment.total_a_pagar == 0:
             avance = 100.0
-            
+
         # Crear objeto de reporte
         item = CourseEnrolledStudent(
             estudiante_id=student.id,
@@ -225,5 +236,137 @@ async def get_course_students(course_id: PydanticObjectId) -> List[CourseEnrolle
             }
         )
         report.append(item)
-        
+
     return report
+
+
+# ============================================================================
+# F-080: Calendario de programas + filtro para estudiantes
+# ============================================================================
+
+async def get_courses_para_calendario(
+    year: Optional[int] = None,
+    tipo_curso: Optional[TipoCurso] = None,
+    estado: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    F-080: devuelve todos los cursos formateados para mostrar en la vista
+    de calendario (Timeline o Lista Cronológica).
+
+    El estado se calcula en runtime (ver `Course.get_estado_actual`) y se
+    incluye en cada item.
+
+    Args:
+        year: filtrar por año de `fecha_inicio` (o `fecha_fin` si no
+            tiene inicio). Si no se pasa, devuelve todos.
+        tipo_curso: filtro opcional por tipo.
+        estado: filtro opcional por estado calculado.
+
+    Returns:
+        Lista de dicts con la metadata del programa + `estado_calculado`.
+    """
+    query = Course.find()
+    if tipo_curso:
+        query = query.find(Course.tipo_curso == tipo_curso)
+
+    courses = await query.to_list()
+
+    items: List[Dict[str, Any]] = []
+    for c in courses:
+        # Filtro por año: si tiene fecha_inicio usamos esa, sino fecha_fin
+        ref_date = c.fecha_inicio or c.fecha_fin
+        if year and ref_date and ref_date.year != year:
+            continue
+        if year and not ref_date:
+            # Sin fechas: solo incluir si el año es "todos" (no se pasó)
+            continue
+
+        estado_calculado = c.get_estado_actual()
+        if estado and estado_calculado != estado:
+            continue
+
+        items.append({
+            "id": str(c.id),
+            "codigo": c.codigo,
+            "nombre_programa": c.nombre_programa,
+            "tipo_curso": c.tipo_curso.value if hasattr(c.tipo_curso, "value") else c.tipo_curso,
+            "modalidad": c.modalidad.value if hasattr(c.modalidad, "value") else c.modalidad,
+            "fecha_inicio": c.fecha_inicio,
+            "fecha_fin": c.fecha_fin,
+            "estado_calculado": estado_calculado,
+            "estado_override": c.estado_override,
+            "resolucion_pdf_url": c.resolucion_pdf_url,
+            "activo": c.activo,
+            "costo_total_interno": c.costo_total_interno,
+            "matricula_interno": c.matricula_interno,
+            "cantidad_modulos": len(c.modulos or []),
+            "cantidad_inscritos": len(c.inscritos or []),
+        })
+
+    # Orden cronológico: cursos sin fecha al final
+    def _sort_key(item: Dict[str, Any]) -> datetime:
+        d = item.get("fecha_inicio") or item.get("fecha_fin")
+        return d if d else datetime(9999, 12, 31)
+
+    items.sort(key=_sort_key)
+    return items
+
+
+async def get_courses_disponibles_para_estudiante() -> List[Course]:
+    """
+    F-080: devuelve los cursos en los que un estudiante PODRÍA pedir
+    inscripción (estado = programado o en_ejecucion, activo=True).
+    Un curso cerrado NO aparece.
+    """
+    from models.enums import EstadoPrograma
+
+    courses = await Course.find(Course.activo == True).to_list()
+    return [c for c in courses if c.get_estado_actual() != EstadoPrograma.CERRADO.value]
+
+
+async def set_estado_override(
+    course_id: PydanticObjectId,
+    estado_override: Optional[str],
+) -> Course:
+    """
+    F-080: CPD define o limpia el override manual de estado de un curso.
+    Si `estado_override` es None, vuelve al cálculo automático por fechas.
+    Si es un valor inválido, lanza ValueError.
+    """
+    from models.enums import EstadoPrograma
+
+    course = await Course.get(course_id)
+    if not course:
+        raise ValueError("Curso no encontrado")
+
+    if estado_override is not None:
+        try:
+            EstadoPrograma(estado_override)
+        except ValueError:
+            raise ValueError(
+                f"Estado inválido. Valores permitidos: "
+                f"{', '.join(e.value for e in EstadoPrograma)}"
+            )
+
+    course.estado_override = estado_override
+    # Si el override es None, sincronizamos `estado` al cálculo actual
+    # (para que el campo persistido no quede stale).
+    course.estado = course.get_estado_actual()
+    await course.save()
+    return course
+
+
+async def set_resolucion_pdf_url(
+    course_id: PydanticObjectId,
+    pdf_url: str,
+) -> Course:
+    """
+    F-080: persiste la URL del PDF de la resolución de respaldo del
+    programa. `pdf_url` puede ser una URL de Cloudinary, S3, o local.
+    """
+    course = await Course.get(course_id)
+    if not course:
+        raise ValueError("Curso no encontrado")
+    course.resolucion_pdf_url = pdf_url
+    await course.save()
+    return course

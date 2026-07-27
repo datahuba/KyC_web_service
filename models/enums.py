@@ -35,6 +35,13 @@ class TipoCurso(str, Enum):
     OTRO = "otro"
 
 
+# F-080: re-exportar EstadoPrograma desde models.estado_programa para
+# mantener compatibilidad con código que lo importa desde models.enums.
+# La definición vive en models/estado_programa.py para que sea
+# trivialmente testeable sin dependencias de beanie/fastapi.
+from .estado_programa import EstadoPrograma  # noqa: E402,F401
+
+
 class EstadoTitulo(str, Enum):
     """
     Estados de validación de un título profesional

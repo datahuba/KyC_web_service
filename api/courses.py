@@ -1,6 +1,7 @@
-from typing import List, Any, Union
+from typing import List, Any, Union, Optional
 import asyncio
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import datetime
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from beanie.operators import In
 from models.course import Course
@@ -122,6 +123,10 @@ async def read_courses(
     activo: Optional[bool] = Query(None, description="Filtrar por estado activo"),
     tipo_curso: Optional[TipoCurso] = Query(None, description="Filtrar por tipo de curso"),
     modalidad: Optional[Modalidad] = Query(None, description="Filtrar por modalidad"),
+    estado: Optional[str] = Query(
+        None,
+        description="F-080: filtrar por estado calculado del programa (programado | en_ejecucion | cerrado)"
+    ),
     current_user: Union[User, Student] = Depends(get_current_user) # Abierto para todos
 ) -> Any:
     """Listar cursos con paginación y filtros"""
@@ -131,11 +136,12 @@ async def read_courses(
         q=q,
         activo=activo,
         tipo_curso=tipo_curso,
-        modalidad=modalidad
+        modalidad=modalidad,
+        estado=estado,
     )
-    
+
     total_pages = math.ceil(total_count / per_page) if total_count > 0 else 0
-    
+
     return {
         "data": courses,
         "meta": PaginationMeta(
@@ -147,6 +153,145 @@ async def read_courses(
             hasPrevPage=(page > 1)
         )
     }
+
+
+# ============================================================================
+# F-080: CALENDARIO DE PROGRAMAS
+# ============================================================================
+
+@router.get(
+    "/calendario",
+    summary="F-080: Calendario de programas (Timeline o Lista Cronológica)"
+)
+async def get_calendario(
+    year: Optional[int] = Query(None, description="Filtrar por año de fecha_inicio"),
+    tipo_curso: Optional[TipoCurso] = Query(None, description="Filtrar por tipo"),
+    estado: Optional[str] = Query(None, description="Filtrar por estado calculado (programado | en_ejecucion | cerrado)"),
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> Any:
+    """
+    Devuelve todos los cursos con su estado calculado en runtime (F-080).
+    Pensado para alimentar la vista de calendario general de la plataforma.
+    Estudiantes también pueden verlo (solo lectura).
+    """
+    items = await course_service.get_courses_para_calendario(
+        year=year,
+        tipo_curso=tipo_curso,
+        estado=estado,
+    )
+    return {
+        "success": True,
+        "year": year,
+        "total": len(items),
+        "items": items,
+    }
+
+
+@router.get(
+    "/disponibles",
+    summary="F-080: Cursos disponibles para que un estudiante se inscriba"
+)
+async def get_disponibles(
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> Any:
+    """
+    Devuelve SOLO los cursos en estado PROGRAMADO o EN_EJECUCION (F-080).
+    Es el endpoint que consume el dashboard del estudiante para mostrar
+    los cursos donde podría pedir inscripción. Los CERRADOS no aparecen.
+    """
+    courses = await course_service.get_courses_disponibles_para_estudiante()
+    return {
+        "success": True,
+        "total": len(courses),
+        "items": [
+            {
+                "id": str(c.id),
+                "codigo": c.codigo,
+                "nombre_programa": c.nombre_programa,
+                "tipo_curso": c.tipo_curso.value,
+                "modalidad": c.modalidad.value,
+                "fecha_inicio": c.fecha_inicio,
+                "fecha_fin": c.fecha_fin,
+                "estado_calculado": c.get_estado_actual(),
+                "costo_total_interno": c.costo_total_interno,
+                "matricula_interno": c.matricula_interno,
+                "cantidad_modulos": len(c.modulos or []),
+            }
+            for c in courses
+        ],
+    }
+
+
+class EstadoOverrideRequest(BaseModel):
+    estado_override: Optional[str] = Field(
+        None,
+        description="Override manual del estado. None = volver al cálculo automático. Valores: programado, en_ejecucion, cerrado."
+    )
+
+
+@router.patch(
+    "/{id}/estado",
+    response_model=CourseResponse,
+    summary="F-080: Cambiar override manual del estado (CPD)"
+)
+async def patch_estado_override(
+    id: PydanticObjectId,
+    payload: EstadoOverrideRequest,
+    current_user: User = Depends(require_cpd)
+) -> Any:
+    """
+    CPD define (o limpia) el override manual del estado de un programa.
+    Útil para suspensiones, extensiones o correcciones manuales.
+    """
+    try:
+        course = await course_service.set_estado_override(
+            course_id=id,
+            estado_override=payload.estado_override,
+        )
+        return course
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.put(
+    "/{id}/resolucion",
+    response_model=CourseResponse,
+    summary="F-080: Subir PDF de la resolución de respaldo del programa (CPD)"
+)
+async def put_resolucion(
+    id: PydanticObjectId,
+    file: UploadFile = File(..., description="PDF de la resolución"),
+    current_user: User = Depends(require_cpd)
+) -> Any:
+    """
+    Sube el PDF de la resolución que respalda el programa y guarda la URL.
+    Acepta cualquier hosting (Cloudinary, S3, local). Aquí lo subimos a
+    Cloudinary igual que los otros documentos del sistema.
+    """
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Solo se aceptan archivos PDF")
+
+    # Subir a Cloudinary (mismo patrón que el resto del sistema)
+    try:
+        from core.cloudinary_utils import upload_pdf
+        url = await upload_pdf(
+            file=file,
+            folder=f"resoluciones/cursos/{id}",
+            public_id=f"curso_{id}",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error subiendo el PDF a Cloudinary: {str(e)}",
+        )
+
+    try:
+        course = await course_service.set_resolucion_pdf_url(course_id=id, pdf_url=url)
+        return course
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @router.post(
     "/",
