@@ -104,13 +104,24 @@ class UserCreate(BaseModel):
 class UserResponse(BaseModel):
     """
     Schema para mostrar información de un usuario
-    
+
     Uso: GET /users/{id}
+
+    F-071 (2026-07-28): estandarización a `role` (inglés) en la respuesta JSON.
+    Internamente el modelo Beanie sigue usando `rol` (español), pero en la
+    respuesta HTTP el campo se serializa como `role` para coincidir con
+    `/auth/me` (CurrentUserResponse) y con lo que el frontend espera.
+    Antes el frontend usaba el fallback defensivo `user.role || user.rol`
+    porque el modelo User se serializaba como `rol` y el CurrentUserResponse
+    como `role` — inconsistencia que este cambio resuelve en backend.
     """
     id: PyObjectId = Field(..., alias="_id")
     username: str
     email: EmailStr
-    rol: UserRole
+    # F-071: `rol` (Python/Beanie) -> `role` (JSON API). populate_by_name=True
+    # permite que `from_attributes=True` lea `user.rol` del modelo, y la
+    # serialización genera el campo `role` en la respuesta.
+    rol: UserRole = Field(..., serialization_alias="role")
     activo: bool
     ultimo_acceso: Optional[datetime] = None
     created_at: datetime
@@ -120,8 +131,8 @@ class UserResponse(BaseModel):
     carnet: Optional[str] = None  # GAP-1
     subtipo_coordinador: Optional[SubtipoCoordinador] = None  # ISSUE-R-PERFIL-GENERICO
     cv_url: Optional[str] = None  # HOJA-DE-VIDA-DOCENTE
-    
-    
+
+
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True,
