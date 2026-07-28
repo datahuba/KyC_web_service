@@ -2168,6 +2168,10 @@ async def get_resumen_pagos_enrollment(enrollment_id: PydanticObjectId) -> dict:
     # (ej: paga 300 cuando módulo cuesta 294), el sistema le genera un
     # "saldo a favor" que el estudiante VE en su resumen pero cobranza NO.
     # Agregar desglose por módulo + saldo a favor calculado.
+    #
+    # F-049-FIX (2026-07-28): el campo del modelo ModuloEstado es `costo`, NO
+    # `monto`. La version original usaba `m.monto` que no existe y rompia
+    # silenciosamente con `AttributeError`, dejando el resumen sin desglose.
     try:
         enrollment = await Enrollment.get(enrollment_id)
         if enrollment:
@@ -2176,10 +2180,10 @@ async def get_resumen_pagos_enrollment(enrollment_id: PydanticObjectId) -> dict:
                 modulos_info.append({
                     "index": i,
                     "nombre": m.nombre or f"Módulo {i + 1}",
-                    "monto": float(m.monto or 0),
+                    "monto": float(m.costo or 0),  # F-049-FIX: `costo` es el campo correcto
                     "monto_pagado": float(m.monto_pagado or 0),
-                    "saldo_modulo": round(float(m.monto or 0) - float(m.monto_pagado or 0), 2),
-                    "pagado": (m.monto_pagado or 0) >= (m.monto or 0),
+                    "saldo_modulo": round(float(m.costo or 0) - float(m.monto_pagado or 0), 2),
+                    "pagado": (m.monto_pagado or 0) >= (m.costo or 0),
                 })
 
             total_a_pagar = float(enrollment.total_a_pagar or 0)
