@@ -635,6 +635,13 @@ async def create_payment(
     # (300 = solo matrícula) aunque tenían pagos aprobados por Bs 588-2.940.
     # La libreta del estudiante mostraba "Pagado: Bs 0.00" para todos los
     # módulos aunque el pago SÍ estaba en Gestión de Pagos con comprobante.
+    #
+    # F-082 (2026-07-28): además del log WARNING, notificar al equipo económico
+    # (cobranza/admin/superadmin) con un notification in-app para que vean el
+    # desbalance y puedan ejecutar el fix manualmente. Caso real: Medardo
+    # Balvino Rojas (CI 2720765) + Jerry Fletcher quedaron con saldo fantasma
+    # por Bs 588 cada uno sin que nadie se enterara hasta que Sandra lo reportó
+    # manualmente desde Excel.
     try:
         await enrollment_service.actualizar_saldo_enrollment(
             enrollment_id=payment.inscripcion_id,
@@ -662,6 +669,46 @@ async def create_payment(
                 f"Error2: {str(retry_error)[:200]}. "
                 f"Ejecutar fix-prorrateo-masivo-v2.py --apply para corregir."
             )
+
+            # F-082 (2026-07-28): notificar al equipo económico via in-app
+            # notification. Si la notification falla, no bloqueamos el flujo
+            # (el log WARNING ya queda).
+            try:
+                from services.notification_service import create_notification
+                from models.user import User
+                from models.enums import UserRole
+                from beanie import PydanticObjectId
+                from beanie.operators import In as BIn
+
+                # Notificar a cobranza + admin + superadmin del MISMO curso
+                destinatarios = await User.find(
+                    User.activo == True,
+                    BIn(User.rol, [UserRole.COBRANZA, UserRole.ADMIN, UserRole.SUPERADMIN, UserRole.MAE])
+                ).to_list()
+
+                # Limitar a 10 destinatarios para no spamear
+                for dest in destinatarios[:10]:
+                    try:
+                        await create_notification(
+                            destinatario_id=dest.id,
+                            tipo_destinatario="user",
+                            titulo="⚠️ Desbalance de saldo detectado",
+                            mensaje=(
+                                f"El pago {payment.id} (Bs {payment.cantidad_pago}) fue aprobado pero "
+                                f"el prorrateo al enrollment {payment.inscripcion_id} falló tras 2 intentos. "
+                                f"Ejecutar evidence/reuniones/2026-07-28/fix-enrollments-desincronizados.py "
+                                f"--enrollment-id {payment.inscripcion_id} --apply para corregir."
+                            ),
+                            tipo_alerta="error",
+                            ruta="/app/enrollments",
+                            referencia_tipo="enrollment",
+                            referencia_id=payment.inscripcion_id
+                        )
+                    except Exception as notif_err:
+                        logger.warning(f"F-082: no se pudo notificar a {dest.username}: {notif_err}")
+            except Exception as notify_setup_err:
+                # Si el import o el find falla, no rompemos el flujo principal
+                logger.warning(f"F-082: setup de notification fallo: {notify_setup_err}")
 
     # 2) Auditoría financiera (inmutable, obligatoria para todo movimiento)
     await _registrar_auditoria_financiera(
