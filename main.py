@@ -209,20 +209,19 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     await _persist_error_log(request, exc, status_code=422)
     # FIX-ERRORES-500: exc.errors() puede contener ValueError u objetos no
-    # serializables en el campo 'ctx' (típico de validadores custom que
-    # lanzan ValueError). Sanitizar el detalle para evitar 500 en el 422.
+    # serializables en múltiples campos ('ctx', 'input', etc., típico de
+    # validadores custom que lanzan ValueError). Sanitizar TODO el error
+    # para evitar 500 en el 422.
     import json as _json
+    def _safe(value):
+        try:
+            _json.dumps(value, default=str)
+            return value
+        except (TypeError, ValueError):
+            return str(value)
     safe_errors = []
     for err in exc.errors():
-        clean = {k: v for k, v in err.items() if k != "ctx"}
-        if "ctx" in err:
-            ctx_value = err["ctx"]
-            try:
-                _json.dumps(ctx_value, default=str)
-                clean["ctx"] = ctx_value
-            except (TypeError, ValueError):
-                clean["ctx"] = {"error": str(ctx_value)}
-        safe_errors.append(clean)
+        safe_errors.append({k: _safe(v) for k, v in err.items()})
     return JSONResponse(
         status_code=422,
         content={"detail": safe_errors},
