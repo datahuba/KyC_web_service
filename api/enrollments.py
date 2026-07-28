@@ -498,6 +498,25 @@ async def editar_nota_validada(
 # ========================================================================
 
 @router.get(
+    "/me",
+    response_model=List[EnrollmentResponse],
+    summary="Ver Mis Inscripciones (Estudiante autenticado)"
+)
+async def get_my_enrollments(
+    current_user: Student = Depends(get_current_user)
+) -> Any:
+    """
+    FIX-ERRORES-500: lista las inscripciones del estudiante autenticado.
+    Importante: este endpoint debe declararse ANTES de /{id} para que
+    no se matchee con id="me" (que rompe PydanticObjectId).
+    """
+    enrollments = await Enrollment.find(
+        Enrollment.estudiante_id == current_user.id
+    ).sort("-created_at").to_list()
+    return enrollments
+
+
+@router.get(
     "/{id}",
     response_model=EnrollmentResponse,
     summary="Ver Inscripción"
@@ -560,25 +579,6 @@ async def update_enrollment(
         return enrollment
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-
-@router.get(
-    "/me",
-    response_model=List[EnrollmentResponse],
-    summary="Ver Mis Inscripciones (Estudiante autenticado)"
-)
-async def get_my_enrollments(
-    current_user: Student = Depends(get_current_user)
-) -> Any:
-    """
-    FIX-ERRORES-500: lista las inscripciones del estudiante autenticado.
-    Importante: este endpoint debe declararse ANTES de /{id} para que
-    no se matchee con id="me" (que rompe PydanticObjectId).
-    """
-    enrollments = await Enrollment.find(
-        Enrollment.estudiante_id == current_user.id
-    ).sort("-created_at").to_list()
-    return enrollments
 
 
 @router.delete(
