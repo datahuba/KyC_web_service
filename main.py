@@ -172,7 +172,15 @@ async def _persist_error_log(request: Request, exc: Exception, status_code: int 
             pass
 
         msg_detail = getattr(exc, "detail", str(exc))
+        # F-085 (2026-07-28): SIEMPRE setear `timestamp` al crear el ErrorLog.
+        # El default del modelo es `Indexed(datetime, expireAfterSeconds=604800)`
+        # que es un wrapper de Beanie (NewType), no un datetime. Sin este set
+        # explícito, Pydantic acepta el wrapper como default pero Beanie no
+        # puede serializarlo a BSON → `Cannot encode Indexed.NewType` y el
+        # handler falla silenciosamente dejando el visor de errores VACIO.
+        from datetime import datetime as _dt
         error_log = ErrorLog(
+            timestamp=_dt.utcnow(),
             path=str(request.url.path),
             method=request.method,
             status_code=status_code,

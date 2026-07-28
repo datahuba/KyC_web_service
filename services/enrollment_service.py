@@ -612,6 +612,26 @@ async def actualizar_saldo_enrollment(
     representan el estado ACADÉMICO histórico (un módulo que se pagó y luego se
     anuló queda en "Pagado" hasta que se reinscribe o se vuelve a pagar).
 
+    F-085 (2026-07-28): REVERTIR la regla F-COBRANZA-014. La fórmula
+    `total_pagado = aprobados - anulados` producía números NEGATIVOS en
+    cualquier caso donde el monto del pago anulado era mayor que el resto
+    aprobado (ej: Luis Fernando con matrícula 300 aprobado + Módulo 2940
+    anulado → total_pagado = -2640). Esto rompía 5 endpoints financieros
+    con ValidationError `total_pagado >= 0` y dejaba TODAS las páginas
+    financieras en blanco.
+
+    REGLA CORRECTA (idempotente, no produce negativos):
+      `total_pagado = sum(pagos APROBADOS)`
+    Al anular un pago aprobado, NO se resta del total — el pago simplemente
+    deja de contar en aprobados. Esto es la misma regla que aplicamos en
+    F-082 (Medardo) y F-084 (Anselmo) y es matemáticamente consistente.
+
+    El "desfase" que F-COBRANZA-014 detectó en realidad era un BUG en la
+    cascada (falla silenciosa de `actualizar_saldo_enrollment` por
+    `RevisionIdWasChanged` que NO actualizaba `total_pagado` al aprobar).
+    El fix correcto es el retry + notification (F-082), no la resta
+    posterior de anulados.
+
     OPTIMIZACIÓN DE IMPORTACIÓN MASIVA (2026-07-09, ISSUE-Q-IMPORT-TIMEOUT):
     `enrollment`/`pagos_aprobados` permiten pasar el documento y los pagos ya
     obtenidos en memoria, evitando el `Enrollment.get()` + `Payment.find()`
@@ -633,20 +653,14 @@ async def actualizar_saldo_enrollment(
             Payment.estado_pago == EstadoPago.APROBADO
         ).to_list()
 
-    # F-COBRANZA-014: también recolectar los anulados para descontarlos del total.
-    # Sin esto, `total_pagado` quedaba inflado y el reporte de caja no cuadraba
-    # con el extracto bancario.
-    pagos_anulados = await Payment.find(
-        Payment.inscripcion_id == enrollment_id,
-        Payment.estado_pago == EstadoPago.ANULADO
-    ).to_list()
+    # F-085: NO recolectar anulados ni restarlos. La regla es:
+    #   total_pagado = sum(aprobados)
+    # Los anulados ya no cuentan en aprobados (cambiaron de estado),
+    # restarlos de nuevo = doble resta = números negativos.
 
     dinero_aprobado_bruto = sum(p.cantidad_pago for p in pagos_aprobados)
-    dinero_anulado = sum(p.cantidad_pago for p in pagos_anulados)
-    # NETO = lo que realmente cuenta para "total_pagado" del enrollment y para
-    # los reportes de caja. El waterfall usa `dinero_aprobado_bruto` (estado
-    # histórico académico de los módulos).
-    dinero_neto_pagado = round(dinero_aprobado_bruto - dinero_anulado, 2)
+    # F-085: total_pagado = sum(aprobados). Sin restar anulados.
+    dinero_neto_pagado = round(dinero_aprobado_bruto, 2)
     tanque_de_agua = round(dinero_aprobado_bruto, 2)  # waterfall con aprobados
 
     # 2. Reiniciar los contadores de la inscripción a cero para reconstruirlos
@@ -688,9 +702,8 @@ async def actualizar_saldo_enrollment(
                 tanque_de_agua = 0.0
 
     # 5. Actualizar los totales globales (Total Pagado y Saldo Pendiente)
-    # F-COBRANZA-014: usar el NETO (aprobados - anulados) en vez del bruto.
-    # Antes: enrollment.total_pagado = round(dinero_aprobado_bruto, 2) → inflaba
-    # el contador y descuadraba el reporte de caja.
+    # F-085 (2026-07-28): `total_pagado = sum(aprobados)`. NO restar anulados
+    # (la resta introducida por F-COBRANZA-014 producía números negativos).
     enrollment.total_pagado = dinero_neto_pagado
     enrollment.saldo_pendiente = max(0.0, round(enrollment.total_a_pagar - dinero_neto_pagado, 2))
     

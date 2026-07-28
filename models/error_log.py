@@ -14,10 +14,9 @@ Colección MongoDB: error_logs
 TTL: 604800 segundos (7 días)
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 from pydantic import Field
-from beanie import Indexed
 from .base import MongoBaseModel, PyObjectId
 
 
@@ -45,7 +44,7 @@ class ErrorLog(MongoBaseModel):
     - environment: 'production' / 'staging' / 'development'
     """
 
-    timestamp: datetime = Indexed(datetime, expireAfterSeconds=604800)  # TTL 7 días
+    timestamp: datetime = Field(default_factory=datetime.utcnow)  # F-085: default_factory explícito (el default `Indexed(...)` no es serializable por Beanie)
     path: str = Field(..., description="URL del request")
     method: str = Field(..., description="HTTP method")
     status_code: int = Field(..., description="HTTP status code")
@@ -82,10 +81,14 @@ class ErrorLog(MongoBaseModel):
 
     class Settings:
         name = "error_logs"
-        # F-044: TTL de 7 días se configura en el campo `timestamp` con
-        # `Indexed(datetime, expireAfterSeconds=604800)` arriba.
-        # Índices secundarios para queries del visor.
+        # F-085 (2026-07-28): TTL de 7 días. Antes el campo `timestamp` usaba
+        # el default de Beanie con TTL inline, que (a) no generaba el índice
+        # TTL en MongoDB y (b) era un NewType no serializable que rompía
+        # el handler F-044 silenciosamente. Se mueve el TTL a Settings.indexes
+        # con un IndexModel explícito.
+        from pymongo import IndexModel, ASCENDING
         indexes = [
+            IndexModel([("timestamp", ASCENDING)], expireAfterSeconds=604800, name="ttl_timestamp_7d"),
             "path",
             "error_type",
             "status_code",
