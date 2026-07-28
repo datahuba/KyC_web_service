@@ -1773,7 +1773,10 @@ def _pago_to_fila(p, estudiante, curso, modulo_index, monto_asignado, concepto, 
     if estudiante:
         ci = estudiante.carnet
         registro = estudiante.registro
-        nombre = f"{estudiante.nombre or ''} {estudiante.apellido or ''}".strip()
+        # F-087: el modelo Student solo tiene `nombre` (sin `apellido` separado).
+        # En BD legacy el nombre completo puede estar en `nombre`. La UI
+        # muestra este string tal cual.
+        nombre = (estudiante.nombre or "").strip() or None
 
     curso_codigo = curso.codigo if curso else None
     curso_nombre = curso.nombre_programa if curso else None
