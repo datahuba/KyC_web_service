@@ -1239,10 +1239,20 @@ async def get_resumen_economico(
     # "Por Cobrar", desalineándolo de su Excel. El `total_esperado` se mantiene
     # intacto porque es la suma teórica de lo que TODOS los inscritos deberían
     # pagar (incluye pasivos porque al reactivarse vuelven a deber).
+    #
+    # F-083 (2026-07-28): se agrega RETIRADO a la lista de excluidos del
+    # "Por Cobrar". Distinto de SUSPENDIDO+abandono (que es automático):
+    # RETIRADO es VOLUNTARIO y DEFINITIVO, no vuelve nunca. "Esos ya no
+    # debería sumar sus pagos para cuentas por cobrar, solo queda lo que
+    # pagaron y se cierra" (Lic. Sorich, 2026-07-28). Importante: los
+    # RETIRADOS SÍ cuentan en ingreso_colegiatura (lo que ya pagaron es
+    # ingreso real), pero NO cuentan en por_cobrar (lo que falta ya no
+    # se cobra).
     estados_excluidos_por_cobrar = {
         EstadoInscripcion.SUSPENDIDO,
         EstadoInscripcion.COMPLETADO,
         EstadoInscripcion.CANCELADO,
+        EstadoInscripcion.RETIRADO,  # F-083
     }
 
     total_esperado = 0.0
@@ -1360,10 +1370,14 @@ async def get_matriz_pagos(
     ]
 
     # Estados que NO cuentan para "Por Cobrar" (regla F-073)
+    # F-083 (2026-07-28): se agrega RETIRADO. Los RETIRADOS NO suman a
+    # "Por Cobrar" (abandono definitivo, no vuelven). Sí cuentan en
+    # total_ingresos porque lo que pagaron es dinero real que entró a caja.
     estados_excluidos = {
         EstadoInscripcion.SUSPENDIDO,
         EstadoInscripcion.COMPLETADO,
         EstadoInscripcion.CANCELADO,
+        EstadoInscripcion.RETIRADO,  # F-083
     }
 
     # Acumuladores de totales por columna
@@ -1612,6 +1626,7 @@ async def get_resumen_modulos(
         EstadoInscripcion.SUSPENDIDO,
         EstadoInscripcion.COMPLETADO,
         EstadoInscripcion.CANCELADO,
+        EstadoInscripcion.RETIRADO,  # F-083
     }
 
     # Acumuladores

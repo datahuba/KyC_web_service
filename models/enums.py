@@ -64,12 +64,29 @@ class Modalidad(str, Enum):
 class EstadoInscripcion(str, Enum):
     """
     Estados posibles de una inscripción
+
+    F-083 (2026-07-28): se agrega RETIRADO para distinguir "retirado final"
+    (no vuelve nunca) de "suspendido" (puede volver tras pagar reincorporación).
+    Caso real: Lic. Sorich reportó que el sistema no diferencia retirados de
+    pasivos, y los retirados seguían sumando a "Por Cobrar" aunque ya no
+    pagaron más. Regla de Kevin: "retirados ya no vuelven, no son pasivos;
+    pasivo tiene la opción de volver luego, y retirados ya no vuelven".
+
+    - PENDIENTE_PAGO: inscrito, aún no pagó nada
+    - ACTIVO: cursando normalmente
+    - SUSPENDIDO: pausado temporalmente (motivo: pasivo|congelado|abandono)
+    - COMPLETADO: terminó el curso
+    - CANCELADO: nunca cursó realmente (no cuenta como inscrito)
+    - RETIRADO: abandono definitivo, no vuelve. Lo que ya pagó SÍ cuenta como
+      ingreso; lo que falta NO se cobra. Distinto de CANCELADO porque en
+      RETIRADO el estudiante SÍ cursó algo (tuvo pagos).
     """
     PENDIENTE_PAGO = "pendiente_pago"
     ACTIVO = "activo"
     SUSPENDIDO = "suspendido"
     COMPLETADO = "completado"
     CANCELADO = "cancelado"
+    RETIRADO = "retirado"
 
 
 class TipoPago(str, Enum):
