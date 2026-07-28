@@ -68,7 +68,7 @@ async def create_student(
     summary="Ver Mi Perfil (Estudiante autenticado)"
 )
 async def read_student_self(
-    current_user: Student = Depends(get_current_user)
+    current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
     """
     FIX-ERRORES-500: devuelve el perfil del estudiante autenticado.
@@ -76,7 +76,14 @@ async def read_student_self(
     no se matchee con id="me" (que rompe PydanticObjectId y causaba
     500 por un ValueError no serializable en exc.errors()).
     """
-    # get_current_user ya garantiza que es un Student activo
+    # F-081: get_current_user retorna Union[User, Student]. Si el token es
+    # de un User (admin/staff), no tiene perfil de Student — devolver 403
+    # en vez de causar 500 al intentar serializar el User como Student.
+    if not isinstance(current_user, Student):
+        raise HTTPException(
+            status_code=403,
+            detail="Este endpoint es solo para estudiantes. Use /auth/me para su perfil."
+        )
     return current_user
 
 

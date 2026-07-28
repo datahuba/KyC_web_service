@@ -167,12 +167,14 @@ async def get_calendario(
     year: Optional[int] = Query(None, description="Filtrar por año de fecha_inicio"),
     tipo_curso: Optional[TipoCurso] = Query(None, description="Filtrar por tipo"),
     estado: Optional[str] = Query(None, description="Filtrar por estado calculado (programado | en_ejecucion | cerrado)"),
-    current_user: Union[User, Student] = Depends(get_current_user)
+    current_user: User = Depends(require_staff)
 ) -> Any:
     """
     Devuelve todos los cursos con su estado calculado en runtime (F-080).
-    Pensado para alimentar la vista de calendario general de la plataforma.
-    Estudiantes también pueden verlo (solo lectura).
+    F-080-REGLA-K: el calendario es solo para personal administrativo
+    (superadmin, admin, cpd, mae, cobranza, encargado_curso, coordinador,
+    docente). Los estudiantes NO tienen acceso — Kevin: "el calendario es
+    para administrativos, no para estudiantes".
     """
     items = await course_service.get_courses_para_calendario(
         year=year,
