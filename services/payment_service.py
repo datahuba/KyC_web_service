@@ -1634,27 +1634,29 @@ async def get_matriz_por_pago(
     per_page: int = 50,
 ) -> dict:
     """
-    F-087 (2026-07-28): devuelve 1 fila por cada pago individual, sin agrupar.
+    F-087 (2026-07-28): vista "Por Pago" - 1 fila por cada estudiante, con
+    sus pagos individuales listados como items. F-087-FIX2 (2026-07-28):
+    reorganizado a formato matriz (estudiantes como filas) para que se vea
+    horizontal como la matriz tradicional.
 
-    A diferencia de la matriz tradicional, esta vista NO agrega por estudiante
-    ni por módulo. Permite a Kevin/Sandra auditar cada Bs: cada pago lleva
-    su comprobante, su número de transacción, su fecha, y quién lo subió.
+    Cada estudiante tiene una lista de pagos. La UI renderiza cada pago
+    como una columna. Si un estudiante tiene más pagos que el `max_pagos`
+    configurado, los extras se devuelven pero la UI los marca como "+N más".
 
     Reglas:
     - `cursos_permitidos`: si se pasa (cobranza con cursos_asignados), filtra
       a esos cursos. None = todos.
     - `curso_id`: filtro adicional por curso específico.
-    - `modulo_index`: filtra por módulo. Para pagos que cubren varios
-      módulos ("Pago Módulos 1, 2"), el pago aparece en el resultado SOLO
-      si modulo_index coincide con uno de los módulos del concepto.
+    - `modulo_index`: filtra por módulo. Si un pago cubre varios módulos
+      ("Pago Módulos 1, 2"), el pago aparece SOLO si modulo_index coincide
+      con uno de los módulos del concepto.
     - `estado_pago`: filtra por estado. Si None, devuelve todos.
     - `subido_por`: filtra por "estudiante" | "encargado" | None.
-    - Paginación: page (1-indexed), per_page (max 500).
+    - Paginación: page (1-indexed), per_page (max 500). Se aplica a la
+      lista de ESTUDIANTES (no de pagos individuales).
 
-    Salida: lista de pagos expandida donde cada pago multi-módulo produce
-    N filas (una por módulo, con monto prorrateado). Cada fila tiene los
-    datos del estudiante, del curso, del pago original, y del módulo
-    específico al que se imputa.
+    Salida: estructura tipo matriz. La UI la renderiza como una tabla
+    con estudiantes como filas y cada pago como una columna horizontal.
     """
     match: dict = {}
     if cursos_permitidos is not None:
@@ -1673,11 +1675,10 @@ async def get_matriz_por_pago(
 
     # Traemos todos los pagos que matchean (sin paginar todavía). El conteo
     # puede ser alto (cientos por cohorte) pero el filtro por curso reduce.
-    # Si el rendimiento es problema, podemos paginar en BD primero y expandir
-    # después.
     from models.payment import Payment
     from models.student import Student
     from models.course import Course
+    from models.enrollment import Enrollment
 
     pagos = await Payment.find(match).sort("-fecha_subida").to_list()
 
@@ -1690,15 +1691,15 @@ async def get_matriz_por_pago(
     cursos_list = await Course.find({"_id": {"$in": curso_ids}}).to_list() if curso_ids else []
     cursos_map = {c.id: c for c in cursos_list}
 
-    # Expandir: 1 pago = 1 fila (NO se parte en múltiples filas).
-    # F-087-FIX (2026-07-28): Kevin reportó que partir "Pago Módulos 1, 2, 3, 4"
-    # de Bs 588 en 4 filas de Bs 147 era confuso. Ahora cada pago aparece UNA
-    # sola vez, con su monto total, y se añade `modulos_cubiertos` (lista)
-    # para que la UI pueda mostrar todos los módulos que cubre.
-    filas = []
+    # Enrollments para total_a_pagar por estudiante
+    enr_list = await Enrollment.find({"estudiante_id": {"$in": est_ids}}).to_list() if est_ids else []
+    enr_by_est = {e.estudiante_id: e for e in enr_list}
+
+    # F-087-FIX2: 1 pago = 1 item, sin partir. Agrupamos por estudiante.
+    # Cada item contiene los datos del pago más el módulo principal y la
+    # lista de módulos cubiertos (modulos_cubiertos).
+    pagos_por_est: dict = defaultdict(list)
     for p in pagos:
-        estudiante = estudiantes_map.get(p.estudiante_id)
-        curso = cursos_map.get(p.curso_id)
         modulos_del_pago = _parse_modulos_de_concepto(p.concepto or "")
 
         # Filtro por modulo_index: si el usuario filtró por un módulo específico
@@ -1707,10 +1708,7 @@ async def get_matriz_por_pago(
             if not modulos_del_pago or modulo_index not in modulos_del_pago:
                 continue
 
-        # modulo_index para la fila: el "primario" del pago.
-        # - Si es matrícula (0): modulo_index = 0
-        # - Si es multi-módulo: modulo_index = el primero (para orden y filtros)
-        # - Si no hay módulos parseables: modulo_index = None
+        # modulo_index primario
         if 0 in modulos_del_pago:
             modulo_index_row = 0
         elif modulos_del_pago:
@@ -1718,45 +1716,104 @@ async def get_matriz_por_pago(
         else:
             modulo_index_row = None
 
-        # Nombre del módulo (del curso) si es un solo módulo
-        modulo_nombre = None
-        if curso and curso.modulos and modulo_index_row and 1 <= modulo_index_row <= len(curso.modulos):
-            m_obj = curso.modulos[modulo_index_row - 1]
-            modulo_nombre = m_obj.nombre if hasattr(m_obj, 'nombre') else str(m_obj)
+        item = {
+            "payment_id": str(p.id),
+            "monto": round(p.monto_comprobante or 0, 2),
+            "concepto": p.concepto,
+            "modulo_index": modulo_index_row,
+            "modulos_cubiertos": modulos_del_pago,
+            "estado_pago": p.estado_pago,
+            "subido_por": p.subido_por,
+            "verificado_por": p.verificado_por,
+            "comprobante_url": p.comprobante_url,
+            "numero_transaccion": p.numero_transaccion,
+            "fecha_subida": p.fecha_subida.isoformat() if p.fecha_subida else None,
+            "fecha_comprobante": p.fecha_comprobante.isoformat() if p.fecha_comprobante else None,
+            "banco": p.banco,
+            "metodo_pago": p.metodo_pago,
+            "remitente": p.remitente,
+        }
+        pagos_por_est[p.estudiante_id].append(item)
 
-        # monto_asignado: el monto total del pago (sin partir).
-        monto_total = p.monto_comprobante or 0
-        filas.append(_pago_to_fila(
-            p, estudiante, curso,
-            modulo_index_row, monto_total, p.concepto, modulo_nombre,
-            modulos_cubiertos=modulos_del_pago,
-        ))
+    # Construir la respuesta agrupada por estudiante.
+    # Ordenar estudiantes por nombre
+    estudiantes_ordenados = sorted(
+        pagos_por_est.keys(),
+        key=lambda eid: (estudiantes_map.get(eid).nombre or "").lower()
+        if estudiantes_map.get(eid) else ""
+    )
 
-    # Paginación
-    total = len(filas)
+    estudiantes_out = []
+    for est_id in estudiantes_ordenados:
+        est = estudiantes_map.get(est_id)
+        items = pagos_por_est[est_id]
+        # Ordenar pagos del estudiante por fecha_subida DESC
+        items.sort(key=lambda x: x.get("fecha_subida") or "", reverse=True)
+
+        # Calcular totales del estudiante
+        total_aprobado_est = sum(i["monto"] for i in items if i["estado_pago"] == "aprobado")
+        total_anulado_est = sum(i["monto"] for i in items if i["estado_pago"] == "anulado")
+        total_pendiente_est = sum(i["monto"] for i in items if i["estado_pago"] == "pendiente")
+        total_rechazado_est = sum(i["monto"] for i in items if i["estado_pago"] == "rechazado")
+
+        ci = est.carnet if est else None
+        registro = est.registro if est else None
+        nombre = (est.nombre or "").strip() if est else None
+        curso_id = items[0].get("curso_id") if items else None  # todos del mismo curso por filtro
+        curso = cursos_map.get(curso_id) if curso_id else None
+
+        enr = enr_by_est.get(est_id)
+        total_a_pagar = float(enr.total_a_pagar) if enr and enr.total_a_pagar else None
+
+        estudiantes_out.append({
+            "estudiante_id": str(est_id),
+            "estudiante_nombre": nombre,
+            "estudiante_ci": ci,
+            "estudiante_registro": registro,
+            "curso_id": str(curso_id) if curso_id else None,
+            "curso_codigo": curso.codigo if curso else None,
+            "curso_nombre": curso.nombre_programa if curso else None,
+            "pagos": items,
+            "total_pagado_aprobado": round(total_aprobado_est, 2),
+            "total_pagado_anulado": round(total_anulado_est, 2),
+            "total_pagado_pendiente": round(total_pendiente_est, 2),
+            "total_pagado_rechazado": round(total_rechazado_est, 2),
+            "total_a_pagar": total_a_pagar,
+            "saldo_pendiente": enr.saldo_pendiente if enr else None,
+            "cantidad_pagos": len(items),
+        })
+
+    # Paginación (sobre estudiantes)
+    total_estudiantes = len(estudiantes_out)
     start = (page - 1) * per_page
     end = start + per_page
-    filas_pag = filas[start:end]
+    estudiantes_pag = estudiantes_out[start:end]
 
-    # Resumen
-    total_aprobado = sum(f["monto"] for f in filas if f["estado_pago"] == "aprobado")
-    total_anulado = sum(f["monto"] for f in filas if f["estado_pago"] == "anulado")
-    total_pendiente = sum(f["monto"] for f in filas if f["estado_pago"] == "pendiente")
-    total_rechazado = sum(f["monto"] for f in filas if f["estado_pago"] == "rechazado")
+    # max_pagos entre todos los estudiantes (para saber cuántas columnas dibujar)
+    max_pagos = max((e["cantidad_pagos"] for e in estudiantes_out), default=0)
+
+    # Resumen global
+    todos_pagos_flat = [i for items in pagos_por_est.values() for i in items]
+    total_aprobado = sum(i["monto"] for i in todos_pagos_flat if i["estado_pago"] == "aprobado")
+    total_anulado = sum(i["monto"] for i in todos_pagos_flat if i["estado_pago"] == "anulado")
+    total_pendiente = sum(i["monto"] for i in todos_pagos_flat if i["estado_pago"] == "pendiente")
+    total_rechazado = sum(i["monto"] for i in todos_pagos_flat if i["estado_pago"] == "rechazado")
 
     return {
-        "items": filas_pag,
-        "total": total,
+        "estudiantes": estudiantes_pag,
+        "total": total_estudiantes,
         "page": page,
         "per_page": per_page,
-        "total_pages": (total + per_page - 1) // per_page if per_page else 1,
+        "total_pages": (total_estudiantes + per_page - 1) // per_page if per_page else 1,
+        "max_pagos": max_pagos,
         "resumen": {
             "total_aprobado": round(total_aprobado, 2),
             "total_anulado": round(total_anulado, 2),
             "total_pendiente": round(total_pendiente, 2),
             "total_rechazado": round(total_rechazado, 2),
-            "total_pagos": total,
-            "pagos_con_comprobante": sum(1 for f in filas if f.get("comprobante_url")),
+            "total_pagos": len(todos_pagos_flat),
+            "pagos_con_comprobante": sum(1 for i in todos_pagos_flat if i.get("comprobante_url")),
+            "total_estudiantes": total_estudiantes,
         },
         "filtros_aplicados": {
             "curso_id": str(curso_id) if curso_id else None,

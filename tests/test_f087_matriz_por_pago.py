@@ -106,7 +106,7 @@ class TestF087FuncionesServicio:
 
     def test_get_matriz_por_pago_parsea_conceptos_multiples(self):
         """F-087-FIX: el concepto 'Pago Módulos 1, 2' ya NO se prorratea.
-        Cada pago = 1 fila. Los módulos cubiertos van en `modulos_cubiertos`."""
+        Cada pago = 1 item. Los módulos cubiertos van en `modulos_cubiertos`."""
         content = read(PAYMENT_SERVICE_FILE)
         body = get_function_body(content, "get_matriz_por_pago")
         # Verifica que itera sobre los modulos del pago (para el filtro)
@@ -116,11 +116,35 @@ class TestF087FuncionesServicio:
         # F-087-FIX: NO debe prorratear. El monto va entero.
         assert "per_modulo" not in body, (
             "F-087-FIX: NO se debe prorratear el monto entre módulos. "
-            "Cada pago = 1 fila con su monto total."
+            "Cada pago = 1 item con su monto total."
         )
-        # Debe usar modulos_cubiertos en _pago_to_fila
+        # Debe usar modulos_cubiertos en el item
         assert "modulos_cubiertos" in body, (
-            "F-087: debe pasar `modulos_cubiertos` a `_pago_to_fila` para que la UI muestre los módulos"
+            "F-087: debe incluir `modulos_cubiertos` en cada item de pago"
+        )
+
+    def test_get_matriz_por_pago_agrupa_por_estudiante(self):
+        """F-087-FIX2: la respuesta debe agrupar pagos por estudiante."""
+        content = read(PAYMENT_SERVICE_FILE)
+        body = get_function_body(content, "get_matriz_por_pago")
+        assert "pagos_por_est" in body, (
+            "F-087-FIX2: `get_matriz_por_pago` debe agrupar pagos por estudiante"
+        )
+        assert "estudiantes_out" in body, (
+            "F-087-FIX2: `get_matriz_por_pago` debe construir la lista de estudiantes"
+        )
+
+    def test_respuesta_tiene_campo_estudiantes(self):
+        """F-087-FIX2: la respuesta debe tener campo 'estudiantes' (no 'items')."""
+        content = read(PAYMENT_SERVICE_FILE)
+        body = get_function_body(content, "get_matriz_por_pago")
+        assert '"estudiantes":' in body or "'estudiantes':" in body, (
+            "F-087-FIX2: la respuesta debe tener campo 'estudiantes' "
+            "(estructura tipo matriz, no lista plana de pagos)"
+        )
+        assert "max_pagos" in body, (
+            "F-087-FIX2: la respuesta debe incluir `max_pagos` "
+            "(maximo de pagos por estudiante, para # columnas)"
         )
 
     def test_pago_to_fila_incluye_modulos_cubiertos(self):
