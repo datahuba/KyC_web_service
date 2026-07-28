@@ -635,6 +635,13 @@ async def create_payment(
     # (300 = solo matrícula) aunque tenían pagos aprobados por Bs 588-2.940.
     # La libreta del estudiante mostraba "Pagado: Bs 0.00" para todos los
     # módulos aunque el pago SÍ estaba en Gestión de Pagos con comprobante.
+    #
+    # F-082 (2026-07-28): además del log WARNING, notificar al equipo económico
+    # (cobranza/admin/superadmin) con un notification in-app para que vean el
+    # desbalance y puedan ejecutar el fix manualmente. Caso real: Medardo
+    # Balvino Rojas (CI 2720765) + Jerry Fletcher quedaron con saldo fantasma
+    # por Bs 588 cada uno sin que nadie se enterara hasta que Sandra lo reportó
+    # manualmente desde Excel.
     try:
         await enrollment_service.actualizar_saldo_enrollment(
             enrollment_id=payment.inscripcion_id,
@@ -662,6 +669,46 @@ async def create_payment(
                 f"Error2: {str(retry_error)[:200]}. "
                 f"Ejecutar fix-prorrateo-masivo-v2.py --apply para corregir."
             )
+
+            # F-082 (2026-07-28): notificar al equipo económico via in-app
+            # notification. Si la notification falla, no bloqueamos el flujo
+            # (el log WARNING ya queda).
+            try:
+                from services.notification_service import create_notification
+                from models.user import User
+                from models.enums import UserRole
+                from beanie import PydanticObjectId
+                from beanie.operators import In as BIn
+
+                # Notificar a cobranza + admin + superadmin del MISMO curso
+                destinatarios = await User.find(
+                    User.activo == True,
+                    BIn(User.rol, [UserRole.COBRANZA, UserRole.ADMIN, UserRole.SUPERADMIN, UserRole.MAE])
+                ).to_list()
+
+                # Limitar a 10 destinatarios para no spamear
+                for dest in destinatarios[:10]:
+                    try:
+                        await create_notification(
+                            destinatario_id=dest.id,
+                            tipo_destinatario="user",
+                            titulo="⚠️ Desbalance de saldo detectado",
+                            mensaje=(
+                                f"El pago {payment.id} (Bs {payment.cantidad_pago}) fue aprobado pero "
+                                f"el prorrateo al enrollment {payment.inscripcion_id} falló tras 2 intentos. "
+                                f"Ejecutar evidence/reuniones/2026-07-28/fix-enrollments-desincronizados.py "
+                                f"--enrollment-id {payment.inscripcion_id} --apply para corregir."
+                            ),
+                            tipo_alerta="error",
+                            ruta="/app/enrollments",
+                            referencia_tipo="enrollment",
+                            referencia_id=payment.inscripcion_id
+                        )
+                    except Exception as notif_err:
+                        logger.warning(f"F-082: no se pudo notificar a {dest.username}: {notif_err}")
+            except Exception as notify_setup_err:
+                # Si el import o el find falla, no rompemos el flujo principal
+                logger.warning(f"F-082: setup de notification fallo: {notify_setup_err}")
 
     # 2) Auditoría financiera (inmutable, obligatoria para todo movimiento)
     await _registrar_auditoria_financiera(
@@ -1192,10 +1239,20 @@ async def get_resumen_economico(
     # "Por Cobrar", desalineándolo de su Excel. El `total_esperado` se mantiene
     # intacto porque es la suma teórica de lo que TODOS los inscritos deberían
     # pagar (incluye pasivos porque al reactivarse vuelven a deber).
+    #
+    # F-083 (2026-07-28): se agrega RETIRADO a la lista de excluidos del
+    # "Por Cobrar". Distinto de SUSPENDIDO+abandono (que es automático):
+    # RETIRADO es VOLUNTARIO y DEFINITIVO, no vuelve nunca. "Esos ya no
+    # debería sumar sus pagos para cuentas por cobrar, solo queda lo que
+    # pagaron y se cierra" (Lic. Sorich, 2026-07-28). Importante: los
+    # RETIRADOS SÍ cuentan en ingreso_colegiatura (lo que ya pagaron es
+    # ingreso real), pero NO cuentan en por_cobrar (lo que falta ya no
+    # se cobra).
     estados_excluidos_por_cobrar = {
         EstadoInscripcion.SUSPENDIDO,
         EstadoInscripcion.COMPLETADO,
         EstadoInscripcion.CANCELADO,
+        EstadoInscripcion.RETIRADO,  # F-083
     }
 
     total_esperado = 0.0
@@ -1313,10 +1370,14 @@ async def get_matriz_pagos(
     ]
 
     # Estados que NO cuentan para "Por Cobrar" (regla F-073)
+    # F-083 (2026-07-28): se agrega RETIRADO. Los RETIRADOS NO suman a
+    # "Por Cobrar" (abandono definitivo, no vuelven). Sí cuentan en
+    # total_ingresos porque lo que pagaron es dinero real que entró a caja.
     estados_excluidos = {
         EstadoInscripcion.SUSPENDIDO,
         EstadoInscripcion.COMPLETADO,
         EstadoInscripcion.CANCELADO,
+        EstadoInscripcion.RETIRADO,  # F-083
     }
 
     # Acumuladores de totales por columna
@@ -1565,6 +1626,7 @@ async def get_resumen_modulos(
         EstadoInscripcion.SUSPENDIDO,
         EstadoInscripcion.COMPLETADO,
         EstadoInscripcion.CANCELADO,
+        EstadoInscripcion.RETIRADO,  # F-083
     }
 
     # Acumuladores

@@ -498,6 +498,25 @@ async def editar_nota_validada(
 # ========================================================================
 
 @router.get(
+    "/me",
+    response_model=List[EnrollmentResponse],
+    summary="Ver Mis Inscripciones (Estudiante autenticado)"
+)
+async def get_my_enrollments(
+    current_user: Student = Depends(get_current_user)
+) -> Any:
+    """
+    FIX-ERRORES-500: lista las inscripciones del estudiante autenticado.
+    Importante: este endpoint debe declararse ANTES de /{id} para que
+    no se matchee con id="me" (que rompe PydanticObjectId).
+    """
+    enrollments = await Enrollment.find(
+        Enrollment.estudiante_id == current_user.id
+    ).sort("-created_at").to_list()
+    return enrollments
+
+
+@router.get(
     "/{id}",
     response_model=EnrollmentResponse,
     summary="Ver Inscripción"
@@ -641,9 +660,15 @@ async def get_enrollments_by_course(
 # cancelados = nunca inscritos realmente). Activos = PENDIENTE_PAGO +
 # ACTIVO. Pasivos = SUSPENDIDO (con motivo_suspension en {pasivo,
 # congelado, abandono}). Completados = COMPLETADO.
+#
+# F-083 (2026-07-28): se agrega RETIRADO como categoría SEPARADA de
+# pasivos. Pedido de Lic. Sorich: "retirados ya no vuelven, no son
+# pasivos; pasivo tiene la opción de volver luego, y retirados ya no
+# vuelven". Los retirados SÍ cuentan en total_inicial (cursaron algo)
+# pero se muestran aparte de "pasivos" en la UI.
 @router.get(
     "/stats/resumen",
-    summary="Resumen de inscritos: total, activos, pasivos, completados (F-035)",
+    summary="Resumen de inscritos: total, activos, pasivos, completados, retirados (F-035 + F-083)",
 )
 async def get_enrollments_resumen(
     *,
@@ -651,10 +676,9 @@ async def get_enrollments_resumen(
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
     """
-    F-COBRANZA-035: devuelve el conteo de inscripciones agrupadas por
-    categoría visual, filtrable opcionalmente por curso. Roles: cualquier
-    staff autenticado (cobranza, cpd, admin, superadmin, mae, etc).
-    Estudiantes NO tienen acceso (no les interesa este KPI).
+    F-COBRANZA-035 + F-083: devuelve el conteo de inscripciones agrupadas
+    por categoría visual, filtrable opcionalmente por curso. Roles:
+    cualquier staff autenticado. Estudiantes NO tienen acceso.
     """
     from models.enums import EstadoInscripcion
 
@@ -705,6 +729,7 @@ async def get_enrollments_resumen(
     completados = 0
     cancelados = 0
     pendientes_pago = 0
+    retirados = 0  # F-083
 
     for r in raw:
         estado = r["_id"].get("estado")
@@ -734,6 +759,8 @@ async def get_enrollments_resumen(
                 pasivos_pasivo += count
         elif estado == "completado":
             completados += count
+        elif estado == "retirado":  # F-083
+            retirados += count
 
     total_pasivos = pasivos_congelado + pasivos_pasivo + pasivos_abandono
 
@@ -748,6 +775,7 @@ async def get_enrollments_resumen(
             "abandono": pasivos_abandono,
         },
         "completados": completados,
+        "retirados": retirados,  # F-083: separado de pasivos
         "cancelados": cancelados,  # NO cuentan como inscritos
         "curso_id": str(curso_id) if curso_id else None,
     }
@@ -1413,6 +1441,75 @@ async def reactivar_congelado_endpoint(
     try:
         enrollment = await congelado_service.reactivar_desde_congelado_o_abandono(
             enrollment_id=id, admin_username=current_user.nombre_visible  # ISSUE-R-PERFIL-GENERICO
+        )
+        return await enrollment_service.enrich_enrollment_dates(enrollment)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ========================================================================
+# F-083 (2026-07-28): RETIRO VOLUNTARIO DE INSCRIPCIÓN
+# ========================================================================
+# Pedido Lic. Sorich (chat MS Digital Academy, 2026-07-27 19:40):
+# "Vería la opción de colocar retirados, porque ya no vuelven, no son
+# pasivos; pasivo tiene la opción de volver luego, y retirados ya no
+# vuelven. Analízalo."
+#
+# Distinto de SUSPENDIDO+abandono (que es automático por inactividad y
+# genera multa de reincorporación). RETIRADO es VOLUNTARIO, DEFINITIVO,
+# no genera multa.
+#
+# Lo que ya pagó el estudiante SÍ cuenta como ingreso.
+# Lo que falta NO se cobra (no suma a "Por Cobrar").
+from pydantic import BaseModel as _PydanticBaseModel, Field as _PydanticField
+
+class RetirarEnrollmentRequest(_PydanticBaseModel):
+    motivo_retiro: str = _PydanticField(
+        ...,
+        min_length=5,
+        max_length=500,
+        description="Motivo del retiro (obligatorio, mínimo 5 caracteres). Ej: 'cambio de ciudad', 'problemas económicos'."
+    )
+    notificar_estudiante: bool = _PydanticField(
+        default=True,
+        description="Si True (default), envía notification in-app al estudiante confirmando el retiro."
+    )
+
+
+@router.post(
+    "/{id}/retirar",
+    response_model=EnrollmentResponse,
+    summary="F-083: Retirar Inscripción (abandono definitivo, no vuelve)"
+)
+async def retirar_enrollment_endpoint(
+    *,
+    id: PydanticObjectId,
+    body: RetirarEnrollmentRequest,
+    current_user: User = Depends(require_cpd)  # <-- CPD, ADMIN, SUPERADMIN
+) -> Any:
+    """
+    F-083 (2026-07-28): marca una inscripción como RETIRADO (abandono
+    DEFINITIVO, no vuelve). Distinto de SUSPENDIDO+abandono.
+
+    Reglas de negocio:
+    - Solo CPD/ADMIN/SUPERADMIN pueden retirar (no cobranza, no docente).
+    - El retiro es VOLUNTARIO y DEFINITIVO. No reversible.
+    - Si la inscripción estaba SUSPENDIDA (congelado/pasivo/abandono
+      automático), se limpia motivo_suspension y campos relacionados.
+    - El estudiante recibe notification in-app confirmando.
+    - Lo que ya pagó SÍ cuenta como ingreso. Lo que falta NO se cobra.
+
+    Distinto de abandono automático:
+    - Abandono automático: por inactividad, genera multa de
+      reincorporación al volver.
+    - Retirado: voluntario, definitivo, NO genera multa.
+    """
+    try:
+        enrollment = await enrollment_service.retirar_inscripcion(
+            enrollment_id=id,
+            motivo_retiro=body.motivo_retiro,
+            retirado_por=current_user.username,
+            notificar_estudiante=body.notificar_estudiante
         )
         return await enrollment_service.enrich_enrollment_dates(enrollment)
     except ValueError as e:

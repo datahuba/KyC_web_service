@@ -63,6 +63,31 @@ async def create_student(
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.get(
+    "/me",
+    response_model=StudentResponse,
+    summary="Ver Mi Perfil (Estudiante autenticado)"
+)
+async def read_student_self(
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> Any:
+    """
+    FIX-ERRORES-500: devuelve el perfil del estudiante autenticado.
+    Importante: este endpoint debe declararse ANTES de /{id} para que
+    no se matchee con id="me" (que rompe PydanticObjectId y causaba
+    500 por un ValueError no serializable en exc.errors()).
+    """
+    # F-081: get_current_user retorna Union[User, Student]. Si el token es
+    # de un User (admin/staff), no tiene perfil de Student — devolver 403
+    # en vez de causar 500 al intentar serializar el User como Student.
+    if not isinstance(current_user, Student):
+        raise HTTPException(
+            status_code=403,
+            detail="Este endpoint es solo para estudiantes. Use /auth/me para su perfil."
+        )
+    return current_user
+
+
+@router.get(
     "/{id}",
     response_model=StudentResponse,
     summary="Ver Estudiante"
@@ -76,7 +101,7 @@ async def read_student(
     student = await student_service.get_student(id=id)
     if not student:
         raise HTTPException(status_code=404, detail="Estudiante no encontrado")
-    
+
     if isinstance(current_user, Student) and current_user.id != id:
         raise HTTPException(status_code=403, detail="No tienes permiso")
     return student
@@ -315,7 +340,7 @@ async def upload_student_cv(*, id: PydanticObjectId, file: UploadFile, current_u
     
     cv_url = await _subir_documento_estudiante(file, f"students/{id}/cv", f"cv_{id}")
     student.cv_url = cv_url
-    student.cv_estado = "pendiente"
+    student.cv_estado = "verificado"
     student.cv_motivo_rechazo = None
     await student.save()
     return student
@@ -328,7 +353,7 @@ async def upload_student_carnet(*, id: PydanticObjectId, file: UploadFile, curre
     
     carnet_url = await _subir_documento_estudiante(file, f"students/{id}/carnet", f"carnet_{id}")
     student.carnet_url = carnet_url
-    student.carnet_estado = "pendiente"
+    student.carnet_estado = "verificado"
     student.carnet_motivo_rechazo = None
     await student.save()
     return student
@@ -341,7 +366,7 @@ async def upload_student_afiliacion(*, id: PydanticObjectId, file: UploadFile, c
     
     afiliacion_url = await _subir_documento_estudiante(file, f"students/{id}/afiliacion", f"afiliacion_{id}")
     student.afiliacion_url = afiliacion_url
-    student.afiliacion_estado = "pendiente"
+    student.afiliacion_estado = "verificado"
     student.afiliacion_motivo_rechazo = None
     await student.save()
     return student
@@ -361,7 +386,7 @@ async def upload_student_titulo(
     
     student.titulo = {
         "titulo": titulo, "numero_titulo": numero_titulo, "año_expedicion": año_expedicion,
-        "universidad": universidad, "estado": "pendiente", "titulo_url": titulo_url, "url": titulo_url, "motivo_rechazo": None
+        "universidad": universidad, "estado": "verificado", "titulo_url": titulo_url, "url": titulo_url, "motivo_rechazo": None
     }
     await student.save()
 

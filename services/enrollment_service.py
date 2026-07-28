@@ -435,6 +435,10 @@ async def cambiar_estado_enrollment(
     ahora se bloquean explícitamente; deben usarse los endpoints dedicados
     (/passive-requests/, /enrollments/{id}/congelar,
     /enrollments/{id}/reactivar-congelado).
+
+    F-083 (2026-07-28): también bloquea ir directo a RETIRADO. El retiro
+    requiere registrar motivo_retiro, fecha_retiro, retirado_por, y debe
+    usar el endpoint dedicado /enrollments/{id}/retirar.
     """
     enrollment = await Enrollment.get(enrollment_id)
     if not enrollment:
@@ -446,16 +450,144 @@ async def cambiar_estado_enrollment(
             "Solicitud de Pasivo o el de Congelamiento, que registran motivo y notifican al estudiante."
         )
 
+    if nuevo_estado == EstadoInscripcion.RETIRADO:
+        raise ValueError(
+            "F-083: No se puede retirar una inscripción directamente. "
+            "Usa el endpoint /enrollments/{id}/retirar que registra motivo_retiro y notifica al estudiante."
+        )
+
     if enrollment.estado == EstadoInscripcion.SUSPENDIDO:
         raise ValueError(
             "Esta inscripción está suspendida (pasivo/congelado/abandono). "
             "Usa el endpoint de reactivación correspondiente en vez de cambiar el estado directamente."
         )
 
+    if enrollment.estado == EstadoInscripcion.RETIRADO:
+        raise ValueError(
+            "F-083: Esta inscripción está RETIRADA. El retiro es definitivo: no se puede revertir a "
+            "un estado anterior. Si el estudiante quiere volver, debe crear una nueva inscripción."
+        )
+
     enrollment.estado = nuevo_estado
     enrollment.updated_at = utcnow_naive()
-    
+
     await enrollment.save()
+    return enrollment
+
+
+# ========================================================================
+# F-083 (2026-07-28): RETIRO VOLUNTARIO DE INSCRIPCIÓN
+# ========================================================================
+async def retirar_inscripcion(
+    enrollment_id: PydanticObjectId,
+    motivo_retiro: str,
+    retirado_por: str,
+    notificar_estudiante: bool = True
+) -> Enrollment:
+    """
+    F-083 (2026-07-28): marca una inscripción como RETIRADO (abandono
+    DEFINITIVO, no vuelve). Distinto de SUSPENDIDO+abandono (que es
+    automático por inactividad y genera multa de reincorporación).
+
+    Reglas de negocio (definidas con Lic. Sorich Cobranza y Lic. Sandra
+    Zabala Cobranza, 2026-07-28 12:50 vía WhatsApp):
+    - "retirados ya no vuelven, no son pasivos; pasivo tiene la opción
+      de volver luego, y retirados ya no vuelven" (Lic. Sorich)
+    - "esos ya no debería sumar sus pagos para cuentas por cobrar,
+      solo queda lo que pagaron y se cierra" (Lic. Sorich)
+    - El retiro es VOLUNTARIO (decisión del estudiante o del CPD/admin).
+      Se diferencia del abandono automático (que es por inactividad y SÍ
+      genera multa de reincorporación al volver).
+    - El retiro NO es reversible. Si el estudiante se arrepiente, debe
+      crear una nueva inscripción.
+    - Lo que el estudiante YA pagó SÍ cuenta como ingreso (no se le
+      descuenta). Lo que falta NO se cobra (no suma a "Por Cobrar").
+
+    Args:
+        enrollment_id: ID de la inscripción a retirar
+        motivo_retiro: motivo del retiro (obligatorio, ej: 'cambio de
+            ciudad', 'problemas económicos'). Se persiste en enrollment.
+        retirado_por: username del usuario que ejecuta el retiro
+            (admin/cpd/superadmin) o 'estudiante' si fue autoservicio.
+        notificar_estudiante: si True (default), envía notification
+            in-app al estudiante confirmando el retiro.
+
+    Raises:
+        ValueError: si la inscripción no existe, o si ya está en un
+            estado terminal (COMPLETADO, CANCELADO, RETIRADO).
+
+    Returns:
+        Enrollment actualizado (estado=RETIRADO, motivo_retiro=...,
+        fecha_retiro=now, retirado_por=...).
+    """
+    from core.timezone_utils import utcnow_naive
+
+    enrollment = await Enrollment.get(enrollment_id)
+    if not enrollment:
+        raise ValueError(f"Inscripción {enrollment_id} no encontrada")
+
+    # Validar estado actual: NO se puede retirar si ya es terminal
+    estados_terminales = {
+        EstadoInscripcion.COMPLETADO,
+        EstadoInscripcion.CANCELADO,
+        EstadoInscripcion.RETIRADO,
+    }
+    if enrollment.estado in estados_terminales:
+        raise ValueError(
+            f"F-083: No se puede retirar una inscripción en estado '{enrollment.estado.value}'. "
+            f"El retiro es solo para inscripciones activas o suspendidas (pasivo/congelado)."
+        )
+
+    if not motivo_retiro or not motivo_retiro.strip():
+        raise ValueError("F-083: El motivo del retiro es obligatorio.")
+
+    # Marcar como RETIRADO (mantiene módulos, saldos, pagos históricos)
+    estado_anterior = enrollment.estado
+    enrollment.estado = EstadoInscripcion.RETIRADO
+    enrollment.motivo_retiro = motivo_retiro.strip()
+    enrollment.fecha_retiro = utcnow_naive()
+    enrollment.retirado_por = retirado_por
+    enrollment.updated_at = utcnow_naive()
+
+    # Limpiar campos de suspensión si venía de SUSPENDIDO (porque ya no
+    # está "suspendido", está "retirado" definitivo)
+    if estado_anterior == EstadoInscripcion.SUSPENDIDO:
+        enrollment.motivo_suspension = None
+        enrollment.fecha_congelamiento = None
+        enrollment.tasa_congelamiento_pagada = False
+        enrollment.fecha_abandono = None
+        enrollment.multa_reincorporacion_pendiente = False
+        enrollment.mora_notificada = False
+
+    await enrollment.save()
+
+    # Notificar al estudiante
+    if notificar_estudiante:
+        try:
+            from services.notification_service import create_notification
+            await create_notification(
+                destinatario_id=enrollment.estudiante_id,
+                tipo_destinatario="student",
+                titulo="Tu inscripción fue retirada",
+                mensaje=(
+                    f"Tu inscripción al curso fue marcada como RETIRADO. "
+                    f"Motivo: {motivo_retiro.strip()}. "
+                    f"Lo que ya pagaste queda registrado como ingreso a tu favor; "
+                    f"no se te cobrará el saldo pendiente. "
+                    f"Si tienes dudas, contacta al CPD."
+                ),
+                tipo_alerta="warning",
+                ruta="/app/enrollments",
+                referencia_tipo="enrollment",
+                referencia_id=enrollment.id
+            )
+        except Exception as notif_err:
+            # Si la notification falla, no rompemos el flujo principal
+            import logging
+            logging.getLogger("kyc.enrollment").warning(
+                f"F-083: no se pudo notificar al estudiante {enrollment.estudiante_id}: {notif_err}"
+            )
+
     return enrollment
 
 

@@ -23,6 +23,7 @@ import pymongo
 from pydantic import BaseModel, Field, validator
 from .base import MongoBaseModel, PyObjectId
 from .enums import TipoCurso, Modalidad
+from .estado_programa import EstadoPrograma, calcular_estado_actual
 from .requisito import RequisitoTemplate
 
 # ========================================================================
@@ -190,10 +191,29 @@ class Course(MongoBaseModel):
     # ========================================================================
     # ESTADO
     # ========================================================================
-    
+
     activo: bool = Field(
         default=True,
         description="Si el curso está activo y acepta inscripciones"
+    )
+
+    # F-080: estado calculado automáticamente por fechas (programado /
+    # en_ejecucion / cerrado). Se persiste como string para evitar migraciones
+    # futuras si agregamos más valores. El frontend debe preferir el campo
+    # calculado `estado_calculado` del response, no este.
+    estado: str = Field(
+        default=EstadoPrograma.EN_EJECUCION.value,
+        description="Estado persistido del programa (F-080). Por default 'en_ejecucion' para retrocompatibilidad con cursos existentes."
+    )
+
+    estado_override: Optional[str] = Field(
+        default=None,
+        description="Override manual del estado (F-080). Si está definido y es válido, tiene prioridad sobre el cálculo por fechas. Útil para suspensiones o extensiones manuales."
+    )
+
+    resolucion_pdf_url: Optional[str] = Field(
+        default=None,
+        description="URL del PDF de la resolución que respalda el programa (F-080)."
     )
     
     # ========================================================================
@@ -234,6 +254,28 @@ class Course(MongoBaseModel):
         (ISSUE-P-CARGO-MULTIITEM). 0.0 si la lista está vacía.
         """
         return round(sum(item.costo for item in self.cargo_adicional_items), 2)
+
+    def get_estado_actual(self, ahora: Optional[datetime] = None) -> str:
+        """
+        F-080: devuelve el estado actual del programa, aplicando la lógica
+        de cálculo automático con override (helper `calcular_estado_actual`
+        de este mismo módulo). El parámetro `ahora` se acepta para tests
+        deterministas.
+        """
+        return calcular_estado_actual(
+            self.fecha_inicio,
+            self.fecha_fin,
+            self.estado_override,
+            ahora=ahora,
+        )
+
+    def acepta_inscripciones(self) -> bool:
+        """
+        F-080: True si el estado actual del programa permite nuevas
+        solicitudes de inscripción. Un programa CERRADO NO acepta.
+        PROGRAMADO y EN_EJECUCION sí.
+        """
+        return self.get_estado_actual() != EstadoPrograma.CERRADO.value
     
     class Settings:
         name = "courses"

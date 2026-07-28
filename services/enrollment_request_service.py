@@ -49,6 +49,16 @@ async def create_enrollment_request(
     if not course.activo:
         raise ValueError("Este curso no está activo actualmente y no acepta solicitudes")
 
+    # F-080: bloquear inscripción a programas CERRADOS (por fecha o por override).
+    # PROGRAMADO y EN_EJECUCION sí aceptan solicitudes.
+    from models.enums import EstadoPrograma
+    estado_actual = course.get_estado_actual()
+    if estado_actual == EstadoPrograma.CERRADO.value:
+        raise ValueError(
+            "Este programa ya fue cerrado y no acepta nuevas solicitudes de inscripción. "
+            "Para más información contacta a la oficina de posgrado."
+        )
+
     # No permitir duplicar solicitud pendiente para el mismo curso
     existente = await EnrollmentRequest.find_one(
         EnrollmentRequest.estudiante_id == current_student.id,

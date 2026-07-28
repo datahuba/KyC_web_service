@@ -150,6 +150,24 @@ class Enrollment(MongoBaseModel):
     multa_reincorporacion_pendiente: bool = Field(default=False, description="Si al reactivar esta inscripción corresponde cobrar la multa de reincorporación (300 Bs) por abandono.")
     mora_notificada: bool = Field(default=False, description="Si ya se notificó al encargado/CPD de mora preventiva (evita re-notificar en cada corrida del job).")
 
+    # F-083 (2026-07-28): estado RETIRADO (abandono definitivo, no vuelve).
+    # Distinto de SUSPENDIDO+abandono: el retirado es VOLUNTARIO (decisión del
+    # estudiante o decisión administrativa), mientras que el abandono es
+    # AUTOMÁTICO (el sistema lo detectó por inactividad). El retirado NO
+    # genera multa de reincorporación.
+    motivo_retiro: Optional[str] = Field(
+        default=None,
+        description="Motivo del retiro (ej: 'cambio de ciudad', 'problemas económicos', 'decisión administrativa'). None si estado != RETIRADO."
+    )
+    fecha_retiro: Optional[datetime] = Field(
+        default=None,
+        description="Fecha (UTC) en que se marcó la inscripción como RETIRADO. None si estado != RETIRADO."
+    )
+    retirado_por: Optional[str] = Field(
+        default=None,
+        description="Username del usuario (admin/cpd/superadmin) que registró el retiro. None si fue el estudiante via autoservicio."
+    )
+
     # ISSUE-P-RECALCULO-NOTA: snapshot de la nota mínima exigida por el descuento personal
     nota_minima_beca: Optional[float] = Field(
         default=None, ge=0, le=100,

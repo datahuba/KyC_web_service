@@ -210,10 +210,26 @@ class Payment(MongoBaseModel):
             "inscripcion_id",
             "estudiante_id",
             "curso_id",
-            "numero_transaccion",
             "concepto",
             "metodo_pago",
             [("estado_pago", pymongo.ASCENDING), ("fecha_subida", pymongo.DESCENDING)],
-            [("fecha_subida", pymongo.DESCENDING)]
+            [("fecha_subida", pymongo.DESCENDING)],
+            # F-082 (2026-07-28): indice UNICO PARCIAL en numero_transaccion
+            # para evitar duplicados. Caso real: Medardo Balvino Rojas (CI
+            # 2720765) subio el mismo comprobante 2 veces y el sistema permitio
+            # ambos. La validacion en payment_service.create_payment se puede
+            # saltar por race condition. Este indice es la red de seguridad a
+            # nivel de MongoDB. Excluimos RECHAZADO y ANULADO para que
+            # Cobranza pueda re-aprobar un pago tras corregir errores, y
+            # excluimos None porque Caja no tiene NRO transaccion.
+            pymongo.IndexModel(
+                [("numero_transaccion", pymongo.ASCENDING)],
+                unique=True,
+                partialFilterExpression={
+                    "numero_transaccion": {"$exists": True, "$type": "string"},
+                    "estado_pago": {"$in": ["pendiente", "aprobado"]},
+                },
+                name="uniq_numero_transaccion_activo"
+            ),
         ]
         

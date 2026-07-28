@@ -1958,6 +1958,26 @@ async def get_resumen_modulos_endpoint(
     )
 
 @router.get(
+    "/me",
+    response_model=List[PaymentResponse],
+    summary="Ver Mis Pagos (Estudiante autenticado)"
+)
+async def get_my_payments(
+    current_user: Student = Depends(get_current_user)
+) -> Any:
+    """
+    FIX-ERRORES-500: lista los pagos del estudiante autenticado.
+    Importante: este endpoint debe declararse ANTES de /{id} para que
+    no se matchee con id="me" (que rompe PydanticObjectId).
+    """
+    from beanie import PydanticObjectId
+    payments = await Payment.find(
+        Payment.estudiante_id == PydanticObjectId(current_user.id)
+    ).sort("-created_at").to_list()
+    return payments
+
+
+@router.get(
     "/{id}",
     response_model=PaymentResponse,
     summary="Ver Pago"
@@ -1970,7 +1990,7 @@ async def get_payment(
     payment = await payment_service.get_payment(id)
     if not payment:
         raise HTTPException(status_code=404, detail="Pago no encontrado")
-    
+
     if isinstance(current_user, Student):
         if payment.estudiante_id != current_user.id:
             raise HTTPException(
