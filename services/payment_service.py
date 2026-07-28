@@ -7,6 +7,7 @@ Auditoría y Algoritmo de Prorrateo.
 """
 
 from typing import List, Optional
+from collections import defaultdict
 import asyncio
 from datetime import datetime, timedelta
 from models.payment import Payment
