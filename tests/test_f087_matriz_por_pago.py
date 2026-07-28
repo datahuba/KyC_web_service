@@ -105,15 +105,30 @@ class TestF087FuncionesServicio:
             assert param in body, f"F-087: `get_matriz_por_pago` debe aceptar param `{param}`"
 
     def test_get_matriz_por_pago_parsea_conceptos_multiples(self):
-        """Si el concepto dice 'Pago Módulos 1, 2' debe splitearse en 2 filas."""
+        """F-087-FIX: el concepto 'Pago Módulos 1, 2' ya NO se prorratea.
+        Cada pago = 1 fila. Los módulos cubiertos van en `modulos_cubiertos`."""
         content = read(PAYMENT_SERVICE_FILE)
         body = get_function_body(content, "get_matriz_por_pago")
-        # Verifica que itera sobre los modulos del pago
+        # Verifica que itera sobre los modulos del pago (para el filtro)
         assert "modulos_del_pago" in body, (
-            "F-087: `get_matriz_por_pago` debe iterar sobre `modulos_del_pago`"
+            "F-087: `get_matriz_por_pago` debe iterar sobre `modulos_del_pago` para el filtro"
         )
-        assert "per_modulo" in body, (
-            "F-087: debe prorratear el monto entre los módulos"
+        # F-087-FIX: NO debe prorratear. El monto va entero.
+        assert "per_modulo" not in body, (
+            "F-087-FIX: NO se debe prorratear el monto entre módulos. "
+            "Cada pago = 1 fila con su monto total."
+        )
+        # Debe usar modulos_cubiertos en _pago_to_fila
+        assert "modulos_cubiertos" in body, (
+            "F-087: debe pasar `modulos_cubiertos` a `_pago_to_fila` para que la UI muestre los módulos"
+        )
+
+    def test_pago_to_fila_incluye_modulos_cubiertos(self):
+        """F-087-FIX: _pago_to_fila debe aceptar y retornar modulos_cubiertos."""
+        content = read(PAYMENT_SERVICE_FILE)
+        body = get_function_body(content, "_pago_to_fila")
+        assert "modulos_cubiertos" in body, (
+            "F-087: _pago_to_fila debe manejar el campo `modulos_cubiertos`"
         )
 
     def test_parse_matricula_devuelve_indice_0(self):

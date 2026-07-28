@@ -1690,40 +1690,47 @@ async def get_matriz_por_pago(
     cursos_list = await Course.find({"_id": {"$in": curso_ids}}).to_list() if curso_ids else []
     cursos_map = {c.id: c for c in cursos_list}
 
-    # Expandir: 1 pago multi-módulo → N filas
+    # Expandir: 1 pago = 1 fila (NO se parte en múltiples filas).
+    # F-087-FIX (2026-07-28): Kevin reportó que partir "Pago Módulos 1, 2, 3, 4"
+    # de Bs 588 en 4 filas de Bs 147 era confuso. Ahora cada pago aparece UNA
+    # sola vez, con su monto total, y se añade `modulos_cubiertos` (lista)
+    # para que la UI pueda mostrar todos los módulos que cubre.
     filas = []
     for p in pagos:
         estudiante = estudiantes_map.get(p.estudiante_id)
         curso = cursos_map.get(p.curso_id)
         modulos_del_pago = _parse_modulos_de_concepto(p.concepto or "")
 
-        # Si el concepto no tiene módulos parseables, lo reportamos como
-        # "sin módulo identificado" (modulo_index = None) en una sola fila.
-        if not modulos_del_pago:
-            # Si el usuario filtra por modulo_index y no hay match, no
-            # incluir.
-            if modulo_index is not None:
+        # Filtro por modulo_index: si el usuario filtró por un módulo específico
+        # y este pago NO incluye ese módulo en su cobertura, lo saltamos.
+        if modulo_index is not None:
+            if not modulos_del_pago or modulo_index not in modulos_del_pago:
                 continue
-            filas.append(_pago_to_fila(p, estudiante, curso, None, p.monto_comprobante or 0, p.concepto))
-            continue
 
-        # Si el usuario filtra por modulo_index, solo incluir las filas que
-        # coincidan. Si no filtra, incluir todas las filas del pago.
-        modulos_a_emitir = [m for m in modulos_del_pago if modulo_index is None or m == modulo_index]
-        if not modulos_a_emitir:
-            continue
+        # modulo_index para la fila: el "primario" del pago.
+        # - Si es matrícula (0): modulo_index = 0
+        # - Si es multi-módulo: modulo_index = el primero (para orden y filtros)
+        # - Si no hay módulos parseables: modulo_index = None
+        if 0 in modulos_del_pago:
+            modulo_index_row = 0
+        elif modulos_del_pago:
+            modulo_index_row = modulos_del_pago[0]
+        else:
+            modulo_index_row = None
 
-        per_modulo = (p.monto_comprobante or 0) / len(modulos_a_emitir)
-        # Para modulo 0 (matrícula) emitimos 1 fila con monto completo
-        if 0 in modulos_a_emitir:
-            filas.append(_pago_to_fila(p, estudiante, curso, 0, p.monto_comprobante or 0, p.concepto))
-            modulos_a_emitir = [m for m in modulos_a_emitir if m != 0]
-        for m in modulos_a_emitir:
-            # Nombre del módulo desde el curso
-            mod_nombre = None
-            if curso and curso.modulos and 1 <= m <= len(curso.modulos):
-                mod_nombre = curso.modulos[m - 1].nombre if hasattr(curso.modulos[m - 1], 'nombre') else str(curso.modulos[m - 1])
-            filas.append(_pago_to_fila(p, estudiante, curso, m, per_modulo, p.concepto, mod_nombre))
+        # Nombre del módulo (del curso) si es un solo módulo
+        modulo_nombre = None
+        if curso and curso.modulos and modulo_index_row and 1 <= modulo_index_row <= len(curso.modulos):
+            m_obj = curso.modulos[modulo_index_row - 1]
+            modulo_nombre = m_obj.nombre if hasattr(m_obj, 'nombre') else str(m_obj)
+
+        # monto_asignado: el monto total del pago (sin partir).
+        monto_total = p.monto_comprobante or 0
+        filas.append(_pago_to_fila(
+            p, estudiante, curso,
+            modulo_index_row, monto_total, p.concepto, modulo_nombre,
+            modulos_cubiertos=modulos_del_pago,
+        ))
 
     # Paginación
     total = len(filas)
@@ -1760,7 +1767,7 @@ async def get_matriz_por_pago(
     }
 
 
-def _pago_to_fila(p, estudiante, curso, modulo_index, monto_asignado, concepto, modulo_nombre=None):
+def _pago_to_fila(p, estudiante, curso, modulo_index, monto_asignado, concepto, modulo_nombre=None, modulos_cubiertos=None):
     """
     Helper F-087: convierte un documento Payment en una fila para la vista
     Por Pago. Si modulo_index es None, no se imputa a un módulo específico
@@ -1793,9 +1800,9 @@ def _pago_to_fila(p, estudiante, curso, modulo_index, monto_asignado, concepto, 
         "curso_nombre": curso_nombre,
         "modulo_index": modulo_index,
         "modulo_nombre": modulo_nombre,
+        "modulos_cubiertos": modulos_cubiertos or [],  # F-087-FIX: lista de todos los módulos que cubre este pago
         "concepto": concepto,
         "monto": round(monto_asignado, 2),
-        "monto_total_pago": p.monto_comprobante,  # monto total del documento (no prorrateado)
         "estado_pago": p.estado_pago,
         "subido_por": p.subido_por,  # None | "estudiante" | "encargado"
         "metodo_pago": p.metodo_pago,
