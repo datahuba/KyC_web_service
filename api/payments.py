@@ -139,13 +139,21 @@ async def create_payment(
                 student_id=target_student_id,
                 auto_approve=True,
                 approved_by=current_user.username,
-                skip_ownership_check=True
+                skip_ownership_check=True,
+                # F-087: staff subiendo via /payments/ → subido_por="estudiante"
+                # (semánticamente: el staff está subiendo en nombre del estudiante).
+                # Para distinguir esto del caso upload-by-encargado (que se
+                # llama desde otro endpoint y se setea allí), usamos "estudiante"
+                # porque el endpoint es el genérico de creación.
+                subido_por="estudiante",
             )
         else:
             payment = await payment_service.create_payment(
                 payment_in=payment_in,
                 student_id=current_user.id,
-                auto_approve=False
+                auto_approve=False,
+                # F-087: estudiante subiendo su propio comprobante.
+                subido_por="estudiante",
             )
         
         return await payment_service.enrich_payment_with_details(payment)
@@ -278,6 +286,10 @@ async def create_payment_by_staff(
             auto_approve=True,
             approved_by=current_user.username,
             skip_ownership_check=True,
+            # F-087: staff registrando el pago COMPLETO en nombre del estudiante
+            # (no es el caso "estudiante subió comprobante"). Es el encargado
+            # quien hizo todo el registro, así que subido_por="encargado".
+            subido_por="encargado",
         )
 
         # F-COBRANZA-014: el saldo del enrollment se actualiza dentro de
@@ -1937,6 +1949,80 @@ async def get_matriz_pagos_endpoint(
 
 
 @router.get(
+    "/matriz/por-pago",
+    summary="F-087: Vista 'Por Pago' de Gestión de Pagos (1 fila por pago individual)",
+)
+async def get_matriz_por_pago_endpoint(
+    curso_id: Optional[str] = Query(
+        None,
+        description="Filtrar por curso. None = todos los cursos del alcance del usuario",
+    ),
+    modulo_index: Optional[int] = Query(
+        None,
+        ge=0,
+        description="Filtrar por módulo (0=matrícula, 1..N=módulos)",
+    ),
+    estado_pago: Optional[str] = Query(
+        None,
+        description="Filtrar por estado: aprobado | pendiente | rechazado | anulado",
+    ),
+    subido_por: Optional[str] = Query(
+        None,
+        description='Filtrar por quién subió: "estudiante" | "encargado"',
+    ),
+    page: int = Query(1, ge=1, description="Número de página"),
+    per_page: int = Query(50, ge=1, le=500, description="Resultados por página (max 500)"),
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    F-087 (2026-07-28): 3ra vista de Gestión de Pagos. A diferencia de la
+    matriz tradicional (que agrupa por estudiante y suma por módulo), esta
+    vista muestra UNA FILA POR CADA PAGO INDIVIDUAL, para que Kevin/Sandra
+    puedan auditar el origen de cada Bs.
+
+    Cada fila incluye: estudiante, CI, curso, módulo (parseado del concepto),
+    monto, fecha_subida, fecha_comprobante, número de transacción, comprobante
+    URL, quién subió (estudiante/encargado/null), método de pago, banco,
+    remitente, y estado.
+
+    La columna modulo_index intenta ser precisa:
+    - Si concepto = "Matrícula" → modulo_index = 0
+    - Si concepto = "Pago Módulo 1" → modulo_index = 1
+    - Si concepto = "Pago Módulos 1, 2" → modulo_index = 1 y se crea una segunda
+      fila con modulo_index = 2 (split prorrateado del monto, igual que la
+      matriz tradicional).
+
+    Nota sobre sub-pagos: el split es una vista, no un cambio en BD. El pago
+    real sigue siendo 1 documento. Si en el futuro se quiere granularidad
+    estricta, se debe modelar a nivel de sub-pagos en el schema.
+
+    Reglas:
+    - Permiso: `puede_ver_economico` (mismo que la matriz).
+    - Respeta segmentación de cursos por rol (cobranza con cursos_asignados).
+    - Ordena por fecha_subida DESC (lo más reciente primero).
+    - Paginación: page/per_page. Default 50 por página.
+    """
+    if not puede_ver_economico(current_user):
+        raise HTTPException(status_code=403, detail="No autorizado para ver pagos por-pago")
+
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
+    from beanie import PydanticObjectId as _POI
+    curso_oid = _POI(curso_id) if curso_id else None
+
+    return await payment_service.get_matriz_por_pago(
+        cursos_permitidos=cursos_permitidos,
+        curso_id=curso_oid,
+        modulo_index=modulo_index,
+        estado_pago=estado_pago,
+        subido_por=subido_por,
+        page=page,
+        per_page=per_page,
+    )
+
+
+@router.get(
     "/resumen-modulos",
     summary="F-074: Resumen por módulo (KPI cards vista Matriz)",
 )
@@ -2251,6 +2337,12 @@ async def upload_comprobante_by_encargado(
                 )
 
         await Payment.find_one({"_id": id}).update({"$set": update_dict})
+
+        # F-087 (2026-07-28): marca el pago como subido por encargado, ya sea
+        # que el comprobante sea nuevo o que se esté reemplazando uno anterior.
+        # La acción la hizo el encargado, no el estudiante, así que este campo
+        # refleja al responsable más reciente de la subida.
+        await Payment.find_one({"_id": id}).update({"$set": {"subido_por": "encargado"}})
 
         # Re-leer el pago actualizado
         payment = await payment_service.get_payment(id)

@@ -151,7 +151,16 @@ class Payment(MongoBaseModel):
         None,
         description="Razón de la anulación (si estado_pago = ANULADO, e.j: Cheque sin fondos)"
     )
-    
+
+    # F-087 (2026-07-28): Quién subió el comprobante. None para pagos antiguos
+    # (previos a este feature), "estudiante" cuando lo subió el propio estudiante
+    # via /payments/, "encargado" cuando lo subió personal de Cobranza via
+    # /payments/{id}/upload-by-encargado. La UI muestra "—" cuando es null.
+    subido_por: Optional[str] = Field(
+        None,
+        description='Quién subió el comprobante: "estudiante" | "encargado" | None (pagos antiguos)'
+    )
+
     # ========================================================================
     # MÉTODOS
     # ========================================================================

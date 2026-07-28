@@ -1445,7 +1445,7 @@ class TestF034ByStaffSkipOwnershipCheck:
     def test_create_payment_check_envuelve_con_skip(self, service_src):
         """El check enrollment.estudiante_id != student_id debe estar envuelto en `if not skip_ownership_check`."""
         idx = service_src.read_text(encoding="utf-8").find("async def create_payment")
-        bloque = service_src.read_text(encoding="utf-8")[idx:idx + 2000]
+        bloque = service_src.read_text(encoding="utf-8")[idx:idx + 5000]
         # Verificar que el check esta dentro de un `if not skip_ownership_check`
         assert "if not skip_ownership_check" in bloque, (
             "El check debe estar condicionado a skip_ownership_check=False. "

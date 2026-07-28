@@ -437,7 +437,8 @@ async def create_payment(
     student_id: PydanticObjectId,
     auto_approve: bool = True,
     approved_by: Optional[str] = None,
-    skip_ownership_check: bool = False
+    skip_ownership_check: bool = False,
+    subido_por: Optional[str] = None
 ) -> Payment:
     """
     Crear un nuevo pago. Soporta pagos digitales o pagos físicos en CAJA (sin voucher).
@@ -460,6 +461,10 @@ async def create_payment(
             string del Form, mientras enrollment.estudiante_id es PydanticObjectId.
             La comparación siempre era True, bloqueando a cobranza para registrar
             pagos en nombre de cualquier estudiante.
+        subido_por: F-087 (2026-07-28). Indica quién subió el comprobante:
+            "estudiante" (cuando el propio estudiante usa /payments/),
+            "encargado" (cuando cobranza/admin usa /payments/{id}/upload-by-encargado),
+            o None (pagos antiguos previos al feature, la UI muestra "—").
 
     Raises:
         ValueError: si la inscripción no existe, o si skip_ownership_check=False
@@ -561,6 +566,11 @@ async def create_payment(
         # conciliación con el extracto bancario.
         estado_pago=EstadoPago.APROBADO if auto_approve else EstadoPago.PENDIENTE,
         verificado_por=None,  # se setea más abajo
+
+        # F-087 (2026-07-28): quién subió el comprobante. None para pagos
+        # antiguos; "estudiante" o "encargado" para nuevos. Usado por la
+        # nueva vista "Por Pago" en /app/payments.
+        subido_por=subido_por,
     )
     # Setear fecha_verificacion y verificado_por manualmente porque aprobar_pago()
     # es un método de instancia que asume que ya está insertado.
@@ -1584,6 +1594,218 @@ async def get_matriz_pagos(
             "modulo_index": modulo_index,
             "cursos_count": len(courses_list),
         },
+    }
+
+
+# F-087 (2026-07-28): Vista "Por Pago" - 1 fila por cada pago individual
+# (a diferencia de la matriz que agrupa por estudiante/módulo). El objetivo es
+# dar visibilidad a la auditoría: cada pago llega con su comprobante, su
+# número de transacción, su fecha, y su responsable de subida.
+# Si el concepto cubre varios módulos ("Pago Módulos 1, 2") se generan 2 filas
+# en la salida, una por módulo, prorrateando el monto. Esto es SOLO vista;
+# en BD sigue siendo 1 documento.
+
+def _parse_modulos_de_concepto(concepto: str) -> list:
+    """
+    Devuelve la lista de modulo_index mencionados en un concepto.
+    - "Matrícula" / "Módulo" (genérico) → [] (no se sabe a qué módulo va)
+    - "Pago Módulo 1" → [1]
+    - "Pago Módulos 1, 2" → [1, 2]
+    - "Pago Módulos 1, 2, 3" → [1, 2, 3]
+    - "Pago parcial Módulos 2, 3" → [2, 3]
+    """
+    import re
+    if not concepto:
+        return []
+    c = concepto.upper()
+    if "MATRIC" in c:
+        return [0]
+    nums = re.findall(r'\d+', c)
+    return [int(n) for n in nums if 1 <= int(n) <= 9]
+
+
+async def get_matriz_por_pago(
+    cursos_permitidos: Optional[List[PydanticObjectId]] = None,
+    curso_id: Optional[PydanticObjectId] = None,
+    modulo_index: Optional[int] = None,
+    estado_pago: Optional[str] = None,
+    subido_por: Optional[str] = None,
+    page: int = 1,
+    per_page: int = 50,
+) -> dict:
+    """
+    F-087 (2026-07-28): devuelve 1 fila por cada pago individual, sin agrupar.
+
+    A diferencia de la matriz tradicional, esta vista NO agrega por estudiante
+    ni por módulo. Permite a Kevin/Sandra auditar cada Bs: cada pago lleva
+    su comprobante, su número de transacción, su fecha, y quién lo subió.
+
+    Reglas:
+    - `cursos_permitidos`: si se pasa (cobranza con cursos_asignados), filtra
+      a esos cursos. None = todos.
+    - `curso_id`: filtro adicional por curso específico.
+    - `modulo_index`: filtra por módulo. Para pagos que cubren varios
+      módulos ("Pago Módulos 1, 2"), el pago aparece en el resultado SOLO
+      si modulo_index coincide con uno de los módulos del concepto.
+    - `estado_pago`: filtra por estado. Si None, devuelve todos.
+    - `subido_por`: filtra por "estudiante" | "encargado" | None.
+    - Paginación: page (1-indexed), per_page (max 500).
+
+    Salida: lista de pagos expandida donde cada pago multi-módulo produce
+    N filas (una por módulo, con monto prorrateado). Cada fila tiene los
+    datos del estudiante, del curso, del pago original, y del módulo
+    específico al que se imputa.
+    """
+    match: dict = {}
+    if cursos_permitidos is not None:
+        match["curso_id"] = {"$in": cursos_permitidos}
+    if curso_id is not None:
+        match["curso_id"] = curso_id
+    if estado_pago:
+        match["estado_pago"] = estado_pago
+    if subido_por is not None:
+        # Permite filtrar por null también (pagos antiguos). Si subido_por
+        # es "" o "null" lo interpretamos como None real.
+        if subido_por in ("", "null", "None"):
+            match["subido_por"] = None
+        else:
+            match["subido_por"] = subido_por
+
+    # Traemos todos los pagos que matchean (sin paginar todavía). El conteo
+    # puede ser alto (cientos por cohorte) pero el filtro por curso reduce.
+    # Si el rendimiento es problema, podemos paginar en BD primero y expandir
+    # después.
+    from models.payment import Payment
+    from models.student import Student
+    from models.course import Course
+
+    pagos = await Payment.find(match).sort("-fecha_subida").to_list()
+
+    # Estudiantes y cursos en batch
+    est_ids = list({p.estudiante_id for p in pagos})
+    estudiantes_list = await Student.find({"_id": {"$in": est_ids}}).to_list() if est_ids else []
+    estudiantes_map = {s.id: s for s in estudiantes_list}
+
+    curso_ids = list({p.curso_id for p in pagos})
+    cursos_list = await Course.find({"_id": {"$in": curso_ids}}).to_list() if curso_ids else []
+    cursos_map = {c.id: c for c in cursos_list}
+
+    # Expandir: 1 pago multi-módulo → N filas
+    filas = []
+    for p in pagos:
+        estudiante = estudiantes_map.get(p.estudiante_id)
+        curso = cursos_map.get(p.curso_id)
+        modulos_del_pago = _parse_modulos_de_concepto(p.concepto or "")
+
+        # Si el concepto no tiene módulos parseables, lo reportamos como
+        # "sin módulo identificado" (modulo_index = None) en una sola fila.
+        if not modulos_del_pago:
+            # Si el usuario filtra por modulo_index y no hay match, no
+            # incluir.
+            if modulo_index is not None:
+                continue
+            filas.append(_pago_to_fila(p, estudiante, curso, None, p.monto_comprobante or 0, p.concepto))
+            continue
+
+        # Si el usuario filtra por modulo_index, solo incluir las filas que
+        # coincidan. Si no filtra, incluir todas las filas del pago.
+        modulos_a_emitir = [m for m in modulos_del_pago if modulo_index is None or m == modulo_index]
+        if not modulos_a_emitir:
+            continue
+
+        per_modulo = (p.monto_comprobante or 0) / len(modulos_a_emitir)
+        # Para modulo 0 (matrícula) emitimos 1 fila con monto completo
+        if 0 in modulos_a_emitir:
+            filas.append(_pago_to_fila(p, estudiante, curso, 0, p.monto_comprobante or 0, p.concepto))
+            modulos_a_emitir = [m for m in modulos_a_emitir if m != 0]
+        for m in modulos_a_emitir:
+            # Nombre del módulo desde el curso
+            mod_nombre = None
+            if curso and curso.modulos and 1 <= m <= len(curso.modulos):
+                mod_nombre = curso.modulos[m - 1].nombre if hasattr(curso.modulos[m - 1], 'nombre') else str(curso.modulos[m - 1])
+            filas.append(_pago_to_fila(p, estudiante, curso, m, per_modulo, p.concepto, mod_nombre))
+
+    # Paginación
+    total = len(filas)
+    start = (page - 1) * per_page
+    end = start + per_page
+    filas_pag = filas[start:end]
+
+    # Resumen
+    total_aprobado = sum(f["monto"] for f in filas if f["estado_pago"] == "aprobado")
+    total_anulado = sum(f["monto"] for f in filas if f["estado_pago"] == "anulado")
+    total_pendiente = sum(f["monto"] for f in filas if f["estado_pago"] == "pendiente")
+    total_rechazado = sum(f["monto"] for f in filas if f["estado_pago"] == "rechazado")
+
+    return {
+        "items": filas_pag,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": (total + per_page - 1) // per_page if per_page else 1,
+        "resumen": {
+            "total_aprobado": round(total_aprobado, 2),
+            "total_anulado": round(total_anulado, 2),
+            "total_pendiente": round(total_pendiente, 2),
+            "total_rechazado": round(total_rechazado, 2),
+            "total_pagos": total,
+            "pagos_con_comprobante": sum(1 for f in filas if f.get("comprobante_url")),
+        },
+        "filtros_aplicados": {
+            "curso_id": str(curso_id) if curso_id else None,
+            "modulo_index": modulo_index,
+            "estado_pago": estado_pago,
+            "subido_por": subido_por,
+        },
+    }
+
+
+def _pago_to_fila(p, estudiante, curso, modulo_index, monto_asignado, concepto, modulo_nombre=None):
+    """
+    Helper F-087: convierte un documento Payment en una fila para la vista
+    Por Pago. Si modulo_index es None, no se imputa a un módulo específico
+    (caso de conceptos genéricos o sin módulo identificable).
+    """
+    from beanie import PydanticObjectId as _POI
+    ci = None
+    registro = None
+    nombre = None
+    if estudiante:
+        ci = estudiante.carnet
+        registro = estudiante.registro
+        nombre = f"{estudiante.nombre or ''} {estudiante.apellido or ''}".strip()
+
+    curso_codigo = curso.codigo if curso else None
+    curso_nombre = curso.nombre_programa if curso else None
+
+    return {
+        "payment_id": str(p.id),
+        "inscripcion_id": str(p.inscripcion_id),
+        "estudiante_id": str(p.estudiante_id) if p.estudiante_id else None,
+        "estudiante_nombre": nombre,
+        "estudiante_ci": ci,
+        "estudiante_registro": registro,
+        "curso_id": str(p.curso_id) if p.curso_id else None,
+        "curso_codigo": curso_codigo,
+        "curso_nombre": curso_nombre,
+        "modulo_index": modulo_index,
+        "modulo_nombre": modulo_nombre,
+        "concepto": concepto,
+        "monto": round(monto_asignado, 2),
+        "monto_total_pago": p.monto_comprobante,  # monto total del documento (no prorrateado)
+        "estado_pago": p.estado_pago,
+        "subido_por": p.subido_por,  # None | "estudiante" | "encargado"
+        "metodo_pago": p.metodo_pago,
+        "banco": p.banco,
+        "remitente": p.remitente,
+        "numero_transaccion": p.numero_transaccion,
+        "comprobante_url": p.comprobante_url,
+        "fecha_subida": p.fecha_subida.isoformat() if p.fecha_subida else None,
+        "fecha_comprobante": p.fecha_comprobante.isoformat() if p.fecha_comprobante else None,
+        "fecha_verificacion": p.fecha_verificacion.isoformat() if p.fecha_verificacion else None,
+        "verificado_por": p.verificado_por,
+        "motivo_rechazo": p.motivo_rechazo,
+        "motivo_reversion": p.motivo_reversion,
     }
 
 
