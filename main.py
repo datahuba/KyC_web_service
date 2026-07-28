@@ -211,15 +211,17 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     # FIX-ERRORES-500: exc.errors() puede contener ValueError u objetos no
     # serializables en el campo 'ctx' (típico de validadores custom que
     # lanzan ValueError). Sanitizar el detalle para evitar 500 en el 422.
+    import json as _json
     safe_errors = []
     for err in exc.errors():
         clean = {k: v for k, v in err.items() if k != "ctx"}
         if "ctx" in err:
+            ctx_value = err["ctx"]
             try:
-                json.dumps(err["ctx"])
-                clean["ctx"] = err["ctx"]
+                _json.dumps(ctx_value, default=str)
+                clean["ctx"] = ctx_value
             except (TypeError, ValueError):
-                clean["ctx"] = {"error": str(err["ctx"])}
+                clean["ctx"] = {"error": str(ctx_value)}
         safe_errors.append(clean)
     return JSONResponse(
         status_code=422,
