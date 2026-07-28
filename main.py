@@ -208,9 +208,22 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     await _persist_error_log(request, exc, status_code=422)
+    # FIX-ERRORES-500: exc.errors() puede contener ValueError u objetos no
+    # serializables en el campo 'ctx' (típico de validadores custom que
+    # lanzan ValueError). Sanitizar el detalle para evitar 500 en el 422.
+    safe_errors = []
+    for err in exc.errors():
+        clean = {k: v for k, v in err.items() if k != "ctx"}
+        if "ctx" in err:
+            try:
+                json.dumps(err["ctx"])
+                clean["ctx"] = err["ctx"]
+            except (TypeError, ValueError):
+                clean["ctx"] = {"error": str(err["ctx"])}
+        safe_errors.append(clean)
     return JSONResponse(
         status_code=422,
-        content={"detail": exc.errors()},
+        content={"detail": safe_errors},
     )
 
 @app.exception_handler(Exception)

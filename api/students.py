@@ -63,6 +63,24 @@ async def create_student(
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.get(
+    "/me",
+    response_model=StudentResponse,
+    summary="Ver Mi Perfil (Estudiante autenticado)"
+)
+async def read_student_self(
+    current_user: Student = Depends(get_current_user)
+) -> Any:
+    """
+    FIX-ERRORES-500: devuelve el perfil del estudiante autenticado.
+    Importante: este endpoint debe declararse ANTES de /{id} para que
+    no se matchee con id="me" (que rompe PydanticObjectId y causaba
+    500 por un ValueError no serializable en exc.errors()).
+    """
+    # get_current_user ya garantiza que es un Student activo
+    return current_user
+
+
+@router.get(
     "/{id}",
     response_model=StudentResponse,
     summary="Ver Estudiante"
@@ -76,7 +94,7 @@ async def read_student(
     student = await student_service.get_student(id=id)
     if not student:
         raise HTTPException(status_code=404, detail="Estudiante no encontrado")
-    
+
     if isinstance(current_user, Student) and current_user.id != id:
         raise HTTPException(status_code=403, detail="No tienes permiso")
     return student

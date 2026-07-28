@@ -562,6 +562,25 @@ async def update_enrollment(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get(
+    "/me",
+    response_model=List[EnrollmentResponse],
+    summary="Ver Mis Inscripciones (Estudiante autenticado)"
+)
+async def get_my_enrollments(
+    current_user: Student = Depends(get_current_user)
+) -> Any:
+    """
+    FIX-ERRORES-500: lista las inscripciones del estudiante autenticado.
+    Importante: este endpoint debe declararse ANTES de /{id} para que
+    no se matchee con id="me" (que rompe PydanticObjectId).
+    """
+    enrollments = await Enrollment.find(
+        Enrollment.estudiante_id == current_user.id
+    ).sort("-created_at").to_list()
+    return enrollments
+
+
 @router.delete(
     "/{id}",
     response_model=EnrollmentResponse,
