@@ -1691,7 +1691,7 @@ async def get_matriz_deudores(
                 "nombre": curso.nombre_programa,
                 "codigo": curso.codigo,
                 "modulos": [m.nombre for m in (curso.modulos or [])],
-                "matricula_monto": float(curso.costo_matricula or 0.0),
+                "matricula_monto": float(curso.matricula_interno or 0.0),
             },
             "estudiantes": [],
             "resumen": {
@@ -1722,7 +1722,7 @@ async def get_matriz_deudores(
         "nombre": curso.nombre_programa,
         "codigo": curso.codigo,
         "modulos": [m.nombre for m in (curso.modulos or [])],
-        "matricula_monto": float(curso.costo_matricula or 0.0),
+        "matricula_monto": float(curso.matricula_interno or 0.0),
     }
 
     estudiantes_out: list = []
