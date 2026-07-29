@@ -794,8 +794,11 @@ async def _obtener_curso_estudiante_enrollment(
         )
 
     # Verificar que el current_user sea el dueño de la inscripción
+    # FIX 2026-07-29 19:27 (Kevin "permiso"): comparar con str() para evitar
+    # problemas de tipo entre PydanticObjectId y ObjectId (que pueden dar
+    # False aunque sean el mismo id).
     if isinstance(current_user, Student):
-        if enrollment.estudiante_id != current_user.id:
+        if str(enrollment.estudiante_id) != str(current_user.id):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Esta inscripción no te pertenece.",

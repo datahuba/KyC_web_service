@@ -120,12 +120,12 @@ async def emit_certificate(
     payload: CertificateEmitRequest,
     current_user: Union[Student, User] = Depends(get_current_user),
 ) -> CertificateOut:
-    # FIX 2026-07-29 19:11: tanto el estudiante (auto-emisión) como el
-    # staff (auditoría / soporte en ventanilla) pueden emitir certificados.
-    # El RBAC granular se aplica en `_obtener_curso_estudiante_enrollment`
-    # (estudiante solo puede emitir para sus propios enrollments; staff
-    # puede emitir para cualquier enrollment).
-    if not isinstance(current_user, (Student, User)):
+    # FIX 2026-07-29 19:27 (Kevin "permiso"): el endpoint debe aceptar
+    # a cualquier usuario autenticado (Student o User). La validación
+    # granular del RBAC se hace en _obtener_curso_estudiante_enrollment
+    # (estudiante solo puede emitir para sus propios enrollments;
+    # staff/admin puede emitir para cualquiera).
+    if current_user is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No tienes permiso para emitir certificados.",
