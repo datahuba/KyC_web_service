@@ -78,6 +78,27 @@ class ErrorLog(MongoBaseModel):
         default="production",
         description="'production' / 'staging' / 'development'",
     )
+    # F-XXX (2026-07-29): estado de resolución del error. Cuando el admin/
+    # superadmin marca un error como resuelto, queda con `resolved=True` y
+    # `resolved_by` + `resolved_at`. El visor filtra por `resolved=false` por
+    # default para enfocarse en errores que aún requieren atención.
+    resolved: bool = Field(
+        default=False,
+        description="True si el admin marcó este error como resuelto",
+    )
+    resolved_by: Optional[str] = Field(
+        default=None,
+        description="Username del admin/superadmin que marcó el error como resuelto",
+    )
+    resolved_at: Optional[datetime] = Field(
+        default=None,
+        description="Timestamp de cuándo se marcó como resuelto",
+    )
+    resolution_note: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Nota opcional del admin (ej: 'Fixed in commit abc123')",
+    )
 
     class Settings:
         name = "error_logs"
@@ -92,4 +113,6 @@ class ErrorLog(MongoBaseModel):
             "path",
             "error_type",
             "status_code",
+            # F-XXX (2026-07-29): índice para filtrar rápido por "no resueltos".
+            IndexModel([("resolved", ASCENDING), ("timestamp", ASCENDING)], name="resolved_timestamp"),
         ]

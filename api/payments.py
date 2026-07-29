@@ -2201,8 +2201,12 @@ async def export_deudores_excel(
     # Header de la tabla (fila 6)
     header_row = 6
     cols = ["#", "Estudiante", "CI", "Celular", "Email", "Registro", "Matrícula"]
-    for m in data["curso"]["modulos"]:
-        cols.append(m)
+    # F-XXX (2026-07-29): columnas como "Módulo 1, 2..." en vez del nombre
+    # largo del módulo. El nombre real queda en el atributo "title" del
+    # header cuando se abre en Excel, o se puede consultar en la columna
+    # auxiliar "Módulo N (nombre)".
+    for idx_mod, _m in enumerate(data["curso"]["modulos"], start=1):
+        cols.append(f"Módulo {idx_mod}")
     cols.append("Deuda Total")
     cols.append("Módulos que debe")
 

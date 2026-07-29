@@ -52,6 +52,11 @@ class ErrorLogResponse(BaseModel):
     error_type: str
     message: str
     user_email: Optional[str] = None
+    # F-XXX (2026-07-29): estado de resolución
+    resolved: bool = False
+    resolved_by: Optional[str] = None
+    resolved_at: Optional[datetime] = None
+    resolution_note: Optional[str] = None
     user_type: Optional[str] = None
     environment: str
 
@@ -84,6 +89,7 @@ async def list_recent_errors(
     hours: int = Query(24, ge=1, le=168, description="Ventana de tiempo en horas (default 24, max 7 días)"),
     status_code: Optional[int] = Query(None, description="Filtrar por status code (ej: 500)"),
     path_contains: Optional[str] = Query(None, description="Filtrar por substring del path"),
+    unresolved_only: bool = Query(True, description="Si True (default), solo errores NO resueltos"),
     current_user: User = Depends(require_admin_or_superadmin),
 ):
     """
@@ -92,6 +98,10 @@ async def list_recent_errors(
     F-044: por defecto muestra errores de las últimas 24h, ordenado DESC
     por timestamp. El TTL de la colección es 7 días así que más allá de
     eso no hay datos.
+
+    F-XXX (2026-07-29): por defecto filtra errores NO resueltos
+    (`resolved=false`) para enfocarse en los que aún requieren atención.
+    Pasar `unresolved_only=false` para ver también los resueltos.
     """
     since = datetime.utcnow() - timedelta(hours=hours)
 
@@ -100,6 +110,8 @@ async def list_recent_errors(
         query["status_code"] = status_code
     if path_contains:
         query["path"] = {"$regex": path_contains, "$options": "i"}
+    if unresolved_only:
+        query["resolved"] = False
 
     # Total para el header
     total = await ErrorLog.find(query).count()
@@ -133,6 +145,11 @@ async def list_recent_errors(
                 user_email=e.user_email,
                 user_type=e.user_type,
                 environment=e.environment,
+                # F-XXX (2026-07-29): estado de resolución
+                resolved=bool(getattr(e, "resolved", False)),
+                resolved_by=getattr(e, "resolved_by", None),
+                resolved_at=getattr(e, "resolved_at", None),
+                resolution_note=getattr(e, "resolution_note", None),
             )
             for e in errors
         ],
@@ -140,8 +157,126 @@ async def list_recent_errors(
             "by_type": by_type,
             "by_status": by_status,
             "top_paths": [{"path": p, "count": c} for p, c in top_paths],
+            # F-XXX (2026-07-29): contadores adicionales de resolución
+            "resolved_count": sum(1 for e in errors if getattr(e, "resolved", False)),
         },
     )
+
+
+# F-XXX (2026-07-29): endpoint para marcar un error como resuelto
+class ResolveErrorRequest(BaseModel):
+    note: Optional[str] = Field(None, max_length=500, description="Nota opcional (ej: 'Fixed in commit abc123')")
+
+
+@router.post(
+    "/errors/{error_id}/resolve",
+    summary="F-XXX: Marcar un error como resuelto",
+)
+async def resolve_error(
+    *,
+    error_id: str,
+    payload: Optional[ResolveErrorRequest] = None,
+    current_user: User = Depends(require_admin_or_superadmin),
+):
+    """
+    Marca un error como resuelto. Una vez resuelto, NO aparece en el visor
+    por default (filtro `unresolved_only=true`). El admin puede incluirlo
+    pasando `unresolved_only=false` en GET /errors/recent.
+    """
+    from beanie import PydanticObjectId as _POI
+    try:
+        err_oid = _POI(error_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="error_id inválido")
+
+    error = await ErrorLog.get(err_oid)
+    if not error:
+        raise HTTPException(status_code=404, detail="Error log no encontrado")
+
+    error.resolved = True
+    error.resolved_by = current_user.username
+    error.resolved_at = datetime.utcnow()
+    if payload and payload.note:
+        error.resolution_note = payload.note
+    await error.save()
+
+    return {
+        "id": str(error.id),
+        "resolved": True,
+        "resolved_by": error.resolved_by,
+        "resolved_at": error.resolved_at.isoformat() if error.resolved_at else None,
+    }
+
+
+@router.post(
+    "/errors/{error_id}/unresolve",
+    summary="F-XXX: Reabrir un error marcado como resuelto",
+)
+async def unresolve_error(
+    *,
+    error_id: str,
+    current_user: User = Depends(require_admin_or_superadmin),
+):
+    """Reabrir un error (vuelve a `resolved=False`). Útil si la solución no
+    funcionó y el bug volvió."""
+    from beanie import PydanticObjectId as _POI
+    try:
+        err_oid = _POI(error_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="error_id inválido")
+
+    error = await ErrorLog.get(err_oid)
+    if not error:
+        raise HTTPException(status_code=404, detail="Error log no encontrado")
+
+    error.resolved = False
+    error.resolved_by = None
+    error.resolved_at = None
+    error.resolution_note = None
+    await error.save()
+
+    return {"id": str(error.id), "resolved": False}
+
+
+# F-XXX (2026-07-29): endpoint bulk para resolver automáticamente los 401
+# de "Token inválido o expirado". Cuando un usuario tiene la sesión
+# vencida y recarga la página, el frontend dispara muchos requests con
+# token expirado → 401. Estos ensucian el visor con errores esperados.
+# El admin puede resolverlos todos de una vez con este botón.
+@router.post(
+    "/errors/auto-resolve-expired-tokens",
+    summary="F-XXX: Marcar como resueltos todos los 401 de token expirado en la ventana",
+)
+async def auto_resolve_expired_tokens(
+    *,
+    hours: int = Query(168, ge=1, le=168, description="Ventana de tiempo en horas (default 7 días)"),
+    current_user: User = Depends(require_admin_or_superadmin),
+):
+    """
+    Marca como `resolved=true` todos los errores 401 con mensaje
+    "Token inválido o expirado" en la ventana indicada. Devuelve la cantidad
+    resueltos. Útil para limpiar el visor de errores esperados.
+    """
+    since = datetime.utcnow() - timedelta(hours=hours)
+    # El error de token expirado viene del middleware de auth y se loguea
+    # con este mensaje exacto. Lo matcheamos por regex.
+    query = {
+        "timestamp": {"$gte": since},
+        "status_code": 401,
+        "resolved": False,
+        "message": {"$regex": "Token.*inválido|expirado", "$options": "i"},
+    }
+    errors = await ErrorLog.find(query).to_list()
+    for err in errors:
+        err.resolved = True
+        err.resolved_by = current_user.username
+        err.resolved_at = datetime.utcnow()
+        err.resolution_note = "Auto-resuelto: token expirado (esperado)"
+        await err.save()
+    return {
+        "resolved_count": len(errors),
+        "window_hours": hours,
+    }
 
 
 @router.get(
@@ -173,6 +308,11 @@ async def get_error_detail(
         stack_trace=error.stack_trace,
         request_body=error.request_body,
         query_params=error.query_params,
+        # F-XXX (2026-07-29): estado de resolución en el detalle
+        resolved=bool(getattr(error, "resolved", False)),
+        resolved_by=getattr(error, "resolved_by", None),
+        resolved_at=getattr(error, "resolved_at", None),
+        resolution_note=getattr(error, "resolution_note", None),
     )
 
 
