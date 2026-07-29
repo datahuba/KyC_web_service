@@ -14,7 +14,7 @@ RBAC:
 """
 
 import io
-from typing import Union
+from typing import Optional, Union
 from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException, status
