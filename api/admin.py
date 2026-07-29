@@ -263,10 +263,12 @@ async def auto_resolve_expired_tokens(
     since = datetime.utcnow() - timedelta(hours=hours)
     # El error de token expirado viene del middleware de auth y se loguea
     # con este mensaje exacto. Lo matcheamos por regex.
+    # F-XXX (2026-07-29): usar $ne: True para incluir docs viejos sin el
+    # campo resolved (igual que el filtro del listado).
     query = {
         "timestamp": {"$gte": since},
         "status_code": 401,
-        "resolved": False,
+        "resolved": {"$ne": True},
         "message": {"$regex": "Token.*inválido|expirado", "$options": "i"},
     }
     errors = await ErrorLog.find(query).to_list()
