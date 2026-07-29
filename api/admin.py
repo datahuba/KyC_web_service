@@ -241,46 +241,61 @@ async def unresolve_error(
     return {"id": str(error.id), "resolved": False}
 
 
-# F-XXX (2026-07-29): endpoint bulk para resolver automáticamente los 401
-# de "Token inválido o expirado". Cuando un usuario tiene la sesión
-# vencida y recarga la página, el frontend dispara muchos requests con
-# token expirado → 401. Estos ensucian el visor con errores esperados.
-# El admin puede resolverlos todos de una vez con este botón.
+# F-XXX (2026-07-29): endpoint bulk para resolver automáticamente errores
+# esperados. Cuando un usuario tiene la sesión vencida y recarga la página,
+# el frontend dispara muchos requests con token expirado → 401. Estos
+# ensucian el visor con errores esperados. El admin puede resolverlos todos
+# de una vez con este botón.
+#
+# Acepta un `pattern` opcional para matchear otros tipos de errores esperados
+# (ej: "Credenciales incorrectas", "Demasiados intentos", "JSON inválido",
+# "imagen demasiado grande", etc.).
 @router.post(
     "/errors/auto-resolve-expired-tokens",
-    summary="F-XXX: Marcar como resueltos todos los 401 de token expirado en la ventana",
+    summary="F-XXX: Marcar como resueltos errores esperados en la ventana",
 )
 async def auto_resolve_expired_tokens(
     *,
     hours: int = Query(168, ge=1, le=168, description="Ventana de tiempo en horas (default 7 días)"),
+    pattern: str = Query(
+        "Token.*inválido|expirado",
+        description="Regex case-insensitive para matchear el mensaje del error. Default = 401 de token expirado.",
+    ),
+    status_code: Optional[int] = Query(
+        401,
+        description="Status code a matchear (default 401). Pasá 0 para no filtrar por status code.",
+    ),
+    note: str = Query(
+        "Auto-resuelto: error esperado",
+        description="Nota que se setea en resolution_note",
+    ),
     current_user: User = Depends(require_admin_or_superadmin),
 ):
     """
-    Marca como `resolved=true` todos los errores 401 con mensaje
-    "Token inválido o expirado" en la ventana indicada. Devuelve la cantidad
-    resueltos. Útil para limpiar el visor de errores esperados.
+    Marca como `resolved=true` todos los errores que matcheen el patrón
+    regex en su mensaje. Devuelve la cantidad resueltos.
     """
     since = datetime.utcnow() - timedelta(hours=hours)
-    # El error de token expirado viene del middleware de auth y se loguea
-    # con este mensaje exacto. Lo matcheamos por regex.
     # F-XXX (2026-07-29): usar $ne: True para incluir docs viejos sin el
     # campo resolved (igual que el filtro del listado).
-    query = {
+    query: dict = {
         "timestamp": {"$gte": since},
-        "status_code": 401,
         "resolved": {"$ne": True},
-        "message": {"$regex": "Token.*inválido|expirado", "$options": "i"},
+        "message": {"$regex": pattern, "$options": "i"},
     }
+    if status_code and status_code > 0:
+        query["status_code"] = status_code
     errors = await ErrorLog.find(query).to_list()
     for err in errors:
         err.resolved = True
         err.resolved_by = current_user.username
         err.resolved_at = datetime.utcnow()
-        err.resolution_note = "Auto-resuelto: token expirado (esperado)"
+        err.resolution_note = note
         await err.save()
     return {
         "resolved_count": len(errors),
         "window_hours": hours,
+        "pattern": pattern,
     }
 
 
