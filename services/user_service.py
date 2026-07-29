@@ -175,3 +175,21 @@ async def assign_course_to_users(course_id: PydanticObjectId, encargados_ids: Li
             u.cursos_asignados.append(course_id)
             await u.save()
 
+
+async def accept_terms(user: User) -> User:
+    """
+    ISSUE-Q-PRE (2026-07-29): Registra la aceptación del reglamento de Posgrado
+    para el personal administrativo/docente (User, no Student).
+
+    Idempotente: si ya había aceptado antes, no pisa la fecha original de la
+    primera aceptación (se conserva como evidencia histórica).
+    """
+    from core.timezone_utils import utcnow_naive
+
+    if not user.terminos_aceptados:
+        user.terminos_aceptados = True
+        user.fecha_aceptacion_terminos = utcnow_naive()
+        await user.save()
+
+    return user
+

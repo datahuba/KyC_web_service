@@ -383,6 +383,7 @@ async def get_me(
             ultimo_acceso=current_user.ultimo_acceso,
             nombre=current_user.username,  # Fallback de nombre para el personal administrativo
             registro=None,
+            terminos_aceptados=current_user.terminos_aceptados,  # ISSUE-Q-PRE (2026-07-29): extendido a todo el personal
             nombre_funcional=current_user.nombre_funcional,
             cursos_asignados=current_user.cursos_asignados,  # ISSUE-P-SEGMENTACION
             subtipo_coordinador=current_user.subtipo_coordinador.value if current_user.subtipo_coordinador else None,  # ISSUE-R-PERFIL-GENERICO
@@ -410,3 +411,40 @@ async def get_me(
             email_verificado=current_user.email_verificado,  # ISSUE-A-VERIFICACION
             perfil_completado=perfil_completado
         )
+
+
+# ISSUE-Q-PRE (2026-07-29): endpoint unificado de aceptación de TyC.
+# Funciona para User (admin/docente) Y Student. Reemplaza al antiguo
+# /students/me/accept-terms (que sigue activo para compatibilidad).
+from services import user_service, student_service
+
+@router.post(
+    "/me/accept-terms",
+    summary="Aceptar Términos y Condiciones (ISSUE-Q-PRE)",
+    response_model=dict,
+    responses={
+        200: {"description": "Términos aceptados (o ya estaban aceptados)"},
+        401: {"description": "No autenticado"}
+    }
+)
+async def accept_terms(
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> Any:
+    """
+    Registra la aceptación del reglamento de Posgrado para el usuario autenticado.
+
+    Funciona tanto para personal administrativo/docente (User) como para
+    estudiantes (Student). Idempotente: la fecha de primera aceptación se
+    preserva como evidencia histórica.
+    """
+    if isinstance(current_user, User):
+        updated = await user_service.accept_terms(user=current_user)
+    else:
+        updated = await student_service.accept_terms(student=current_user)
+
+    return {
+        "ok": True,
+        "user_type": "user" if isinstance(current_user, User) else "student",
+        "terminos_aceptados": updated.terminos_aceptados,
+        "fecha_aceptacion_terminos": updated.fecha_aceptacion_terminos,
+    }
