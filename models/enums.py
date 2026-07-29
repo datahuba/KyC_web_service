@@ -123,6 +123,19 @@ class TipoTitulo(str, Enum):
     TITULO_DOCTORADO = "título de doctorado"
 
 
+# F-CERTIFICADOS (2026-07-29): tipos de certificado que la Unidad de Postgrado
+# emite a los estudiantes a través de KYC DataHub.
+# - NOTAS: constancia de calificaciones módulo por módulo. Solo se emite una
+#   vez al finalizar el programa (todos los módulos con nota válida y saldo
+#   cero).
+# - NO_DEUDOR: constancia de que el estudiante no tiene deuda pendiente
+#   hasta un módulo N específico. Se puede emitir múltiples veces a lo
+#   largo del programa.
+class TipoCertificado(str, Enum):
+    NOTAS = "notas"
+    NO_DEUDOR = "no_deudor"
+
+
 class Sexo(str, Enum):
     """Sexo del estudiante (dato oficial UAGRM)"""
     MASCULINO = "masculino"

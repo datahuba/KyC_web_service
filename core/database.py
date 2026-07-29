@@ -30,6 +30,10 @@ from models.enrollment_request import EnrollmentRequest
 from models.pre_registration import PreRegistrationForm, PreRegistration
 # F-044 (2026-07-22): log de errores 500 con TTL 7 días.
 from models.error_log import ErrorLog
+# F-CERTIFICADOS (2026-07-29): emisión de Certificados de Notas y No Deudor
+# desde el portal del estudiante.
+from models.certificate import Certificate
+from models.certificate_counter import CertificateCounter
 
 
 async def _sanitize_legacy_database(db):
@@ -198,6 +202,9 @@ async def init_db():
             Submission,
             # F-044 (2026-07-22)
             ErrorLog,
+            # F-CERTIFICADOS (2026-07-29)
+            Certificate,
+            CertificateCounter,
         ]
     )
     print(f"[OK] Conectado a MongoDB ({settings.DATABASE_NAME}) y Beanie inicializado con Connection Pool optimizado.")

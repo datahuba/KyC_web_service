@@ -33,3 +33,8 @@ get_token.py
 dnstest.py
 resize_icons.py
 _idxcheck_tmp.py
+
+# F-CERTIFICADOS (2026-07-29): PDFs generados por tests funcionales
+# standalone (manual_test_pdf.py). No son artefactos de pytest, son outputs
+# de una corrida manual para inspección visual. Se borran o se regeneran.
+tests/_pdf_test_*.pdf

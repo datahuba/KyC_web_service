@@ -36,11 +36,24 @@ class Modulo(BaseModel):
     """
     nombre: str = Field(..., description="Nombre del módulo (Ej: Módulo 1: IA)")
     costo: float = Field(..., ge=0, description="Costo individual de este módulo")
-    
+
     # ISSUE R: Asignación granular de docente a nivel de módulo
     docente_id: Optional[PyObjectId] = Field(
-        None, 
+        None,
         description="ID del docente asignado a impartir y calificar este módulo"
+    )
+
+    # F-CERTIFICADOS (2026-07-29): fechas de inicio y fin del módulo para
+    # Certificados de Notas y calendario por módulo. Opcionales para mantener
+    # retrocompatibilidad con cursos existentes (backfill via script one-shot
+    # scripts/backfill_modulo_fechas.py que copia Course.fecha_inicio/fin).
+    fecha_inicio: Optional[datetime] = Field(
+        default=None,
+        description="Fecha de inicio del módulo (UTC). Usado para Certificados de Notas y calendario por módulo."
+    )
+    fecha_fin: Optional[datetime] = Field(
+        default=None,
+        description="Fecha de fin del módulo (UTC). Usado para Certificados de Notas y calendario por módulo."
     )
 
 
