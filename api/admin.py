@@ -111,7 +111,10 @@ async def list_recent_errors(
     if path_contains:
         query["path"] = {"$regex": path_contains, "$options": "i"}
     if unresolved_only:
-        query["resolved"] = False
+        # F-XXX (2026-07-29): matchear también docs sin el campo `resolved`
+        # (los creados antes de este feature). {$ne: True} cubre tanto
+        # `resolved=false` como `resolved` ausente.
+        query["resolved"] = {"$ne": True}
 
     # Total para el header
     total = await ErrorLog.find(query).count()
