@@ -1640,6 +1640,14 @@ async def get_matriz_por_pago(
     reorganizado a formato matriz (estudiantes como filas) para que se vea
     horizontal como la matriz tradicional.
 
+    F-087-FIX11 (2026-07-28): por defecto NO se cuentan pagos anulados ni
+    rechazados — esos pagos no representan dinero real (fueron cancelados
+    o rechazados por la cobranza) y mostrarlos en la vista Por Pago daba
+    datos erróneos al comparar contra el XLSX de Sandra o al hacer
+    auditoría. Si el usuario explícitamente filtra por estado_pago
+    ('anulado' o 'rechazado'), respetamos ese filtro para que pueda ver
+    esos pagos en una vista dedicada.
+
     Cada estudiante tiene una lista de pagos. La UI renderiza cada pago
     como una columna. Si un estudiante tiene más pagos que el `max_pagos`
     configurado, los extras se devuelven pero la UI los marca como "+N más".
@@ -1651,7 +1659,8 @@ async def get_matriz_por_pago(
     - `modulo_index`: filtra por módulo. Si un pago cubre varios módulos
       ("Pago Módulos 1, 2"), el pago aparece SOLO si modulo_index coincide
       con uno de los módulos del concepto.
-    - `estado_pago`: filtra por estado. Si None, devuelve todos.
+    - `estado_pago`: filtra por estado. Si None, devuelve SOLO aprobado +
+      pendiente (excluye anulado y rechazado por defecto).
     - `subido_por`: filtra por "estudiante" | "encargado" | None.
     - Paginación: page (1-indexed), per_page (max 500). Se aplica a la
       lista de ESTUDIANTES (no de pagos individuales).
@@ -1666,6 +1675,11 @@ async def get_matriz_por_pago(
         match["curso_id"] = curso_id
     if estado_pago:
         match["estado_pago"] = estado_pago
+    else:
+        # F-087-FIX11 (2026-07-28): por defecto excluir anulado y rechazado.
+        # Esos pagos no representan dinero real y contaminan los totales de la
+        # vista Por Pago al compararse contra el XLSX de auditoría.
+        match["estado_pago"] = {"$nin": ["anulado", "rechazado"]}
     if subido_por is not None:
         # Permite filtrar por null también (pagos antiguos). Si subido_por
         # es "" o "null" lo interpretamos como None real.
