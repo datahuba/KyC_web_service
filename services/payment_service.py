@@ -1598,6 +1598,261 @@ async def get_matriz_pagos(
     }
 
 
+# =============================================================================
+# F-088 (2026-07-29): Vista "Deudores" unificada para Cobranza
+# =============================================================================
+# Reunión 2026-07-29: Lic. Sandra Zabala pidió una vista a "un solo golpe visual"
+# donde pueda ver para cada curso, qué estudiantes deben qué módulos. Hoy tiene
+# que descargar módulo por módulo en Excel y filtrar manualmente los que no
+# pagaron. Con esta vista, los estudiantes son filas y los módulos son columnas
+# (verde = pagado, rojo = debe, gris = no_le_toca). Puede filtrar "solo
+# deudores" para enfocarse solo en los que deben algo y exportar a Excel.
+#
+# Diferencias con get_matriz_pagos (F-074):
+# - Solo 1 curso a la vez (más simple, enfocado a cobranza de cohorte).
+# - Filtro `solo_deudores` que esconde a los que pagaron todo.
+# - Incluye datos de contacto (celular, email) para que cobranza pueda mandar
+#   WhatsApp directo.
+# - Estado explícito por celda (pagado / parcial / debe / no_le_toca) en vez
+#   de solo el monto_pagado.
+# - Total por fila (cuánto debe en total) y total por columna.
+async def get_matriz_deudores(
+    curso_id: PydanticObjectId,
+    cursos_permitidos: Optional[List[PydanticObjectId]] = None,
+    solo_deudores: bool = True,
+) -> dict:
+    """
+    F-088 (2026-07-29): vista "Deudores" para cobranza.
+
+    Args:
+        curso_id: ID del curso (obligatorio).
+        cursos_permitidos: si se pasa (cobranza con cursos_asignados), se
+            valida que el curso_id esté en la lista. None = superadmin ve todos.
+        solo_deudores: si True, solo retorna estudiantes que deben ALGO
+            (matrícula pendiente O algún módulo pendiente O saldo_pendiente > 0).
+            Si False, retorna todos los estudiantes inscritos.
+
+    Returns:
+        {
+          "curso": {"_id", "nombre", "codigo", "modulos": ["Módulo 1", ...], "matricula_monto": float},
+          "estudiantes": [
+            {
+              "estudiante_id": str,
+              "registro": str,
+              "nombre": str,
+              "ci": str,         # "1234567" o "1234567-1J"
+              "email": str,
+              "celular": str,
+              "estado_inscripcion": "activo",
+              "matricula": {
+                "costo": float, "pagado": float, "pendiente": float,
+                "estado": "pagado" | "debe" | "no_le_toca"
+              },
+              "modulos": [
+                {
+                  "i": 0,  # 0-indexed
+                  "nombre": "Módulo 1",
+                  "costo": float, "pagado": float, "pendiente": float,
+                  "estado": "pagado" | "debe" | "no_le_toca"
+                },
+                ...
+              ],
+              "deuda_total": float,  # suma de matrícula pendiente + módulos pendientes
+              "modulos_pendientes": [1, 3, 4],  # índices 1-based para UI
+            }
+          ],
+          "resumen": {
+            "total_estudiantes": int,
+            "total_deudores": int,        # con deuda_total > 0
+            "deuda_total_curso": float,   # suma de deudas de todos los deudores
+            "por_columna": {              # para header
+              "matricula": {"deben": int, "monto_pendiente": float},
+              "modulos": [{"i": 0, "deben": int, "monto_pendiente": float}, ...]
+            }
+          },
+          "filtros_aplicados": {"curso_id": str, "solo_deudores": bool}
+        }
+    """
+    # Validar segmentación de cursos
+    if cursos_permitidos is not None and curso_id not in cursos_permitidos:
+        raise ValueError("No tiene acceso a este curso")
+
+    # 1) Cargar curso
+    curso = await Course.get(curso_id)
+    if not curso:
+        raise ValueError(f"Curso {curso_id} no encontrado")
+
+    # 2) Cargar enrollments del curso
+    enrollments = await Enrollment.find(Enrollment.curso_id == curso_id).to_list()
+    if not enrollments:
+        return {
+            "curso": {
+                "_id": str(curso.id),
+                "nombre": curso.nombre_programa,
+                "codigo": curso.codigo,
+                "modulos": [m.nombre for m in (curso.modulos or [])],
+                "matricula_monto": float(curso.costo_matricula or 0.0),
+            },
+            "estudiantes": [],
+            "resumen": {
+                "total_estudiantes": 0,
+                "total_deudores": 0,
+                "deuda_total_curso": 0.0,
+                "por_columna": {"matricula": {"deben": 0, "monto_pendiente": 0.0}, "modulos": []},
+            },
+            "filtros_aplicados": {"curso_id": str(curso_id), "solo_deudores": solo_deudores},
+        }
+
+    # 3) Cargar estudiantes en batch
+    student_ids = list({e.estudiante_id for e in enrollments if e.estudiante_id})
+    students = await Student.find({"_id": {"$in": student_ids}}).to_list() if student_ids else []
+    students_map = {s.id: s for s in students}
+
+    # 4) Estados excluidos (no cuentan como deudores — congelados/retirados)
+    estados_excluidos = {
+        EstadoInscripcion.SUSPENDIDO,
+        EstadoInscripcion.COMPLETADO,
+        EstadoInscripcion.CANCELADO,
+        EstadoInscripcion.RETIRADO,
+    }
+
+    # 5) Construir matriz
+    curso_dict = {
+        "_id": str(curso.id),
+        "nombre": curso.nombre_programa,
+        "codigo": curso.codigo,
+        "modulos": [m.nombre for m in (curso.modulos or [])],
+        "matricula_monto": float(curso.costo_matricula or 0.0),
+    }
+
+    estudiantes_out: list = []
+    total_deudores = 0
+    deuda_total_curso = 0.0
+
+    # Para resumen por columna
+    col_mat_deben = 0
+    col_mat_monto_pendiente = 0.0
+    col_modulos_resumen: dict = {i: {"i": i, "deben": 0, "monto_pendiente": 0.0} for i in range(len(curso.modulos or []))}
+
+    for e in enrollments:
+        student = students_map.get(e.estudiante_id)
+        if not student:
+            continue
+
+        # Calcular estado de la matrícula
+        costo_mat = float(e.costo_matricula or 0.0)
+        total_pagado_e = float(e.total_pagado or 0.0)
+        # Cuánto se imputó realmente a matrícula (cascada greedy)
+        mat_pagado = min(total_pagado_e, costo_mat)
+        mat_pendiente = max(0.0, costo_mat - mat_pagado)
+        # Estado: "debe" si hay pendiente, "pagado" si completó (independiente del descuento)
+        if e.estado in estados_excluidos:
+            mat_estado = "no_le_toca"
+            mat_pendiente = 0.0  # No contar como deuda
+        elif mat_pendiente <= 0.01:
+            mat_estado = "pagado"
+        else:
+            mat_estado = "debe"
+
+        # Calcular estado de cada módulo
+        modulos_out: list = []
+        modulos_pendientes: list = []  # 1-based para UI
+        deuda_total_est = 0.0
+
+        for i, mod in enumerate(curso.modulos or []):
+            mod_estado_e = e.modulos[i] if i < len(e.modulos or []) else None
+            costo = float(mod.costo or 0.0)
+            pagado = float(mod_estado_e.monto_pagado) if mod_estado_e else 0.0
+            pendiente = max(0.0, costo - pagado)
+
+            if e.estado in estados_excluidos:
+                mod_estado = "no_le_toca"
+                pendiente = 0.0
+            elif pendiente <= 0.01:
+                mod_estado = "pagado"
+            else:
+                mod_estado = "debe"
+                deuda_total_est += pendiente
+                modulos_pendientes.append(i + 1)  # 1-based
+                col_modulos_resumen[i]["deben"] += 1
+                col_modulos_resumen[i]["monto_pendiente"] += pendiente
+
+            modulos_out.append({
+                "i": i,
+                "nombre": mod.nombre,
+                "costo": round(costo, 2),
+                "pagado": round(pagado, 2),
+                "pendiente": round(pendiente, 2),
+                "estado": mod_estado,
+            })
+
+        # Sumar matrícula a la deuda
+        if mat_estado == "debe":
+            deuda_total_est += mat_pendiente
+            col_mat_deben += 1
+            col_mat_monto_pendiente += mat_pendiente
+
+        # Armar CI con complemento
+        ci = student.carnet or ""
+        if student.complemento_carnet:
+            ci = f"{ci}-{student.complemento_carnet}"
+
+        # F-088: si solo_deudores=True, saltar a quien no debe nada
+        if solo_deudores and deuda_total_est <= 0.01:
+            continue
+
+        if deuda_total_est > 0.01:
+            total_deudores += 1
+            deuda_total_curso += deuda_total_est
+
+        estudiantes_out.append({
+            "estudiante_id": str(e.estudiante_id),
+            "registro": student.registro or "",
+            "nombre": (student.nombre or "").strip() or "Sin nombre",
+            "ci": ci,
+            "email": student.email or "",
+            "celular": student.celular or "",
+            "estado_inscripcion": e.estado.value if hasattr(e.estado, "value") else str(e.estado),
+            "matricula": {
+                "costo": round(costo_mat, 2),
+                "pagado": round(mat_pagado, 2),
+                "pendiente": round(mat_pendiente, 2),
+                "estado": mat_estado,
+            },
+            "modulos": modulos_out,
+            "deuda_total": round(deuda_total_est, 2),
+            "modulos_pendientes": modulos_pendientes,
+        })
+
+    # Ordenar por nombre (alfabético, como pidió Sandra)
+    estudiantes_out.sort(key=lambda x: x["nombre"].lower())
+
+    # Deudores primero si solo_deudores=False (los que deben van arriba)
+    if not solo_deudores:
+        estudiantes_out.sort(key=lambda x: (x["deuda_total"] <= 0.01, x["nombre"].lower()))
+
+    # Resumen por columna
+    por_columna = {
+        "matricula": {
+            "deben": col_mat_deben,
+            "monto_pendiente": round(col_mat_monto_pendiente, 2),
+        },
+        "modulos": [col_modulos_resumen[i] for i in sorted(col_modulos_resumen.keys())],
+    }
+
+    return {
+        "curso": curso_dict,
+        "estudiantes": estudiantes_out,
+        "resumen": {
+            "total_estudiantes": len(estudiantes_out),
+            "total_deudores": total_deudores,
+            "deuda_total_curso": round(deuda_total_curso, 2),
+            "por_columna": por_columna,
+        },
+        "filtros_aplicados": {"curso_id": str(curso_id), "solo_deudores": solo_deudores},
+    }
+
+
 # F-087 (2026-07-28): Vista "Por Pago" - 1 fila por cada pago individual
 # (a diferencia de la matriz que agrupa por estudiante/módulo). El objetivo es
 # dar visibilidad a la auditoría: cada pago llega con su comprobante, su

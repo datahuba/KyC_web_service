@@ -2043,6 +2043,325 @@ async def get_resumen_modulos_endpoint(
         cursos_permitidos=cursos_permitidos,
     )
 
+
+# =============================================================================
+# F-088 (2026-07-29): Vista "Deudores" unificada para Cobranza
+# =============================================================================
+# Reunión 2026-07-29 con Lic. Sandra Zabala: pidió una vista a "un solo golpe
+# visual" donde pueda ver, para un curso, qué estudiantes deben qué módulos.
+# Hoy tiene que descargar módulo por módulo en Excel y filtrar manualmente los
+# que no pagaron (lo cual es lento y propenso a errores).
+#
+# Aquí: estudiantes como filas, módulos como columnas, con un check visual
+# (verde = pagado, rojo = debe, gris = no_le_toca). Filtro "solo deudores"
+# para enfocarse solo en los que deben algo. Botón "Exportar a Excel" que
+# genera el mismo layout para enviar por WhatsApp / imprimir.
+#
+# Permisos: solo personal económico (puede_ver_economico).
+# =============================================================================
+@router.get(
+    "/deudores",
+    summary="F-088: Vista 'Deudores' unificada (estudiantes × módulos, con filtro solo deudores)",
+)
+async def get_deudores_endpoint(
+    curso_id: str = Query(..., description="ID del curso (obligatorio)"),
+    solo_deudores: bool = Query(
+        True,
+        description="Si True, solo retorna estudiantes con deuda_total > 0. Si False, retorna todos los inscritos.",
+    ),
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    F-088 (2026-07-29): vista "Deudores" unificada para cobranza.
+
+    Devuelve una matriz de estudiantes vs módulos del curso, con:
+    - Estado por celda (pagado / parcial / debe / no_le_toca)
+    - Datos de contacto (celular, email) para enviar WhatsApp directo
+    - Total de deuda por fila y resumen por columna
+    - Filtro `solo_deudores` para enfocarse en los que deben algo
+
+    Permisos: mismo que la matriz (puede_ver_economico). Respeta
+    segmentación de cursos por rol (cobranza con cursos_asignados solo ve
+    sus cursos asignados).
+    """
+    if not puede_ver_economico(current_user):
+        raise HTTPException(status_code=403, detail="No autorizado para ver deudores")
+
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
+    from beanie import PydanticObjectId as _POI
+    try:
+        curso_oid = _POI(curso_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="curso_id inválido")
+
+    try:
+        return await payment_service.get_matriz_deudores(
+            curso_id=curso_oid,
+            cursos_permitidos=cursos_permitidos,
+            solo_deudores=solo_deudores,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get(
+    "/deudores/export-excel",
+    summary="F-088: Exportar vista 'Deudores' a XLSX (mismo layout que la vista)",
+)
+async def export_deudores_excel(
+    curso_id: str = Query(..., description="ID del curso (obligatorio)"),
+    solo_deudores: bool = Query(True, description="Si True, solo exporta deudores"),
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    F-088 (2026-07-29): exporta la vista deudores a XLSX.
+
+    Layout del Excel:
+    - Header: nombre del curso + fecha de generación
+    - Columnas: Estudiante | CI | Celular | Email | Matrícula | Módulo 1 | M2 | ... | M N | Deuda Total
+    - Filas: estudiantes
+    - Celdas:
+      - Matrícula / Módulos: "Bs. X / Bs. Y" (pagado / costo) + check visual con color
+      - Verde si pagado completo, rojo si debe, gris si no_le_toca
+    - Fila TOTAL al final con cuánto se debe por columna
+    """
+    if not puede_ver_economico(current_user):
+        raise HTTPException(status_code=403, detail="No autorizado para exportar deudores")
+
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
+    from beanie import PydanticObjectId as _POI
+    try:
+        curso_oid = _POI(curso_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="curso_id inválido")
+
+    try:
+        data = await payment_service.get_matriz_deudores(
+            curso_id=curso_oid,
+            cursos_permitidos=cursos_permitidos,
+            solo_deudores=solo_deudores,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Generar XLSX
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+    from io import BytesIO
+    from fastapi.responses import StreamingResponse
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Deudores"
+
+    # Estilos
+    font_header = Font(bold=True, color="FFFFFF", size=12)
+    font_subheader = Font(bold=True, color="FFFFFF", size=10)
+    font_cell = Font(size=10)
+    font_total = Font(bold=True, size=10)
+    fill_header = PatternFill(start_color="1E40AF", end_color="1E40AF", fill_type="solid")
+    fill_pagado = PatternFill(start_color="D1FAE5", end_color="D1FAE5", fill_type="solid")  # verde
+    fill_debe = PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid")  # rojo
+    fill_no_le_toca = PatternFill(start_color="F3F4F6", end_color="F3F4F6", fill_type="solid")  # gris
+    fill_total = PatternFill(start_color="FEF3C7", end_color="FEF3C7", fill_type="solid")  # amber
+    border_thin = Border(
+        left=Side(style="thin", color="D1D5DB"),
+        right=Side(style="thin", color="D1D5DB"),
+        top=Side(style="thin", color="D1D5DB"),
+        bottom=Side(style="thin", color="D1D5DB"),
+    )
+    align_center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    align_left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    align_right = Alignment(horizontal="right", vertical="center", wrap_text=True)
+
+    # Header del reporte
+    curso_nombre = data["curso"]["nombre"]
+    curso_codigo = data["curso"]["codigo"] or ""
+    fecha_gen = datetime.now().strftime("%d/%m/%Y %H:%M")
+    total_estudiantes = data["resumen"]["total_estudiantes"]
+    total_deudores = data["resumen"]["total_deudores"]
+    deuda_total = data["resumen"]["deuda_total_curso"]
+
+    ws["A1"] = f"REPORTE DE DEUDORES — {curso_nombre}"
+    ws["A2"] = f"Código: {curso_codigo}  |  Generado: {fecha_gen}"
+    ws["A3"] = f"Estudiantes: {total_estudiantes}  |  Deudores: {total_deudores}  |  Deuda total: Bs. {deuda_total:,.2f}"
+    if solo_deudores:
+        ws["A4"] = "Filtro aplicado: SOLO DEUDORES"
+    else:
+        ws["A4"] = "Filtro aplicado: TODOS LOS INSCRITOS"
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A3"].font = Font(italic=True, size=10)
+    ws["A4"].font = Font(italic=True, size=10, color="6B7280")
+
+    # Header de la tabla (fila 6)
+    header_row = 6
+    cols = ["#", "Estudiante", "CI", "Celular", "Email", "Registro", "Matrícula"]
+    for m in data["curso"]["modulos"]:
+        cols.append(m)
+    cols.append("Deuda Total")
+    cols.append("Módulos que debe")
+
+    for col_idx, col_name in enumerate(cols, start=1):
+        cell = ws.cell(row=header_row, column=col_idx, value=col_name)
+        cell.font = font_subheader
+        cell.fill = fill_header
+        cell.alignment = align_center
+        cell.border = border_thin
+
+    # Filas de estudiantes
+    for i, est in enumerate(data["estudiantes"], start=1):
+        row = header_row + i
+        # # (correlativo)
+        c = ws.cell(row=row, column=1, value=i)
+        c.alignment = align_center
+        c.border = border_thin
+        c.font = font_cell
+        # Estudiante
+        c = ws.cell(row=row, column=2, value=est["nombre"])
+        c.alignment = align_left
+        c.border = border_thin
+        c.font = font_cell
+        # CI
+        c = ws.cell(row=row, column=3, value=est["ci"])
+        c.alignment = align_center
+        c.border = border_thin
+        c.font = font_cell
+        # Celular
+        c = ws.cell(row=row, column=4, value=est["celular"])
+        c.alignment = align_center
+        c.border = border_thin
+        c.font = font_cell
+        # Email
+        c = ws.cell(row=row, column=5, value=est["email"])
+        c.alignment = align_left
+        c.border = border_thin
+        c.font = font_cell
+        # Registro
+        c = ws.cell(row=row, column=6, value=est["registro"])
+        c.alignment = align_center
+        c.border = border_thin
+        c.font = font_cell
+        # Matrícula
+        mat = est["matricula"]
+        mat_label = "—" if mat["estado"] == "no_le_toca" else f"Bs. {mat['pagado']:,.2f} / Bs. {mat['costo']:,.2f}"
+        c = ws.cell(row=row, column=7, value=mat_label)
+        c.alignment = align_center
+        c.border = border_thin
+        c.font = font_cell
+        if mat["estado"] == "pagado":
+            c.fill = fill_pagado
+        elif mat["estado"] == "debe":
+            c.fill = fill_debe
+        else:
+            c.fill = fill_no_le_toca
+        # Módulos
+        for j, mod in enumerate(est["modulos"], start=8):
+            mod_label = "—" if mod["estado"] == "no_le_toca" else f"Bs. {mod['pagado']:,.2f} / Bs. {mod['costo']:,.2f}"
+            c = ws.cell(row=row, column=j, value=mod_label)
+            c.alignment = align_center
+            c.border = border_thin
+            c.font = font_cell
+            if mod["estado"] == "pagado":
+                c.fill = fill_pagado
+            elif mod["estado"] == "debe":
+                c.fill = fill_debe
+            else:
+                c.fill = fill_no_le_toca
+        # Deuda total
+        col_deuda = 8 + len(est["modulos"])
+        deuda_label = f"Bs. {est['deuda_total']:,.2f}" if est["deuda_total"] > 0.01 else "—"
+        c = ws.cell(row=row, column=col_deuda, value=deuda_label)
+        c.alignment = align_right
+        c.border = border_thin
+        c.font = font_total
+        if est["deuda_total"] > 0.01:
+            c.fill = fill_debe
+        # Módulos pendientes
+        col_mod_pend = col_deuda + 1
+        if est["modulos_pendientes"]:
+            mod_pend_label = ", ".join(f"M{m}" for m in est["modulos_pendientes"])
+        else:
+            mod_pend_label = "—"
+        c = ws.cell(row=row, column=col_mod_pend, value=mod_pend_label)
+        c.alignment = align_center
+        c.border = border_thin
+        c.font = font_cell
+
+    # Fila TOTAL
+    total_row = header_row + len(data["estudiantes"]) + 1
+    if data["estudiantes"]:
+        # Celda vacía para las primeras 6 columnas
+        for col_idx in range(1, 7):
+            c = ws.cell(row=total_row, column=col_idx, value="")
+            c.fill = fill_total
+            c.border = border_thin
+        # Label "TOTAL DEUDA"
+        c = ws.cell(row=total_row, column=7, value="TOTAL DEUDA →")
+        c.font = Font(bold=True, size=10)
+        c.alignment = align_right
+        c.fill = fill_total
+        c.border = border_thin
+        # Suma por columna de módulos
+        for j, mod in enumerate(data["curso"]["modulos"], start=8):
+            col_total = sum(
+                est["modulos"][j - 8]["pendiente"]
+                for est in data["estudiantes"]
+                if j - 8 < len(est["modulos"])
+            )
+            c = ws.cell(row=total_row, column=j, value=f"Bs. {col_total:,.2f}" if col_total > 0.01 else "—")
+            c.font = font_total
+            c.alignment = align_center
+            c.fill = fill_total
+            c.border = border_thin
+        # Deuda total
+        col_deuda = 8 + len(data["curso"]["modulos"])
+        c = ws.cell(row=total_row, column=col_deuda, value=f"Bs. {deuda_total:,.2f}")
+        c.font = Font(bold=True, size=11, color="DC2626")
+        c.alignment = align_right
+        c.fill = fill_total
+        c.border = border_thin
+        # Última celda vacía
+        c = ws.cell(row=total_row, column=col_deuda + 1, value="")
+        c.fill = fill_total
+        c.border = border_thin
+
+    # Anchos de columna
+    ws.column_dimensions["A"].width = 5
+    ws.column_dimensions["B"].width = 35
+    ws.column_dimensions["C"].width = 14
+    ws.column_dimensions["D"].width = 14
+    ws.column_dimensions["E"].width = 28
+    ws.column_dimensions["F"].width = 14
+    ws.column_dimensions["G"].width = 22  # Matrícula
+    for j in range(8, 8 + len(data["curso"]["modulos"])):
+        ws.column_dimensions[get_column_letter(j)].width = 22
+    ws.column_dimensions[get_column_letter(8 + len(data["curso"]["modulos"]))].width = 16
+    ws.column_dimensions[get_column_letter(9 + len(data["curso"]["modulos"]))].width = 22
+
+    # Altura del header
+    ws.row_dimensions[header_row].height = 30
+
+    # Generar el archivo en memoria
+    buffer = BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+
+    # Nombre del archivo
+    safe_nombre = (curso_codigo or "curso").replace("/", "_").replace(" ", "_")
+    filename = f"deudores_{safe_nombre}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
 @router.get(
     "/me",
     response_model=List[PaymentResponse],
