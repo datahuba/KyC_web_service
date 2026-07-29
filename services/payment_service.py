@@ -1681,7 +1681,7 @@ async def get_matriz_por_pago(
     from models.course import Course
     from models.enrollment import Enrollment
 
-    pagos = await Payment.find(match).sort("-fecha_subida").to_list()
+    pagos = await Payment.find(match).sort("+fecha_subida").to_list()
 
     # Estudiantes y cursos en batch
     est_ids = list({p.estudiante_id for p in pagos})
@@ -1748,8 +1748,14 @@ async def get_matriz_por_pago(
     for est_id in estudiantes_ordenados:
         est = estudiantes_map.get(est_id)
         items = pagos_por_est[est_id]
-        # Ordenar pagos del estudiante por fecha_subida DESC
-        items.sort(key=lambda x: x.get("fecha_subida") or "", reverse=True)
+        # F-087-FIX10 (2026-07-28): ordenar pagos del estudiante por fecha_subida ASC.
+        # Regla de Kevin: Matrícula primero (siempre, por convención), luego los
+        # pagos por módulo en el orden en que llegaron (cronológico ascendente).
+        # Antes: fecha_subida DESC → Módulos 1-2 (21-jul) salía como Pago 1 y la
+        # Matrícula (09-jul) salía última como Pago 3.
+        # Como la Matrícula es típicamente el primer pago que hace un estudiante,
+        # ordenar por fecha_subida ASC da naturalmente: Matrícula → Módulo 1 → M2 → ...
+        items.sort(key=lambda x: x.get("fecha_subida") or "")
 
         # Calcular totales del estudiante
         total_aprobado_est = sum(i["monto"] for i in items if i["estado_pago"] == "aprobado")
