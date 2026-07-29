@@ -1704,7 +1704,11 @@ async def get_matriz_por_pago(
 
     curso_ids = list({p.curso_id for p in pagos})
     cursos_list = await Course.find({"_id": {"$in": curso_ids}}).to_list() if curso_ids else []
-    cursos_map = {c.id: c for c in cursos_list}
+    # F-087-FIX12 (2026-07-29): el lookup se hace con string (el item dict
+    # serializa curso_id como str). Map dual: str y ObjectId para cubrir
+    # cualquier consumidor.
+    cursos_map = {str(c.id): c for c in cursos_list}
+    cursos_map.update({c.id: c for c in cursos_list})
 
     # Enrollments para total_a_pagar por estudiante
     enr_list = await Enrollment.find({"estudiante_id": {"$in": est_ids}}).to_list() if est_ids else []
@@ -1747,6 +1751,11 @@ async def get_matriz_por_pago(
             "banco": p.banco,
             "metodo_pago": p.metodo_pago,
             "remitente": p.remitente,
+            # F-087-FIX12 (2026-07-29): curso_id del pago individual. Sin esto, el
+            # frontend no puede poblar la columna CURSO de la vista Por Pago
+            # (queda "—" para todas las filas). Ahora línea 1783 puede resolver
+            # el curso desde el primer item del estudiante.
+            "curso_id": str(p.curso_id) if p.curso_id else None,
         }
         pagos_por_est[p.estudiante_id].append(item)
 
@@ -1780,7 +1789,20 @@ async def get_matriz_por_pago(
         ci = est.carnet if est else None
         registro = est.registro if est else None
         nombre = (est.nombre or "").strip() if est else None
-        curso_id = items[0].get("curso_id") if items else None  # todos del mismo curso por filtro
+        # F-087-FIX12 (2026-07-29): el curso del estudiante sale del PRIMER item
+        # del row. Si el estudiante tiene pagos de VARIOS cursos (sin filtro de
+        # curso), se toma el más frecuente (el "principal"). Antes, el item dict
+        # no incluía "curso_id" y la columna CURSO del Por Pago quedaba vacía
+        # ("—") para todos los estudiantes.
+        curso_id = None
+        if items:
+            # Tomar el curso más frecuente (el principal del estudiante)
+            from collections import Counter
+            cursos_counter = Counter(
+                i.get("curso_id") for i in items if i.get("curso_id")
+            )
+            if cursos_counter:
+                curso_id = cursos_counter.most_common(1)[0][0]
         curso = cursos_map.get(curso_id) if curso_id else None
 
         enr = enr_by_est.get(est_id)
