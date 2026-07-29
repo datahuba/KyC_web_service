@@ -517,6 +517,80 @@ async def get_my_enrollments(
 
 
 @router.get(
+    "/me/cursos-resumen",
+    summary="F-087-CAL · Mis cursos activos (resumen para dashboard del estudiante)"
+)
+async def get_my_courses_resumen(
+    current_user: Student = Depends(get_current_user)
+) -> Any:
+    """
+    Devuelve los cursos del estudiante autenticado enriquecidos con:
+    - Código, nombre y tipo del programa
+    - Fechas de inicio/fin
+    - Estado calculado del PROGRAMA (programado | en_ejecucion | cerrado)
+    - Estado de la INSCRIPCIÓN (activo, suspendido, etc.)
+    - Progreso de módulos (X de Y pagados)
+    - Saldo pendiente
+
+    Pensado para alimentar la sección "Mis cursos activos" del dashboard
+    del estudiante, agrupado por estado del programa.
+    """
+    from models.course import Course
+    from models.estado_programa import EstadoPrograma
+
+    enrollments = await Enrollment.find(
+        Enrollment.estudiante_id == current_user.id
+    ).sort("-created_at").to_list()
+
+    # Trae todos los cursos en batch
+    curso_ids = list({e.curso_id for e in enrollments if e.curso_id})
+    cursos_list = await Course.find({"_id": {"$in": curso_ids}}).to_list() if curso_ids else []
+    cursos_map = {c.id: c for c in cursos_list}
+
+    items = []
+    for e in enrollments:
+        c = cursos_map.get(e.curso_id)
+        if not c:
+            continue
+        estado_programa = c.get_estado_actual()
+        modulos_pagados = sum(
+            1 for m in (e.modulos or [])
+            if (m.estado or "").lower() in ("pagado", "completo")
+        )
+        items.append({
+            "enrollment_id": str(e.id),
+            "curso_id": str(c.id),
+            "curso_codigo": c.codigo,
+            "curso_nombre": c.nombre_programa,
+            "curso_tipo": c.tipo_curso.value if hasattr(c.tipo_curso, "value") else str(c.tipo_curso),
+            "curso_modalidad": c.modalidad.value if hasattr(c.modalidad, "value") else str(c.modalidad),
+            "fecha_inicio": c.fecha_inicio.isoformat() if c.fecha_inicio else None,
+            "fecha_fin": c.fecha_fin.isoformat() if c.fecha_fin else None,
+            "estado_programa": estado_programa,  # programado | en_ejecucion | cerrado
+            "estado_inscripcion": e.estado.value if hasattr(e.estado, "value") else str(e.estado),
+            "motivo_suspension": e.motivo_suspension,
+            "total_a_pagar": e.total_a_pagar,
+            "total_pagado": e.total_pagado,
+            "saldo_pendiente": e.saldo_pendiente,
+            "modulos_total": len(e.modulos or []),
+            "modulos_pagados": modulos_pagados,
+            "matricula_pagada": bool(e.matricula_pagada),
+            "fecha_inscripcion": e.fecha_inscripcion.isoformat() if e.fecha_inscripcion else None,
+        })
+
+    return {
+        "items": items,
+        "resumen": {
+            "total_cursos": len(items),
+            "en_ejecucion": sum(1 for it in items if it["estado_programa"] == EstadoPrograma.EN_EJECUCION.value),
+            "programado": sum(1 for it in items if it["estado_programa"] == EstadoPrograma.PROGRAMADO.value),
+            "cerrado": sum(1 for it in items if it["estado_programa"] == EstadoPrograma.CERRADO.value),
+            "saldo_pendiente_total": sum(it["saldo_pendiente"] or 0 for it in items),
+        }
+    }
+
+
+@router.get(
     "/{id}",
     response_model=EnrollmentResponse,
     summary="Ver Inscripción"
