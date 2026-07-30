@@ -247,9 +247,11 @@ async def list_certificates_admin(
     FIX 2026-07-29 19:11: Kevin pidió que la sección Certificados sea visible
     para todos (estudiantes y staff). Para el staff, esta vista de auditoría
     lista todos los certificados emitidos con filtros.
-    """
-    from api.dependencies import STAFF_ROLES_HELPER  # type: ignore
 
+    BUG-FIX (2026-07-30): removido import roto de STAFF_ROLES_HELPER que
+    no existe en api.dependencies y rompía el endpoint con ImportError.
+    La validación de staff roles ya se hace abajo con el set local.
+    """
     if not isinstance(current_user, User):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
