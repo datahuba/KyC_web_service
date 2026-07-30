@@ -142,6 +142,24 @@ else
 fi
 
 log "[5/6] reiniciar kyc-backend"
+# F-ACTIONS-DEPLOY-FIX-3 (2026-07-30): hacer rm -f JUSTO ANTES del up.
+# El build tarda ~30s, tiempo suficiente para que algo (otro deploy,
+# un restart policy, etc) cree un container "kyc-backend" fantasma.
+# Si intentamos up con un container del mismo nombre ya existente,
+# docker compose falla con "Conflict. The container name is already
+# in use". Hacer rm -f aqui garantiza que el slot esta libre.
+# Usamos '|| true' para que un fallo en cleanup NO mate el script
+# (set -e ya esta activo). El cleanup es best-effort; el verdadero
+# validacion es el health check al final.
+docker compose down backend 2>/dev/null || true
+docker rm -f kyc-backend 2>/dev/null || true
+sleep 1
+# Verificar que el slot esta realmente libre antes de up
+if docker ps -a --format '{{.Names}}' | grep -q '^kyc-backend$'; then
+  log "WARN: todavia hay un container kyc-backend despues de cleanup, forzando rm"
+  docker rm -f kyc-backend 2>/dev/null || true
+  sleep 1
+fi
 docker compose up -d --no-deps --force-recreate backend
 sleep 3
 docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.CreatedAt}}' | grep -E 'kyc-backend|postgrado-backend' || log "WARN: kyc-backend no encontrado en docker ps"
