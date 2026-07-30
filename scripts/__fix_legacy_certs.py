@@ -51,8 +51,27 @@ def re_upload_to_cloudinary(pdf_bytes: bytes, public_id: str) -> str:
 
 
 async def main():
-    # Importar servicios (después de inicializar Beanie)
-    from main import app  # noqa
+    # Inicializar Beanie (mismo init que la app)
+    from motor.motor_asyncio import AsyncIOMotorClient
+    from beanie import init_beanie
+    from core.config import settings  # type: ignore
+
+    mongo_url = os.environ.get("MONGODB_URL") or settings.MONGODB_URL
+    db_name = os.environ.get("MONGODB_DB_NAME") or settings.MONGODB_DB_NAME
+
+    client = AsyncIOMotorClient(mongo_url)
+    await init_beanie(
+        database=client[db_name],
+        document_models=[
+            "models.certificate.Certificate",
+            "models.certificate_counter.CertificateCounter",
+            "models.enrollment.Enrollment",
+            "models.student.Student",
+            "models.course.Course",
+            "models.user.User",
+        ],
+    )
+
     from models.certificate import Certificate
     from models.enrollment import Enrollment
     from models.student import Student
