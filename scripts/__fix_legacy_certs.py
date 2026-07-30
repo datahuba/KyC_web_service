@@ -9,8 +9,12 @@ Idempotente: si el cert ya tiene access_mode='public', lo salta.
 """
 import asyncio
 import io
+import os
 import sys
 from datetime import datetime, timezone
+
+# Agregar /app al path para que los imports funcionen
+sys.path.insert(0, "/app")
 
 import cloudinary
 import cloudinary.uploader
