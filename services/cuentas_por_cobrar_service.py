@@ -19,6 +19,7 @@ Excluidos automáticamente del reporte:
 - Enrollments SUSPENDIDO (pasivos), RETIRADO, CANCELADO, COMPLETADO.
 """
 
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -40,6 +41,7 @@ ESTADOS_EXCLUIDOS_CXC = {
 }
 
 
+@dataclass
 class CxCResumenModulo:
     """Resumen de un módulo dentro del reporte de CxC."""
     nombre: str
@@ -52,6 +54,7 @@ class CxCResumenModulo:
     cuenta_cxc_real: bool
 
 
+@dataclass
 class CxCResumenEnrollment:
     """Resumen de un enrollment en el reporte de CxC."""
     enrollment_id: str
@@ -68,6 +71,7 @@ class CxCResumenEnrollment:
     modulos: List[CxCResumenModulo]
 
 
+@dataclass
 class CxCResumenCurso:
     """Resumen agrupado por curso en el reporte de CxC."""
     curso_id: str
@@ -78,6 +82,7 @@ class CxCResumenCurso:
     total_a_la_fecha: float
 
 
+@dataclass
 class CxCResumen:
     """Resumen global del reporte de CxC."""
     total_estimado: float
