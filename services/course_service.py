@@ -285,6 +285,9 @@ async def get_courses_para_calendario(
     from models.enums import EstadoInscripcion
 
     # Pre-cargar counts de inscritos por curso en una sola query
+    # F-CALENDARIO-FIX-3 (2026-07-30): Beanie 1.30 no soporta
+    # `.in_()` con ExpressionField (lanza 'ExpressionField object is not
+    # callable'). Usamos find con dict de Mongo directo.
     estados_validos_values = [
         EstadoInscripcion.PENDIENTE_PAGO.value,
         EstadoInscripcion.ACTIVO.value,
@@ -295,12 +298,11 @@ async def get_courses_para_calendario(
     course_ids = [c.id for c in courses]
     counts_por_curso: dict = {}
     try:
-        # Query Beanie (mas limpio que aggregation manual)
-        enrollments_count = await Enrollment.find(
-            Enrollment.curso_id.in_(course_ids),
-            Enrollment.estado.in_(estados_validos_values),
+        # find() con dict de Mongo query directamente
+        all_enrollments = await Enrollment.find(
+            {"curso_id": {"$in": course_ids}, "estado": {"$in": estados_validos_values}}
         ).to_list()
-        for e in enrollments_count:
+        for e in all_enrollments:
             cid = str(e.curso_id)
             counts_por_curso[cid] = counts_por_curso.get(cid, 0) + 1
     except Exception as e:
