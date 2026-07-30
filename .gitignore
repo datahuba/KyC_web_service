@@ -38,3 +38,4 @@ _idxcheck_tmp.py
 # standalone (manual_test_pdf.py). No son artefactos de pytest, son outputs
 # de una corrida manual para inspección visual. Se borran o se regeneran.
 tests/_pdf_test_*.pdf
+_set_test_password.py
