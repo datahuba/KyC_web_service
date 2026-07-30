@@ -271,6 +271,43 @@ async def get_courses_para_calendario(
 
     courses = await query.to_list()
 
+    # F-CALENDARIO-FIX-2 (2026-07-30): contar inscritos REALES (no todos los
+    # IDs historicos). El campo Course.inscritos contiene TODOS los IDs
+    # que se fueron agregando, incluyendo cancelados/retirados que ya no
+    # cuentan como inscritos. Para evitar duplicar la logica de "que es un
+    # inscrito" en el frontend y mantener consistencia con la tabla de
+    # enrollments, hacemos una query cross-collection aqui.
+    #
+    # Estados que NO cuentan como inscrito: CANCELADO (nunca curso).
+    # Estados que SI cuentan: PENDIENTE_PAGO, ACTIVO, SUSPENDIDO,
+    # COMPLETADO, RETIRADO.
+    from models.enrollment import Enrollment
+    from models.enums import EstadoInscripcion
+
+    # Pre-cargar counts de inscritos por curso en una sola query
+    estados_validos = [
+        EstadoInscripcion.PENDIENTE_PAGO,
+        EstadoInscripcion.ACTIVO,
+        EstadoInscripcion.SUSPENDIDO,
+        EstadoInscripcion.COMPLETADO,
+        EstadoInscripcion.RETIRADO,
+    ]
+    pipeline = [
+        {"$match": {"curso_id": {"$in": [c.id for c in courses]}, "estado": {"$in": estados_validos}}},
+        {"$group": {"_id": "$curso_id", "count": {"$sum": 1}}},
+    ]
+    counts_por_curso: dict = {}
+    try:
+        from core.database import get_motor_db
+        motor_db = get_motor_db()
+        async for doc in motor_db["enrollments"].aggregate(pipeline):
+            # doc["_id"] viene como ObjectId, lo paso a str para matchear con str(c.id)
+            counts_por_curso[str(doc["_id"])] = doc["count"]
+    except Exception as e:
+        # Si falla la query, fallback a len(c.inscritos)
+        import logging
+        logging.warning(f"[calendario] no se pudo contar inscritos via aggregation: {e}")
+
     items: List[Dict[str, Any]] = []
     for c in courses:
         # Filtro por año: si tiene fecha_inicio usamos esa, sino fecha_fin
@@ -300,7 +337,7 @@ async def get_courses_para_calendario(
             "costo_total_interno": c.costo_total_interno,
             "matricula_interno": c.matricula_interno,
             "cantidad_modulos": len(c.modulos or []),
-            "cantidad_inscritos": len(c.inscritos or []),
+            "cantidad_inscritos": counts_por_curso.get(str(c.id), len(c.inscritos or [])),
         })
 
     # Orden cronológico: cursos sin fecha al final
