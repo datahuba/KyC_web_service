@@ -48,7 +48,8 @@ STAFF_ROLES_REVISION = {
 
 def _es_staff_revision(user: User) -> bool:
     """True si el user puede listar/aprobar/rechazar solicitudes."""
-    return user.role in STAFF_ROLES_REVISION
+    # KYC DataHub: el campo en el modelo User es 'rol' (no 'role')
+    return getattr(user, "rol", None) in STAFF_ROLES_REVISION
 
 
 def _to_archivo_adjunto(archivo_dict: dict) -> ArchivoAdjunto:

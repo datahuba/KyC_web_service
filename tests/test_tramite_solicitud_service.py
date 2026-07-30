@@ -70,11 +70,11 @@ def _make_estudiante() -> MagicMock:
 
 
 def _make_staff(role: UserRole) -> MagicMock:
-    """Mock de User con role."""
+    """Mock de User con role (en el modelo KYC DataHub el campo es 'rol', no 'role')."""
     u = MagicMock()
     u.id = ObjectId()
     u.username = f"staff_{role.value}"
-    u.role = role
+    u.rol = role
     return u
 
 
