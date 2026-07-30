@@ -39,3 +39,5 @@ _idxcheck_tmp.py
 # de una corrida manual para inspección visual. Se borran o se regeneran.
 tests/_pdf_test_*.pdf
 _set_test_password.py
+
+_audit_*.py
