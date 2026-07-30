@@ -24,7 +24,7 @@ RBAC:
 
 import io
 import logging
-from typing import Optional, Union
+from typing import List, Optional, Union
 from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException, Query, status
