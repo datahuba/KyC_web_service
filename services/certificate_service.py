@@ -765,9 +765,9 @@ def _cloudinary_signed_url_from_public_url(public_url: str) -> str | None:
         if version_idx is None or version_idx == len(parts) - 1:
             return None
         public_id = '/'.join(parts[version_idx + 1:])
-        # Quitar extensión
-        if public_id.lower().endswith('.pdf'):
-            public_id = public_id[:-4]
+        # NO quitamos la extensión .pdf: para raw assets en Cloudinary,
+        # el public_id se almacena CON la extensión original. Si la
+        # quitamos, el signed URL apunta a un asset inexistente (404).
         # Determinar resource_type
         resource_type = parts[2] if len(parts) > 2 else 'raw'
         # Generar signed URL
