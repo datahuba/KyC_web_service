@@ -53,7 +53,11 @@ FIRMANTE_DIRECTORA_NOMBRE = "M.Sc. Ortega Blanca Muñoz"
 FIRMANTE_DIRECTORA_CARGO = "DIRECTORA\nPOSTGRADO DE AUDITORIA FINANCIERA\nO CONTADURIA PUBLICA"
 
 # Roles staff (los únicos que pueden ver/descargar certificados de cualquier estudiante)
-STAFF_ROLES = {"SUPERADMIN", "ADMIN", "CPD", "COBRANZA", "MAE"}
+# BUG FIX (2026-07-30): los valores del enum UserRole están en MINÚSCULAS
+# ("admin", "cpd", etc). El set anterior estaba en MAYÚSCULAS, lo que
+# provocaba que NUNCA matcheara y los staff no pudieran ver certs de
+# otros estudiantes (siempre caía al 403).
+STAFF_ROLES = {"superadmin", "admin", "cpd", "cobranza", "mae"}
 
 
 # ========================================================================
@@ -196,37 +200,26 @@ async def next_correlativo(anio: int) -> int:
 async def validar_requisitos_notas(enrollment: Enrollment) -> None:
     """
     Valida que el estudiante puede pedir Certificado de Notas.
-    Requisitos:
-      1. Todos los módulos con estado_academico in {Aprobado, Reprobado} (no 'Cursando').
-      2. enrollment.esta_completamente_pagado() == True.
 
-    Lanza HTTPException 422 con detalle accionable si falla.
+    F-CERT-SIEMPRE (2026-07-30): según reunión con Sandra Zabala + Chicho,
+    el Certificado de Notas debe poder sacarse SIEMPRE que la inscripción
+    tenga al menos un módulo asociado. No se exige:
+      - que todos los módulos estén finalizados (puede estar "Cursando")
+      - que la inscripción esté completamente pagada
+
+    El certificado queda como snapshot inmutable; si después suben notas
+    adicionales, el estudiante puede pedir un NUEVO certificado (los
+    anteriores quedan como histórico).
+
+    Requisitos:
+      1. La inscripción debe tener al menos un módulo asociado.
+
+    Lanza HTTPException 422 con detalle si falla.
     """
     if not enrollment.modulos:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Esta inscripción no tiene módulos asociados. No se puede emitir Certificado de Notas.",
-        )
-
-    modulos_pendientes = [m for m in enrollment.modulos if m.estado_academico == "Cursando"]
-    if modulos_pendientes:
-        nombres = ", ".join(m.nombre for m in modulos_pendientes)
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                f"Debes finalizar todos los módulos antes de solicitar el Certificado de Notas. "
-                f"Módulos pendientes: {nombres}."
-            ),
-        )
-
-    if not enrollment.esta_completamente_pagado():
-        saldo = enrollment.saldo_pendiente
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                f"Debes cancelar el saldo pendiente (Bs {saldo:.2f}) antes de solicitar "
-                f"el Certificado de Notas."
-            ),
         )
 
 
@@ -235,9 +228,16 @@ async def validar_requisitos_no_deudor(
 ) -> None:
     """
     Valida que el estudiante puede pedir Certificado de No Deudor hasta el módulo N.
+
+    F-CERT-SIEMPRE (2026-07-30): según reunión con Sandra Zabala + Chicho,
+    el Certificado de No Deudor "hasta módulo N" debe poder emitirse SIEMPRE
+    que N esté dentro del rango válido. No se exige que los módulos previos
+    estén pagados. La "deuda" se reporta en el cuerpo del certificado; el
+    estudiante puede emitir varios a medida que avanza y los antiguos quedan
+    como snapshot histórico.
+
     Requisitos:
       1. 1 <= hasta_modulo_n <= len(enrollment.modulos).
-      2. Los módulos 0..hasta_modulo_n-1 están todos con estado == 'Pagado'.
 
     Lanza HTTPException 422 con detalle si falla.
     """
@@ -253,30 +253,6 @@ async def validar_requisitos_no_deudor(
             detail=(
                 f"El alcance 'hasta_módulo_n' debe estar entre 1 y {total} "
                 f"(total de módulos de tu programa). Recibido: {hasta_modulo_n}."
-            ),
-        )
-
-    modulos_no_pagados = [
-        m for m in enrollment.modulos[:hasta_modulo_n] if m.estado != "Pagado"
-    ]
-    if modulos_no_pagados:
-        # Detalle: el primero que no está pagado, con su saldo pendiente
-        primero = modulos_no_pagados[0]
-        # Calcular saldo pendiente del módulo (costo - monto_pagado)
-        try:
-            costo = getattr(primero, "costo", 0) or 0
-            pagado = getattr(primero, "monto_pagado", 0) or 0
-            saldo_mod = max(0.0, costo - pagado)
-            detalle_saldo = f" (saldo pendiente Bs {saldo_mod:.2f})"
-        except Exception:
-            detalle_saldo = ""
-
-        nombres_pend = ", ".join(m.nombre for m in modulos_no_pagados)
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                f"No puedes solicitar este certificado. El módulo «{primero.nombre}» "
-                f"aún no está pagado{detalle_saldo}. Módulos con saldo pendiente: {nombres_pend}."
             ),
         )
 
@@ -756,18 +732,24 @@ def verificar_acceso_certificado(cert: Certificate, current_user) -> None:
     """
     Verifica que el usuario puede acceder al certificado:
     - Estudiante: solo si es el dueño (cert.student_id == current_user.id).
-    - Staff: cualquier cert (los roles en STAFF_ROLES).
+    - Staff: cualquier cert (los roles en STAFF_ROLES o COORDINADOR).
     Lanza HTTPException 403 si no tiene acceso.
+
+    LECCIÓN (2026-07-30): no usar `isinstance(current_user, User)` porque
+    en los tests y en algunos callers el user es un Mock/spec. Usar
+    `getattr(user, 'rol', None)` con fallback al valor del enum o string.
     """
-    from models.user import User
-    if isinstance(current_user, User):
-        if current_user.rol.value in STAFF_ROLES or current_user.rol.value == "COORDINADOR":
+    user_rol = getattr(current_user, "rol", None)
+    if user_rol is not None:
+        # Normalizar a string (puede ser Enum o str)
+        rol_value = getattr(user_rol, "value", user_rol)
+        if rol_value in STAFF_ROLES or rol_value == "COORDINADOR":
             return
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No tienes permiso para acceder a este certificado.",
         )
-    # current_user es Student
+    # current_user es Student: debe ser el dueño del cert
     if getattr(current_user, "id", None) != cert.student_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
