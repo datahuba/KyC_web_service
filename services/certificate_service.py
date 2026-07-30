@@ -771,6 +771,7 @@ def _cloudinary_signed_url_from_public_url(public_url: str) -> str | None:
         # Determinar resource_type
         resource_type = parts[2] if len(parts) > 2 else 'raw'
         # Generar signed URL
+        # cloudinary.utils.cloudinary_url retorna una tupla (url, options_dict).
         signed = cloudinary.utils.cloudinary_url(
             public_id,
             resource_type=resource_type,
@@ -778,6 +779,9 @@ def _cloudinary_signed_url_from_public_url(public_url: str) -> str | None:
             secure=True,
             expires_at=int(__import__('time').time()) + 3600,
         )
+        # La tupla tiene (url, options). Extraer el primer elemento.
+        if isinstance(signed, tuple) and len(signed) > 0:
+            return signed[0]
         return signed
     except Exception:
         return None
