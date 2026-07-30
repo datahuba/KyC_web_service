@@ -25,76 +25,34 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           # El user 'deploy' tiene sudo NOPASSWD para docker (verificado 2026-07-21).
           # El host de la key es el de deploy_user; el de 'root' no acepta key-based.
-          command_timeout: 15m
+          command_timeout: 20m
           script: |
             # F-ACTIONS-FIX (2026-07-21): todo el script se ejecuta con sudo.
             # El user 'deploy' tiene sudo NOPASSWD pero no puede acceder
             # directamente a /root/ (permisos del filesystem).
-            sudo -n bash << 'REMOTE_EOF'
-            set -e
-            # F-ACTIONS-FIX-FLOCK (2026-07-28): lock file para evitar race condition
-            # entre GitHub Actions y deploys manuales. Sin esto, ambos procesos
-            # pelean por el mismo container y se rompen mutuamente. Si hay otro
-            # deploy corriendo, esperamos hasta 5 min; si no termina, abortamos.
-            LOCK="/tmp/deploy-backend.lock"
-            exec 200>"$LOCK"
-            if ! flock -n 200; then
-              echo "⏳ Otro deploy está corriendo (lock: $LOCK). Esperando hasta 5 min..."
-              if ! flock -w 300 200; then
-                echo "❌ Timeout esperando lock. Abortando."
-                exit 1
+            #
+            # F-ACTIONS-DEPLOY-UNIFIED (2026-07-30): antes este workflow tenia
+            # su propio script inline con flock, que entraba en conflicto con
+            # deploys manuales SSH (lock file compartido). Ahora ambos flujos
+            # usan /usr/local/bin/kyc-deploy (mismo lock, mismo marker, mismo log,
+            # health check al final). El script unificado detecta el marker stale
+            # y se autocura; nunca se queda colgado mas de 15 min.
+            sudo -n bash -c '
+              set -e
+              # Instalar el script si no existe (idempotente, copy desde el repo)
+              if [[ ! -f /usr/local/bin/kyc-deploy ]]; then
+                install -m 0755 /root/postgrado/backend/scripts/kyc-deploy.sh /usr/local/bin/kyc-deploy
+                echo "kyc-deploy instalado en /usr/local/bin/"
               fi
-            fi
-            echo "📥 === SINCRONIZACIÓN NUCLEAR BACKEND === 📥"
-            # ISSUE-MIGRACION (2026-07-17): movido de /var/www/backend a /root/postgrado/backend
-            # (al lado de /root/oys-deploy/ para convivencia multi-proyecto en el VPS)
-            cd /root/postgrado/backend
 
-            # F-ACTIONS-FIX: refspec explícito para forzar la actualización de la ref local.
-            # El `git fetch --all` por defecto no descarga nuevos commits en una rama
-            # si cree que ya la tiene sincronizada (lo descubrimos en deploy manual).
-            git fetch origin +refs/heads/develop_kevin:refs/remotes/origin/develop_kevin
-            echo "🔖 SHA remoto descargado:"
-            git rev-parse origin/develop_kevin
+              # Log de quien disparo el deploy (util para auditoria)
+              echo "=== DEPLOY disparado por GitHub Actions ===" >> /tmp/deploy-backend.log
+              echo "    triggered_by=github-actions sha=$(git -C /root/postgrado/backend rev-parse origin/develop_kevin 2>/dev/null || echo unknown)" >> /tmp/deploy-backend.log
 
-            # Forzar al servidor a pararse en nuestra rama
-            git checkout develop_kevin || git checkout -b develop_kevin origin/develop_kevin
-
-            # Botón Nuclear: Destruir diferencias y hacer un clon exacto
-            git reset --hard origin/develop_kevin
-            git clean -fd
-            echo "🆕 HEAD actual:"
-            git log --oneline -3
-
-            echo "🚀 === RECONSTRUYENDO DOCKER === 🚀"
-            cd /root/postgrado
-            # F-ACTIONS-DEPLOY-FIX-2 (2026-07-23): el `docker compose down`
-            # no alcanza porque el container tiene `restart: always` en
-            # docker-compose.yml y Docker lo REINICIA automáticamente.
-            # Solución: desactivar restart policy + stop + kill + remove
-            # + verificar que NO existe antes de continuar.
-            docker update --restart=no kyc-backend 2>/dev/null || true
-            docker compose stop backend 2>/dev/null || true
-            docker kill kyc-backend 2>/dev/null || true
-            docker rm -f kyc-backend 2>/dev/null || true
-            sleep 1
-            if docker ps -a --format '{{.Names}}' | grep -q '^kyc-backend$'; then
-                echo "❌ ERROR: kyc-backend todavía existe después de kill+rm, abortando"
-                docker ps -a --format 'table {{.Names}} | {{.Status}}' | grep kyc-backend
-                exit 1
-            fi
-            docker rmi -f $(docker images -q postgrado-backend) 2>/dev/null || true
-            docker compose build --no-cache backend
-
-            echo "🔄 === REINICIANDO BACKEND === 🔄"
-            docker compose up -d --no-deps --force-recreate backend
-            sleep 3
-            docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.CreatedAt}}' | grep -E 'kyc-backend|postgrado-backend' || echo "WARN: kyc-backend no encontrado en docker ps"
-
-            echo "🧹 === LIMPIEZA DE IMÁGENES HUÉRFANAS === 🧹"
-            # Elimina de forma segura imágenes colgantes (<none>:<none>) creadas en la compilación para liberar espacio
-            docker image prune -f
-
-            echo "✅ DEPLOY COMPLETADO"
-            docker logs kyc-backend --tail 5
-            REMOTE_EOF
+              # Ejecutar el deploy unificado. El script maneja:
+              # - lock con flock + timeout 15 min
+              # - marker file /tmp/deploy-in-progress (con timestamp)
+              # - cleanup automatico con trap (incluso si Ctrl+C o error)
+              # - health check post-deploy
+              /usr/local/bin/kyc-deploy
+            '
