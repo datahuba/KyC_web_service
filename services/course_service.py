@@ -285,28 +285,28 @@ async def get_courses_para_calendario(
     from models.enums import EstadoInscripcion
 
     # Pre-cargar counts de inscritos por curso en una sola query
-    estados_validos = [
-        EstadoInscripcion.PENDIENTE_PAGO,
-        EstadoInscripcion.ACTIVO,
-        EstadoInscripcion.SUSPENDIDO,
-        EstadoInscripcion.COMPLETADO,
-        EstadoInscripcion.RETIRADO,
+    estados_validos_values = [
+        EstadoInscripcion.PENDIENTE_PAGO.value,
+        EstadoInscripcion.ACTIVO.value,
+        EstadoInscripcion.SUSPENDIDO.value,
+        EstadoInscripcion.COMPLETADO.value,
+        EstadoInscripcion.RETIRADO.value,
     ]
-    pipeline = [
-        {"$match": {"curso_id": {"$in": [c.id for c in courses]}, "estado": {"$in": estados_validos}}},
-        {"$group": {"_id": "$curso_id", "count": {"$sum": 1}}},
-    ]
+    course_ids = [c.id for c in courses]
     counts_por_curso: dict = {}
     try:
-        from core.database import get_motor_db
-        motor_db = get_motor_db()
-        async for doc in motor_db["enrollments"].aggregate(pipeline):
-            # doc["_id"] viene como ObjectId, lo paso a str para matchear con str(c.id)
-            counts_por_curso[str(doc["_id"])] = doc["count"]
+        # Query Beanie (mas limpio que aggregation manual)
+        enrollments_count = await Enrollment.find(
+            Enrollment.curso_id.in_(course_ids),
+            Enrollment.estado.in_(estados_validos_values),
+        ).to_list()
+        for e in enrollments_count:
+            cid = str(e.curso_id)
+            counts_por_curso[cid] = counts_por_curso.get(cid, 0) + 1
     except Exception as e:
         # Si falla la query, fallback a len(c.inscritos)
         import logging
-        logging.warning(f"[calendario] no se pudo contar inscritos via aggregation: {e}")
+        logging.warning(f"[calendario] no se pudo contar inscritos via Beanie: {e}")
 
     items: List[Dict[str, Any]] = []
     for c in courses:
