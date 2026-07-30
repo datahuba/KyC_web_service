@@ -699,6 +699,8 @@ async def _subir_pdf_a_cloudinary(pdf_bytes: bytes, public_id: str) -> str:
             folder="kyc/certificates",
             public_id=public_id,
             resource_type="raw",
+            type="upload",
+            access_mode="public",
             overwrite=True,
             format="pdf",
         )
@@ -716,12 +718,69 @@ async def _subir_pdf_a_cloudinary(pdf_bytes: bytes, public_id: str) -> str:
 # ========================================================================
 
 async def _descargar_pdf_desde_url(url: str) -> bytes:
-    """Descarga los bytes del PDF desde una URL (Cloudinary u otra)."""
+    """
+    Descarga los bytes del PDF desde una URL (Cloudinary u otra).
+
+    BUG-FIX (2026-07-30): si la URL es de Cloudinary y falla con 401
+    (asset privado legacy), regenera una signed URL con acceso temporal.
+    Esto permite descargar PDFs emitidos antes del fix `access_mode='public'`
+    sin tener que reemitir el certificado.
+    """
     import httpx
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
         resp = await client.get(url)
+        if resp.status_code == 401 and 'cloudinary' in url:
+            # Intentar regenerar con signed URL
+            signed_url = _cloudinary_signed_url_from_public_url(url)
+            if signed_url and signed_url != url:
+                resp = await client.get(signed_url)
         resp.raise_for_status()
         return resp.content
+
+
+def _cloudinary_signed_url_from_public_url(public_url: str) -> str | None:
+    """
+    Dada una URL pública de Cloudinary (sin firma), regenera una signed URL
+    con expiración de 1 hora. Útil para assets legacy subidos sin
+    access_mode='public' o con access_type='authenticated'.
+    """
+    try:
+        import cloudinary.utils
+        # La URL típica es: https://res.cloudinary.com/<cloud>/<resource_type>/<type>/v123/folder/file.pdf
+        # Extraer el public_id (sin extensión .pdf)
+        # Primero quitamos el query string
+        from urllib.parse import urlparse
+        parsed = urlparse(public_url)
+        path = parsed.path  # /<cloud>/raw/upload/v123/folder/file.pdf
+        parts = path.split('/')
+        # parts[0] = '', parts[1] = cloud_name, parts[2] = resource_type, parts[3] = type, parts[4] = version?, parts[5:] = public_id
+        if len(parts) < 5:
+            return None
+        # Encontrar el public_id (todo después de la versión)
+        version_idx = None
+        for i, p in enumerate(parts):
+            if p.startswith('v') and p[1:].isdigit():
+                version_idx = i
+                break
+        if version_idx is None or version_idx == len(parts) - 1:
+            return None
+        public_id = '/'.join(parts[version_idx + 1:])
+        # Quitar extensión
+        if public_id.lower().endswith('.pdf'):
+            public_id = public_id[:-4]
+        # Determinar resource_type
+        resource_type = parts[2] if len(parts) > 2 else 'raw'
+        # Generar signed URL
+        signed = cloudinary.utils.cloudinary_url(
+            public_id,
+            resource_type=resource_type,
+            sign_url=True,
+            secure=True,
+            expires_at=int(__import__('time').time()) + 3600,
+        )
+        return signed
+    except Exception:
+        return None
 
 
 # ========================================================================
