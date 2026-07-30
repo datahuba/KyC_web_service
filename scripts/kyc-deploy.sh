@@ -159,8 +159,12 @@ done
 if (( !HEALTH_OK )); then
   log "WARN: health check NO respondio en ${HEALTHCHECK_TIMEOUT}s"
   log "      (el deploy puede haber sido exitoso pero el backend tarda en arrancar)"
-  log "      Ultimos logs:"
-  docker logs kyc-backend --tail 20 2>&1 | sed 's/^/        /'
+  log "      Ultimos logs (best effort, no falla el script si container no existe):"
+  # Usamos || true para que un container desaparecido NO mate el script.
+  # El deploy puede haber sido exitoso aunque el container se cayo despues.
+  docker logs kyc-backend --tail 20 2>&1 | sed 's/^/        /' || log "      (no se pudieron leer logs: container no existe o ya esta muerto)"
+  log "      Verificacion final:"
+  docker ps -a --format 'table {{.Names}}\t{{.Status}}' | grep kyc-backend || log "      (kyc-backend no aparece en docker ps -a)"
 fi
 
 docker image prune -f > /dev/null 2>&1 || true
