@@ -57,7 +57,7 @@ async def main():
     from core.config import settings  # type: ignore
 
     mongo_url = os.environ.get("MONGODB_URL") or settings.MONGODB_URL
-    db_name = os.environ.get("MONGODB_DB_NAME") or settings.MONGODB_DB_NAME
+    db_name = os.environ.get("DATABASE_NAME") or settings.DATABASE_NAME
 
     client = AsyncIOMotorClient(mongo_url)
     await init_beanie(
