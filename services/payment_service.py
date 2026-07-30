@@ -481,11 +481,21 @@ async def create_payment(
         )
 
     if payment_in.metodo_pago != "Caja" and payment_in.numero_transaccion:
+        # F-PAGO-RESUB-ANULADO (2026-07-30): permitir re-subir el comprobante si
+        # el pago anterior está ANULADO o RECHAZADO. El índice único parcial
+        # uniq_numero_transaccion_activo (en models/payment.py) ya excluye
+        # estos estados, así que la BD acepta el insert.
+        #
+        # Caso real (2026-07-30): Luis Fernando Lopez Zenteno — comprobante
+        # 5603099807 ANULADO. Necesita re-subir el pago. Antes este código
+        # bloqueaba con "comprobantes duplicados" incluso para comprobantes
+        # anulados, lo cual no tiene sentido: si el pago se anuló, el número
+        # de transacción quedó liberado.
         existing_transaction = await Payment.find_one(
             Payment.numero_transaccion == payment_in.numero_transaccion,
-            Payment.estado_pago != EstadoPago.RECHAZADO
+            Payment.estado_pago.in_([EstadoPago.APROBADO, EstadoPago.PENDIENTE])
         )
-        
+
         if existing_transaction:
             raise ValueError(
                 f"El número de transacción bancaria '{payment_in.numero_transaccion}' ya "

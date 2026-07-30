@@ -7,21 +7,32 @@ Endpoints para emisión y consulta de Certificados de Notas y No Deudor.
 F-CERTIFICADOS (2026-07-29): ver spec en
 .agents/specs/CERTIFICADOS/{requirements,design,tasks}.md
 
+F-CERT-APROBACION (2026-07-30): el estudiante NO descarga directo — primero
+crea una solicitud que el ENCARGADO_CURSO del programa (o admin/superadmin)
+debe APROBAR. Solo después de aprobada se emite el Certificate y el
+estudiante puede descargarlo.
+
 RBAC:
-- Estudiante: puede emitir sus propios certificados y descargar solo los suyos.
-- Staff (CPD/Admin/Superadmin/Cobranza/MAE/Coordinador): puede ver/descargar
-  cualquier certificado (auditoría).
+- Estudiante: puede crear solicitudes de sus propios certificados y descargar
+  solo los suyos.
+- Encargado de Curso (rol ENCARGADO_CURSO con cursos_asignados): ve y aprueba/
+  rechaza las solicitudes de SUS programas.
+- Admin / Superadmin: aprueban cualquier solicitud (backup).
+- Resto de staff (CPD, Coordinador, MAE, Cobranza): ve la cola para auditoría
+  pero no aprueba.
 """
 
 import io
+import logging
 from typing import Optional, Union
 from bson import ObjectId
 from bson.errors import InvalidId
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 
 from api.dependencies import get_current_user
 from models.certificate import Certificate
+from models.certificate_request import CertificateRequest
 from models.enums import TipoCertificado
 from models.student import Student
 from models.user import User
@@ -31,7 +42,17 @@ from schemas.certificate import (
     CertificateOut,
     CertificateModuloOut,
 )
+from schemas.certificate_request import (
+    CertificateRequestCancelar,
+    CertificateRequestCreate,
+    CertificateRequestListResponse,
+    CertificateRequestOut,
+    CertificateRequestRechazar,
+)
 import services.certificate_service as certificate_service
+import services.certificate_request_service as cert_request_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -107,24 +128,36 @@ def _verificar_es_estudiante_o_staff(
 @router.post(
     "/emit",
     status_code=status.HTTP_201_CREATED,
-    summary="Emitir un certificado (Notas o No Deudor)",
+    summary="[Staff] Emitir un certificado manualmente (sin solicitud)",
     description=(
-        "El estudiante autenticado pide emisión de su certificado. "
+        "Solo el STAFF puede usar este endpoint (cobranza, admin, superadmin, "
+        "encargado de curso). Para que el estudiante obtenga un certificado "
+        "por su cuenta, debe pasar por el flujo de solicitud: "
+        "POST /certificates/requests/ → aprobación del encargado → "
+        "descarga del PDF desde /certificates/{cert_id}/pdf.\n\n"
+        "Este endpoint se mantiene para casos manuales del staff (p.ej. "
+        "re-emisión de un cert rechazado, o emisión directa autorizada por "
+        "la dirección).\n\n"
         "Para 'notas': requiere programa finalizado + saldo cero. "
-        "Para 'no_deudor': requiere que los módulos 1..N estén todos pagados. "
-        "FIX 2026-07-29 19:11: el staff también puede emitir en nombre de "
-        "un estudiante (pasando el enrollment_id del estudiante)."
+        "Para 'no_deudor': requiere que los módulos 1..N estén todos pagados."
     ),
 )
 async def emit_certificate(
     payload: CertificateEmitRequest,
     current_user: Union[Student, User] = Depends(get_current_user),
 ) -> CertificateOut:
-    # FIX 2026-07-29 19:27 (Kevin "permiso"): el endpoint debe aceptar
-    # a cualquier usuario autenticado (Student o User). La validación
-    # granular del RBAC se hace en _obtener_curso_estudiante_enrollment
-    # (estudiante solo puede emitir para sus propios enrollments;
-    # staff/admin puede emitir para cualquiera).
+    # F-CERT-APROBACION (2026-07-30): el estudiante YA NO puede emitir
+    # directamente. Debe pasar por el flujo de solicitud /certificates/requests/.
+    # Solo el staff puede emitir manualmente.
+    if isinstance(current_user, Student):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Los estudiantes no pueden emitir certificados directamente. "
+                "Crea una solicitud en POST /api/v1/certificates/requests/ y "
+                "espera la aprobación del encargado del programa."
+            ),
+        )
     if current_user is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -450,3 +483,169 @@ async def get_certificate(
 
     certificate_service.verificar_acceso_certificado(cert, current_user)
     return _serializar_cert(cert)
+
+
+# ========================================================================
+# F-CERT-APROBACION (2026-07-30): flujo de solicitud + aprobación
+# ========================================================================
+# Endpoints para que el estudiante SOLICITE un certificado y el encargado
+# del programa (o admin/superadmin) lo APRUEBE. Al aprobar se emite el
+# Certificate real (folio + PDF) y el estudiante puede descargarlo desde
+# /certificates/{id}/pdf.
+#
+# Diseño:
+#   POST   /certificates/requests/             -> estudiante crea solicitud
+#   GET    /certificates/requests/my           -> estudiante ve las suyas
+#   GET    /certificates/requests/             -> staff ve la cola
+#   PATCH  /certificates/requests/{id}/in-review -> staff toma la solicitud
+#   PATCH  /certificates/requests/{id}/approve -> staff aprueba (emite cert)
+#   PATCH  /certificates/requests/{id}/reject  -> staff rechaza
+#   PATCH  /certificates/requests/{id}/cancel  -> estudiante cancela
+#   GET    /certificates/requests/stats        -> KPIs para panel staff
+# ========================================================================
+
+
+@router.post(
+    "/requests/",
+    response_model=CertificateRequestOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="[Estudiante] Crear solicitud de certificado",
+    description=(
+        "El estudiante autenticado pide emisión de un certificado. La solicitud "
+        "queda en estado 'pendiente' hasta que el encargado del programa la "
+        "apruebe. Solo después de aprobada se emite el Certificate (folio + PDF) "
+        "y el estudiante puede descargarlo."
+    ),
+)
+async def crear_solicitud_certificado(
+    data: CertificateRequestCreate,
+    current_user: Union[Student, User] = Depends(get_current_user),
+) -> CertificateRequestOut:
+    if not isinstance(current_user, Student):
+        raise HTTPException(
+            status_code=403,
+            detail="Solo los estudiantes pueden crear solicitudes de certificado.",
+        )
+    req = await cert_request_service.crear_solicitud(data, current_user)
+    return CertificateRequestOut(**cert_request_service._serializar_solicitud(req))
+
+
+@router.get(
+    "/requests/my",
+    response_model=List[CertificateRequestOut],
+    summary="[Estudiante] Mis solicitudes de certificado",
+)
+async def listar_mis_solicitudes_cert(
+    current_user: Union[Student, User] = Depends(get_current_user),
+) -> List[CertificateRequestOut]:
+    if not isinstance(current_user, Student):
+        raise HTTPException(
+            status_code=403,
+            detail="Este endpoint es solo para estudiantes.",
+        )
+    items = await cert_request_service.listar_mis_solicitudes(current_user)
+    return [CertificateRequestOut(**cert_request_service._serializar_solicitud(r)) for r in items]
+
+
+@router.get(
+    "/requests/",
+    response_model=CertificateRequestListResponse,
+    summary="[Staff] Cola de solicitudes de certificado (filtrada por cursos_asignados)",
+)
+async def listar_cola_solicitudes_cert(
+    estado: Optional[str] = Query(
+        None,
+        description="Filtrar por estado: pendiente | en_revision | aprobada | rechazada | cancelada",
+    ),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=100),
+    current_user: Union[Student, User] = Depends(get_current_user),
+) -> CertificateRequestListResponse:
+    if not isinstance(current_user, User):
+        raise HTTPException(status_code=403, detail="Solo personal autorizado.")
+    items, total = await cert_request_service.listar_para_staff(
+        current_user, estado=estado, page=page, per_page=per_page
+    )
+    return CertificateRequestListResponse(
+        items=[CertificateRequestOut(**cert_request_service._serializar_solicitud(r)) for r in items],
+        total=total,
+    )
+
+
+@router.get(
+    "/requests/stats",
+    summary="[Staff] Estadísticas de solicitudes (KPIs del panel)",
+)
+async def stats_solicitudes_cert(
+    current_user: Union[Student, User] = Depends(get_current_user),
+):
+    if not isinstance(current_user, User):
+        raise HTTPException(status_code=403, detail="Solo personal autorizado.")
+    return await cert_request_service.obtener_estadisticas(current_user)
+
+
+@router.patch(
+    "/requests/{request_id}/in-review",
+    response_model=CertificateRequestOut,
+    summary="[Encargado] Marcar solicitud en revisión",
+)
+async def marcar_en_revision_solicitud_cert(
+    request_id: str,
+    current_user: Union[Student, User] = Depends(get_current_user),
+) -> CertificateRequestOut:
+    if not isinstance(current_user, User):
+        raise HTTPException(status_code=403, detail="Solo personal autorizado.")
+    req = await cert_request_service.marcar_en_revision(request_id, current_user)
+    return CertificateRequestOut(**cert_request_service._serializar_solicitud(req))
+
+
+@router.patch(
+    "/requests/{request_id}/approve",
+    response_model=CertificateRequestOut,
+    summary="[Encargado/Admin] Aprobar solicitud y emitir certificado",
+    description=(
+        "Al aprobar, se emite automáticamente el Certificate (con folio y PDF) "
+        "y se enlaza a la solicitud. El estudiante puede descargarlo desde "
+        "/certificates/{certificate_id}/pdf."
+    ),
+)
+async def aprobar_solicitud_cert(
+    request_id: str,
+    current_user: Union[Student, User] = Depends(get_current_user),
+) -> CertificateRequestOut:
+    if not isinstance(current_user, User):
+        raise HTTPException(status_code=403, detail="Solo personal autorizado.")
+    req = await cert_request_service.aprobar_solicitud(request_id, current_user)
+    return CertificateRequestOut(**cert_request_service._serializar_solicitud(req))
+
+
+@router.patch(
+    "/requests/{request_id}/reject",
+    response_model=CertificateRequestOut,
+    summary="[Encargado/Admin] Rechazar solicitud con motivo",
+)
+async def rechazar_solicitud_cert(
+    request_id: str,
+    data: CertificateRequestRechazar,
+    current_user: Union[Student, User] = Depends(get_current_user),
+) -> CertificateRequestOut:
+    if not isinstance(current_user, User):
+        raise HTTPException(status_code=403, detail="Solo personal autorizado.")
+    req = await cert_request_service.rechazar_solicitud(request_id, data, current_user)
+    return CertificateRequestOut(**cert_request_service._serializar_solicitud(req))
+
+
+@router.patch(
+    "/requests/{request_id}/cancel",
+    response_model=CertificateRequestOut,
+    summary="[Estudiante] Cancelar mi solicitud (solo si está pendiente o en revisión)",
+)
+async def cancelar_solicitud_cert(
+    request_id: str,
+    data: CertificateRequestCancelar,
+    current_user: Union[Student, User] = Depends(get_current_user),
+) -> CertificateRequestOut:
+    if not isinstance(current_user, Student):
+        raise HTTPException(status_code=403, detail="Solo el estudiante dueño puede cancelar.")
+    req = await cert_request_service.cancelar_solicitud(request_id, data, current_user)
+    return CertificateRequestOut(**cert_request_service._serializar_solicitud(req))

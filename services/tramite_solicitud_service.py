@@ -52,6 +52,31 @@ def _es_staff_revision(user: User) -> bool:
     return getattr(user, "rol", None) in STAFF_ROLES_REVISION
 
 
+def _puede_aprobar_esta_solicitud(user: User, sol: TramiteSolicitud) -> bool:
+    """
+    F-CERT-APROBACION (2026-07-30): valida que el user pueda aprobar/rechazar
+    ESTA solicitud específica.
+
+    Reglas (Kevin 2026-07-30):
+    - ADMIN, SUPERADMIN: aprueban cualquier solicitud
+    - ENCARGADO_CURSO: solo si el course_id de la solicitud está en sus
+      cursos_asignados
+    - Resto de staff (CPD, MAE, COORDINADOR, COBRANZA): NO aprueban; solo
+      figuran en la lista para auditoría. Si la solicitud es antigua y no
+      tiene course_id, se permite aprobar (compatibilidad).
+    """
+    if user.rol in (UserRole.ADMIN, UserRole.SUPERADMIN):
+        return True
+    if user.rol == UserRole.ENCARGADO_CURSO:
+        if not sol.course_id:
+            # Solicitud sin course_id (antigua): no podemos filtrar, mejor
+            # bloquear para mantener la regla. Admin/superadmin pueden
+            # aprobarla si quieren.
+            return False
+        return sol.course_id in (user.cursos_asignados or [])
+    return False
+
+
 def _to_archivo_adjunto(archivo_dict: dict) -> ArchivoAdjunto:
     """Construye un ArchivoAdjunto desde el dict del request."""
     return ArchivoAdjunto(
@@ -73,6 +98,7 @@ async def crear_solicitud(
     archivos = [_to_archivo_adjunto(a.model_dump()) for a in data.archivos]
 
     enrollment_id = None
+    course_id = None  # F-CERT-APROBACION (2026-07-30): se setea desde el enrollment
     if data.enrollment_id:
         try:
             enrollment_id = PydanticObjectId(data.enrollment_id)
@@ -81,11 +107,17 @@ async def crear_solicitud(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="enrollment_id inválido",
             )
+        # Cargar el enrollment para denormalizar course_id (filtro del encargado)
+        from models.enrollment import Enrollment
+        enrollment = await Enrollment.get(enrollment_id)
+        if enrollment:
+            course_id = enrollment.curso_id
 
     sol = TramiteSolicitud(
         tipo=data.tipo.value,
         estudiante_id=estudiante.id,
         enrollment_id=enrollment_id,
+        course_id=course_id,
         nombre_completo=data.nombre_completo,
         ci=data.ci,
         email=data.email,
@@ -153,12 +185,23 @@ async def listar_todas(
                 detail="estudiante_id inválido",
             )
 
-    # TODO (FUTURO): segmentación por cursos_asignados del encargado.
-    # Por ahora, encargado_curso ve TODO si no especificamos el filtro.
-    # Esto es seguro porque los cursos asignados son un subset, pero
-    # implica que un encargado_curso podría ver solicitudes de cursos
-    # que no son suyos. Para Fase 2.b se agregará el filtro cuando
-    # Sandra/Rocío lo pidan explícitamente.
+    # F-CERT-APROBACION (2026-07-30): segmentación por cursos_asignados del
+    # encargado. Si es ENCARGADO_CURSO y tiene cursos_asignados, filtra las
+    # solicitudes cuyo course_id esté en esa lista. Si no tiene cursos
+    # asignados, ve TODO (compatibilidad con encargados sin asignar). Los
+    # demás roles (admin, superadmin, CPD, MAE, coordinador, cobranza) ven
+    # TODO sin filtro.
+    if (
+        current_user.rol == UserRole.ENCARGADO_CURSO
+        and current_user.cursos_asignados
+    ):
+        cursos_permitidos = [str(c) for c in current_user.cursos_asignados]
+        if "course_id" in query:
+            # Si el user ya filtró por course_id, intersectar
+            user_courses = query["course_id"].get("$in", []) if isinstance(query["course_id"], dict) else [query["course_id"]]
+            query["course_id"] = {"$in": [c for c in user_courses if c in cursos_permitidos]}
+        else:
+            query["course_id"] = {"$in": cursos_permitidos}
 
     total = await TramiteSolicitud.find(query).count()
 
@@ -212,6 +255,17 @@ async def aprobar_solicitud(solicitud_id: str, current_user: User) -> TramiteSol
         )
 
     sol = await obtener_solicitud(solicitud_id)
+    # F-CERT-APROBACION (2026-07-30): validar permiso granular (encargado del
+    # programa o admin/superadmin). El resto de staff (CPD/MAE/coordinador/
+    # cobranza) NO aprueba, solo ve.
+    if not _puede_aprobar_esta_solicitud(current_user, sol):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "No tienes permiso para aprobar esta solicitud. "
+                "Solo el encargado del programa, admin o superadmin pueden aprobarla."
+            ),
+        )
     if sol.estado in {EstadoTramite.APROBADA.value, EstadoTramite.RECHAZADA.value, EstadoTramite.CANCELADA.value}:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -237,6 +291,15 @@ async def rechazar_solicitud(
         )
 
     sol = await obtener_solicitud(solicitud_id)
+    # F-CERT-APROBACION (2026-07-30): mismo permiso granular que aprobar.
+    if not _puede_aprobar_esta_solicitud(current_user, sol):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "No tienes permiso para rechazar esta solicitud. "
+                "Solo el encargado del programa, admin o superadmin pueden rechazarla."
+            ),
+        )
     if sol.estado in {EstadoTramite.APROBADA.value, EstadoTramite.RECHAZADA.value, EstadoTramite.CANCELADA.value}:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

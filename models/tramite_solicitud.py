@@ -58,6 +58,13 @@ class TramiteSolicitud(MongoBaseModel):
     enrollment_id: Optional[PyObjectId] = Field(
         None, description="ID del Enrollment asociado (opcional; no aplica a todas las solicitudes)"
     )
+    # F-CERT-APROBACION (2026-07-30): agregado para poder filtrar la cola del
+    # encargado por cursos_asignados. Se setea automáticamente al crear la
+    # solicitud si hay enrollment_id. Es opcional para compatibilidad con
+    # solicitudes antiguas que no lo tienen.
+    course_id: Optional[PyObjectId] = Field(
+        None, description="ID del curso/programa (denormalizado desde enrollment). None para solicitudes antiguas."
+    )
 
     # --- Datos del solicitante ---
     nombre_completo: str = Field(..., min_length=3, max_length=200)
@@ -112,4 +119,6 @@ class TramiteSolicitud(MongoBaseModel):
             "tipo",
             # Filtros compuestos
             [("tipo", pymongo.ASCENDING), ("estado", pymongo.ASCENDING)],
+            # F-CERT-APROBACION: cola del encargado filtrada por curso+estado
+            [("course_id", pymongo.ASCENDING), ("estado", pymongo.ASCENDING)],
         ]

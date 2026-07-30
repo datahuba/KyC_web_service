@@ -34,6 +34,9 @@ from models.error_log import ErrorLog
 # desde el portal del estudiante.
 from models.certificate import Certificate
 from models.certificate_counter import CertificateCounter
+# F-CERT-APROBACION (2026-07-30): solicitudes de certificado con flujo de
+# aprobación por el encargado del programa. Colección: certificate_requests.
+from models.certificate_request import CertificateRequest
 # F-TRAMITES-SOLICITUD (2026-07-29): solicitudes de Convalidación,
 # Tutoría, Readmisión y Titulación que el estudiante crea desde /app/requests.
 from models.tramite_solicitud import TramiteSolicitud
@@ -208,6 +211,8 @@ async def init_db():
             # F-CERTIFICADOS (2026-07-29)
             Certificate,
             CertificateCounter,
+            # F-CERT-APROBACION (2026-07-30): solicitudes con flujo de aprobación
+            CertificateRequest,
             # F-TRAMITES-SOLICITUD (2026-07-29)
             TramiteSolicitud,
         ]

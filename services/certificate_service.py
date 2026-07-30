@@ -159,6 +159,28 @@ def _slug_nombre(nombre: str) -> str:
 
 
 def _format_folio(numero: int, anio: int) -> str:
+    return f"N° {numero:03d}/{anio}"
+
+
+# F-CERT-APROBACION (2026-07-30): helper para evitar duplicados al aprobar
+# solicitudes de certificado. Busca un Certificate existente para
+# (enrollment_id, tipo, hasta_modulo_n). Usado por cert_request_service.aprobar_solicitud
+# y por api/certificates._buscar_cert_duplicado.
+async def _buscar_cert_duplicado(
+    enrollment_id: str, tipo: str, hasta_modulo_n: Optional[int] = None
+) -> Optional[Certificate]:
+    from beanie import PydanticObjectId
+    try:
+        eid = PydanticObjectId(enrollment_id)
+    except Exception:
+        return None
+    query = Certificate.find(
+        Certificate.enrollment_id == eid,
+        Certificate.tipo == tipo,
+    )
+    if tipo == "no_deudor" and hasta_modulo_n is not None:
+        query = query.find(Certificate.hasta_modulo_n == hasta_modulo_n)
+    return await query.first_or_none()
     """Formatea el folio: 42 -> 'N° 042/2026'."""
     return f"N° {numero:03d}/{anio}"
 
