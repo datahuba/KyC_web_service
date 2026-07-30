@@ -1611,3 +1611,113 @@ async def disparar_verificacion_inactividad(
     ids = [enrollment_id] if enrollment_id else None
     resultado = await congelado_service.verificar_inactividad_pagos(enrollment_ids=ids)
     return resultado
+
+
+# ========================================================================
+# ENDPOINTS: INICIAR MÓDULO (F-CUENTAS-POR-COBRAR 2026-07-29)
+# ========================================================================
+# Habilitan manualmente un módulo como "en curso" para que cuente en la
+# CxC real (a la fecha). El módulo 1 de los enrollments activos ya quedó
+# backfilleado por scripts/backfill_modulo_iniciado.py; los módulos 2..N
+# los irá iniciando el encargado del programa con un click.
+#
+# RBAC (Kevin: "Solo Admin + Superadmin + Encargado del Curso del programa
+# específico"):
+# - superadmin / admin: cualquier módulo de cualquier programa.
+# - encargado_curso: solo módulos de cursos en cursos_asignados.
+# - Cualquier otro rol (cobranza, cpd, mae, coordinador, docente): 403.
+
+async def _puede_iniciar_modulo(current_user: User, enrollment: Enrollment) -> bool:
+    """
+    Verifica que el usuario puede iniciar módulos del programa del enrollment.
+    Devuelve True si:
+    - rol in {SUPERADMIN, ADMIN}, o
+    - rol = ENCARGADO_CURSO y el curso está en cursos_asignados.
+    """
+    from models.enums import UserRole
+    if current_user.rol in {UserRole.SUPERADMIN, UserRole.ADMIN}:
+        return True
+    if current_user.rol == UserRole.ENCARGADO_CURSO:
+        cursos_asignados = current_user.cursos_asignados or []
+        return str(enrollment.curso_id) in [str(c) for c in cursos_asignados]
+    return False
+
+
+@router.post(
+    "/{id}/modulos/{index}/iniciar",
+    response_model=EnrollmentResponse,
+    summary="[Staff] Marcar módulo N como 'en curso' (habilita CxC real)",
+)
+async def iniciar_modulo_endpoint(
+    *,
+    id: PydanticObjectId,
+    index: int = Path(..., ge=0, description="Índice del módulo (0, 1, 2...)"),
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    F-CUENTAS-POR-COBRAR: el encargado del programa inicia manualmente un
+    módulo. A partir de este momento, el saldo del módulo entra en la
+    "CxC a la fecha" del reporte financiero.
+
+    Permisos: Admin, Superadmin, o Encargado del Curso del programa específico.
+    Idempotente: si el módulo ya estaba iniciado, no-op (devuelve 200 OK).
+    """
+    enrollment = await Enrollment.get(id)
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="Inscripción no encontrada")
+
+    if not await _puede_iniciar_modulo(current_user, enrollment):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Solo Admin, Superadmin, o el Encargado del Curso de este "
+                "programa específico pueden iniciar módulos."
+            ),
+        )
+
+    from services import cuentas_por_cobrar_service
+    enrollment = await cuentas_por_cobrar_service.iniciar_modulo(
+        enrollment=enrollment,
+        modulo_index=index,
+        current_user=current_user,
+    )
+    return await enrollment_service.enrich_enrollment_dates(enrollment)
+
+
+@router.post(
+    "/{id}/modulos/{index}/deshacer-inicio",
+    response_model=EnrollmentResponse,
+    summary="[Staff] Revertir módulo N a 'no iniciado' (corrige CxC real)",
+)
+async def deshacer_inicio_modulo_endpoint(
+    *,
+    id: PydanticObjectId,
+    index: int = Path(..., ge=0, description="Índice del módulo (0, 1, 2...)"),
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    F-CUENTAS-POR-COBRAR: revierte el inicio de un módulo (caso de error
+    humano). Útil si Sandra/Rocío se equivocó de módulo o de programa.
+
+    Permisos: los mismos que iniciar_modulo.
+    """
+    enrollment = await Enrollment.get(id)
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="Inscripción no encontrada")
+
+    if not await _puede_iniciar_modulo(current_user, enrollment):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Solo Admin, Superadmin, o el Encargado del Curso de este "
+                "programa específico pueden revertir el inicio de un módulo."
+            ),
+        )
+
+    from services import cuentas_por_cobrar_service
+    enrollment = await cuentas_por_cobrar_service.deshacer_inicio_modulo(
+        enrollment=enrollment,
+        modulo_index=index,
+        current_user=current_user,
+    )
+    return await enrollment_service.enrich_enrollment_dates(enrollment)

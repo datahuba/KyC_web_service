@@ -34,6 +34,16 @@ class ModuloEstado(BaseModel):
     nota: Optional[float] = Field(default=None, ge=0, le=100, description="Calificación obtenida en el módulo (0-100)")
     estado_academico: str = Field(default="Cursando", description="Puede ser: Cursando, Aprobado, Reprobado")
 
+    # F-CUENTAS-POR-COBRAR (2026-07-29): marca cuándo Sandra/Rocío (encargado
+    # del programa) habilitó manualmente este módulo como "en curso". Solo los
+    # módulos con iniciado_en != null cuentan para la CxC real (a la fecha).
+    # El Módulo 1 de enrollments activos se backfillea con fecha_inscripcion en
+    # el script scripts/backfill_modulo_iniciado.py.
+    iniciado_en: Optional[datetime] = Field(
+        default=None,
+        description="UTC. Cuándo el encargado del programa marcó este módulo como 'en curso'. None = aún no se ha iniciado.",
+    )
+
     # ISSUE-P-RECALCULO-NOTA: costo de respaldo sin el descuento personal (beca)
     costo_sin_beca_personal: Optional[float] = Field(
         default=None, ge=0,
