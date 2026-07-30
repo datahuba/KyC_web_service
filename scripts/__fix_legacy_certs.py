@@ -111,7 +111,8 @@ async def main():
             course = await Course.get(cert.course_id)
             enrollment = await Enrollment.get(cert.enrollment_id)
             if not (student and course and enrollment):
-                print(f"  ⚠️  Datos faltantes para cert {cert.folio}")
+                folio_str = f"N° {cert.numero:03d}/{cert.anio}"
+                print(f"  ⚠️  Datos faltantes para cert {folio_str}")
                 errors += 1
                 continue
 
@@ -142,11 +143,13 @@ async def main():
             cert.pdf_url = new_url
             await cert.save()
 
-            print(f"  ✓ {cert.folio} ({cert.tipo}) — nuevo URL: {new_url[-60:]}")
+            folio_str = f"N° {cert.numero:03d}/{cert.anio}"
+            print(f"  ✓ {folio_str} ({cert.tipo}) — nuevo URL: ...{new_url[-60:]}")
             fixed += 1
 
         except Exception as e:
-            print(f"  ✗ {cert.folio} ({cert.tipo}): {e}")
+            folio_str = f"N° {cert.numero:03d}/{cert.anio}"
+            print(f"  ✗ {folio_str} ({cert.tipo}): {e}")
             errors += 1
 
     print(f"\nResumen: {fixed} fixed, {skipped} skipped, {errors} errors")
