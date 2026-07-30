@@ -168,14 +168,25 @@ async def next_correlativo(anio: int) -> int:
     Obtiene el siguiente número correlativo para el año dado.
     Operación atómica: usa find_one_and_update con $inc y upsert=True.
     MongoDB garantiza que dos requests simultáneos reciban números distintos.
+
+    F-CERTIFICADOS-FIX (2026-07-29): bug detectado en producción.
+    Beanie no expone `find_one_and_update` como método directo de la clase
+    del modelo (es `find().update()` para bulk, o hay que acceder a la
+    collection de motor). Usamos `get_motor_collection()` para hacer
+    la operación atómica real.
     """
-    doc = await CertificateCounter.find_one_and_update(
-        CertificateCounter.anio == anio,
+    collection = CertificateCounter.get_motor_collection()
+    doc = await collection.find_one_and_update(
+        {"anio": anio},
         {"$inc": {"last_number": 1}},
         upsert=True,
         return_document=ReturnDocument.AFTER,
     )
-    return doc.last_number
+    if doc is None:
+        # Edge case: el upsert con Beanie + Motor no devuelve el doc creado
+        # en algunas versiones. Hacemos un find normal para recuperarlo.
+        doc = await collection.find_one({"anio": anio})
+    return doc["last_number"]
 
 
 # ========================================================================
