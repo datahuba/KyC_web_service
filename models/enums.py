@@ -206,7 +206,34 @@ class AssignmentType(str, Enum):
 
 class SubmissionStatus(str, Enum):
     """Estado de la entrega de un estudiante"""
-    PENDING = "pending"      
-    SUBMITTED = "submitted"  
+    PENDING = "pending"
+    SUBMITTED = "submitted"
     GRADED = "graded"
+
+
+# F-TRAMITES-SOLICITUD (2026-07-29): tipos de solicitud que el estudiante
+# puede crear desde la sección /app/requests. Sandra/Rocío pidieron 4 tipos
+# de solicitudes adicionales (reunión 2026-07-29):
+#   - CONVALIDACION: convalidar materias cursadas en otra institución.
+#     Requisitos: carta + certificado de nota (emitido por escuela postgrado) + pago.
+#   - TUTORIA: solicitar tutoría para su trabajo final / tesis. Requisitos:
+#     carta + certificado de nota + pago.
+#   - READMISION: personas que estudiaron hace años y no defendieron; la
+#     escuela de postgrado autoriza por algún motivo X/Z.
+#   - TITULACION: solicitud formal del título una vez completado el programa.
+class TipoTramite(str, Enum):
+    """Tipo de solicitud que el estudiante crea desde /app/requests."""
+    CONVALIDACION = "convalidacion"
+    TUTORIA = "tutoria"
+    READMISION = "readmision"
+    TITULACION = "titulacion"
+
+
+class EstadoTramite(str, Enum):
+    """Ciclo de vida de una solicitud de trámite."""
+    PENDIENTE = "pendiente"          # recién creada por el estudiante
+    EN_REVISION = "en_revision"      # staff la está revisando
+    APROBADA = "aprobada"            # aprobada por el staff
+    RECHAZADA = "rechazada"          # rechazada por el staff
+    CANCELADA = "cancelada"          # cancelada por el estudiante
     

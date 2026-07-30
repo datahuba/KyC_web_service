@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from api import students, courses, enrollments, payments, discounts, users, auth, payment_config, classroom, notifications, account_requests, passive_requests, bank_statements, enrollment_requests, dashboard, pre_registrations, admin, certificates, reports  # F-CERTIFICADOS (2026-07-29); F-CUENTAS-POR-COBRAR (2026-07-29)
+from api import students, courses, enrollments, payments, discounts, users, auth, payment_config, classroom, notifications, account_requests, passive_requests, bank_statements, enrollment_requests, dashboard, pre_registrations, admin, certificates, reports, tramite_solicitudes  # F-CERTIFICADOS (2026-07-29); F-CUENTAS-POR-COBRAR (2026-07-29); F-TRAMITES-SOLICITUD (2026-07-29)
 
 api_router = APIRouter()
 
@@ -24,5 +24,8 @@ api_router.include_router(pre_registrations.router, prefix="/pre-registrations",
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
 # F-CERTIFICADOS (2026-07-29): emisión de Certificados de Notas y No Deudor.
 api_router.include_router(certificates.router, prefix="/certificates", tags=["certificates"])
+# F-TRAMITES-SOLICITUD (2026-07-29): solicitudes de Convalidación, Tutoría,
+# Readmisión y Titulación que el estudiante crea desde /app/requests.
+api_router.include_router(tramite_solicitudes.router, prefix="/tramites", tags=["tramites"])
 # F-CUENTAS-POR-COBRAR (2026-07-29): reporte de CxC real vs estimada.
 api_router.include_router(reports.router, prefix="/reports", tags=["reports"])

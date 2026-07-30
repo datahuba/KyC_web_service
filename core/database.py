@@ -34,6 +34,9 @@ from models.error_log import ErrorLog
 # desde el portal del estudiante.
 from models.certificate import Certificate
 from models.certificate_counter import CertificateCounter
+# F-TRAMITES-SOLICITUD (2026-07-29): solicitudes de Convalidación,
+# Tutoría, Readmisión y Titulación que el estudiante crea desde /app/requests.
+from models.tramite_solicitud import TramiteSolicitud
 
 
 async def _sanitize_legacy_database(db):
@@ -205,6 +208,8 @@ async def init_db():
             # F-CERTIFICADOS (2026-07-29)
             Certificate,
             CertificateCounter,
+            # F-TRAMITES-SOLICITUD (2026-07-29)
+            TramiteSolicitud,
         ]
     )
     print(f"[OK] Conectado a MongoDB ({settings.DATABASE_NAME}) y Beanie inicializado con Connection Pool optimizado.")
