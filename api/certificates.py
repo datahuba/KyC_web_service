@@ -131,6 +131,26 @@ async def emit_certificate(
             detail="No tienes permiso para emitir certificados.",
         )
 
+    # BUG-FIX (2026-07-30): chequear ANTES de emitir si ya existe un cert
+    # idéntico. Si existe, devolver 409 con el cert existente en vez de
+    # re-emitir y provocar un DuplicateKeyError (500 Internal Server Error).
+    # La unicidad está garantizada por el índice `uniq_enrollment_tipo` en
+    # la colección de Certificate.
+    existing = await _buscar_cert_duplicado(
+        enrollment_id=payload.enrollment_id,
+        tipo=payload.tipo,
+        hasta_modulo_n=payload.hasta_modulo_n,
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Ya existe un certificado de tipo '{payload.tipo}' emitido "
+                f"para esta inscripción. Folio: {certificate_service._format_folio(existing.numero, existing.anio)}. "
+                f"Puedes descargarlo desde la sección 'Certificados'."
+            ),
+        )
+
     if payload.tipo == TipoCertificado.NOTAS:
         if payload.hasta_modulo_n is not None:
             raise HTTPException(
@@ -159,6 +179,49 @@ async def emit_certificate(
         )
 
     return _serializar_cert(cert)
+
+
+# NOTA (2026-07-30): el pre-check de _buscar_cert_duplicado arriba cubre
+# el caso común. Para defensa contra race conditions (dos requests
+# simultáneos para el mismo enrollment+tipo), el índice único
+# `uniq_enrollment_tipo` en la colección de Certificate lanza
+# DuplicateKeyError, que se propaga como 500. Si el tráfico lo justifica
+# se puede agregar un try/except DuplicateKeyError alrededor de las
+# llamadas a emitir_certificado_*, pero con el pre-check la ventana
+# de race condition es mínima.
+
+
+# ========================================================================
+# HELPER: manejo de duplicados
+# ========================================================================
+
+async def _buscar_cert_duplicado(
+    enrollment_id: str, tipo: str, hasta_modulo_n: Optional[int] = None
+) -> Optional[Certificate]:
+    """
+    Busca un certificado ya emitido para (enrollment, tipo) que coincida
+    en el alcance. Útil para responder 409 con el cert existente en vez
+    de re-emitir y provocar un DuplicateKeyError (500).
+
+    Para 'notas' no se compara hasta_modulo_n (siempre es el cert final).
+    Para 'no_deudor' se compara hasta_modulo_n — si ya hay uno emitido
+    para el mismo alcance, es duplicado.
+    """
+    from beanie import PydanticObjectId
+
+    try:
+        eid = PydanticObjectId(enrollment_id)
+    except Exception:
+        return None
+
+    query = Certificate.find(
+        Certificate.enrollment_id == eid,
+        Certificate.tipo == tipo,
+    )
+    if tipo == TipoCertificado.NO_DEUDOR and hasta_modulo_n is not None:
+        query = query.find(Certificate.hasta_modulo_n == hasta_modulo_n)
+
+    return await query.first_or_none()
 
 
 @router.get(

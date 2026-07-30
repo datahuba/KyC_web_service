@@ -20,3 +20,6 @@ sse-starlette>=2.0.0
 # TECH-001: framework de tests
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
+# CERT-002 (2026-07-30): cliente HTTP async para signed URL fallback
+# (descargar PDFs de Cloudinary con autenticación cuando el asset es legacy privado)
+httpx>=0.27.0
