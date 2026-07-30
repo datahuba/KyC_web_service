@@ -405,13 +405,13 @@ async def download_certificate_pdf(
     # RBAC
     certificate_service.verificar_acceso_certificado(cert, current_user)
 
-    # Descargar PDF desde Cloudinary
+    # Descargar PDF desde Cloudinary (con fallback a re-render si falla)
     try:
         pdf_bytes = await certificate_service.descargar_pdf_bytes(cert)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"No se pudo recuperar el PDF del almacenamiento: {str(e)}",
+            detail=f"No se pudo recuperar el PDF ni re-renderizarlo: {str(e)}",
         )
 
     return StreamingResponse(

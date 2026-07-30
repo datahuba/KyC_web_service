@@ -1056,5 +1056,59 @@ async def emitir_certificado_no_deudor(
 # ========================================================================
 
 async def descargar_pdf_bytes(cert: Certificate) -> bytes:
-    """Descarga los bytes del PDF del certificado desde Cloudinary."""
-    return await _descargar_pdf_desde_url(cert.pdf_url)
+    """
+    Descarga los bytes del PDF del certificado desde Cloudinary.
+
+    BUG-FIX (2026-07-30): la cuenta de Cloudinary 'dckj1wnra' tiene una
+    restricción a nivel de account (delivery type) que hace que TODAS
+    las URLs (públicas y firmadas) devuelvan 401. El SDK de Cloudinary
+    no expone un método para descargar archivos raw via API autenticada
+    (solo via URL). Por eso, cuando la descarga desde URL falla con 401
+    o cualquier error, hacemos fallback a RE-RENDERIZAR el PDF en el
+    servidor usando los datos del cert + el enrollment/course/student
+    y streameamos los bytes al cliente. Esto es más lento pero NO
+    depende del acceso por URL a Cloudinary.
+    """
+    try:
+        return await _descargar_pdf_desde_url(cert.pdf_url)
+    except Exception as url_error:
+        # Fallback: re-renderizar el PDF con los datos del cert.
+        # Esto evita el bloqueo cuando la cuenta de Cloudinary tiene
+        # restricciones de delivery.
+        from models.enrollment import Enrollment
+        from models.student import Student
+        from models.course import Course
+
+        enrollment = await Enrollment.get(cert.enrollment_id)
+        student = await Student.get(cert.student_id)
+        course = await Course.get(cert.course_id)
+        if not (enrollment and student and course):
+            raise RuntimeError(
+                f"No se pudo descargar el PDF de Cloudinary ({url_error}) "
+                f"ni re-renderizarlo (faltan enrollment/student/course)."
+            )
+
+        folio = _format_folio(cert.numero, cert.anio)
+        emitido_en = cert.emitido_en
+
+        if cert.tipo == TipoCertificado.NOTAS:
+            return render_pdf_notas(
+                student=student,
+                course=course,
+                enrollment=enrollment,
+                folio=folio,
+                emitido_en=emitido_en,
+            )
+        elif cert.tipo == TipoCertificado.NO_DEUDOR:
+            return render_pdf_no_deudor(
+                student=student,
+                course=course,
+                enrollment=enrollment,
+                hasta_modulo_n=cert.hasta_modulo_n or 1,
+                folio=folio,
+                emitido_en=emitido_en,
+            )
+        else:
+            raise RuntimeError(
+                f"Tipo de certificado desconocido: {cert.tipo}"
+            )
