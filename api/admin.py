@@ -173,7 +173,7 @@ class ResolveErrorRequest(BaseModel):
 
 @router.post(
     "/errors/{error_id}/resolve",
-    summary="F-XXX: Marcar un error como resuelto",
+    summary="F-ERROR-VIEWER-FIX: Resolver y eliminar un error (HARD DELETE)",
 )
 async def resolve_error(
     *,
@@ -182,9 +182,15 @@ async def resolve_error(
     current_user: User = Depends(require_admin_or_superadmin),
 ):
     """
-    Marca un error como resuelto. Una vez resuelto, NO aparece en el visor
-    por default (filtro `unresolved_only=true`). El admin puede incluirlo
-    pasando `unresolved_only=false` en GET /errors/recent.
+    F-ERROR-VIEWER-FIX (2026-07-31): antes este endpoint marcaba el error
+    como `resolved=true` (soft delete). Pero Kevin: "cuando se solucionan
+    eliminarse de la pagina". Ahora HACEMOS HARD DELETE -- el error
+    desaparece del visor inmediatamente.
+
+    Si quieren dejar registro, pueden archivar manualmente (TODO futuro).
+
+    Nota: el `note` del payload se acepta pero ya no se persiste (no hay
+    donde). Se loguea en el output del backend para auditoría.
     """
     from beanie import PydanticObjectId as _POI
     try:
@@ -196,49 +202,22 @@ async def resolve_error(
     if not error:
         raise HTTPException(status_code=404, detail="Error log no encontrado")
 
-    error.resolved = True
-    error.resolved_by = current_user.username
-    error.resolved_at = datetime.utcnow()
-    if payload and payload.note:
-        error.resolution_note = payload.note
-    await error.save()
+    # Auditoria: dejamos constancia en logs (no en BD).
+    import logging
+    logger = logging.getLogger("kyc.admin")
+    logger.info(
+        "ErrorLog resuelto+eliminado: id=%s path=%s method=%s status=%s by=%s note=%s",
+        str(error.id), error.path, error.method, error.status_code,
+        current_user.username, (payload.note if payload else None),
+    )
+
+    await error.delete()
 
     return {
-        "id": str(error.id),
-        "resolved": True,
-        "resolved_by": error.resolved_by,
-        "resolved_at": error.resolved_at.isoformat() if error.resolved_at else None,
+        "id": str(error_id),
+        "deleted": True,
+        "resolved_by": current_user.username,
     }
-
-
-@router.post(
-    "/errors/{error_id}/unresolve",
-    summary="F-XXX: Reabrir un error marcado como resuelto",
-)
-async def unresolve_error(
-    *,
-    error_id: str,
-    current_user: User = Depends(require_admin_or_superadmin),
-):
-    """Reabrir un error (vuelve a `resolved=False`). Útil si la solución no
-    funcionó y el bug volvió."""
-    from beanie import PydanticObjectId as _POI
-    try:
-        err_oid = _POI(error_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="error_id inválido")
-
-    error = await ErrorLog.get(err_oid)
-    if not error:
-        raise HTTPException(status_code=404, detail="Error log no encontrado")
-
-    error.resolved = False
-    error.resolved_by = None
-    error.resolved_at = None
-    error.resolution_note = None
-    await error.save()
-
-    return {"id": str(error.id), "resolved": False}
 
 
 # F-XXX (2026-07-29): endpoint bulk para resolver automáticamente errores
@@ -272,28 +251,31 @@ async def auto_resolve_expired_tokens(
     current_user: User = Depends(require_admin_or_superadmin),
 ):
     """
-    Marca como `resolved=true` todos los errores que matcheen el patrón
-    regex en su mensaje. Devuelve la cantidad resueltos.
+    F-ERROR-VIEWER-FIX (2026-07-31): antes marcaba como `resolved=true`
+    (soft delete). Ahora hace HARD DELETE de los errores que matcheen
+    el patrón regex en su mensaje. Devuelve la cantidad eliminados.
     """
     since = datetime.utcnow() - timedelta(hours=hours)
-    # F-XXX (2026-07-29): usar $ne: True para incluir docs viejos sin el
-    # campo resolved (igual que el filtro del listado).
+    # Filtrar por timestamp y patrón; el campo `resolved` ya no se usa
+    # pero lo dejamos por si hay docs viejos.
     query: dict = {
         "timestamp": {"$gte": since},
-        "resolved": {"$ne": True},
         "message": {"$regex": pattern, "$options": "i"},
     }
     if status_code and status_code > 0:
         query["status_code"] = status_code
     errors = await ErrorLog.find(query).to_list()
+    deleted = 0
     for err in errors:
-        err.resolved = True
-        err.resolved_by = current_user.username
-        err.resolved_at = datetime.utcnow()
-        err.resolution_note = note
-        await err.save()
+        try:
+            await err.delete()
+            deleted += 1
+        except Exception as e:
+            # Si falla un delete, seguimos con los demas
+            import logging
+            logging.getLogger("kyc.admin").warning("No se pudo eliminar ErrorLog %s: %s", str(err.id), e)
     return {
-        "resolved_count": len(errors),
+        "resolved_count": deleted,
         "window_hours": hours,
         "pattern": pattern,
     }
