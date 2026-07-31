@@ -33,7 +33,10 @@ from schemas.enrollment import (
     EnrollmentResponse,
     EnrollmentUpdate,
     EnrollmentWithDetails,
-    ModuloNotaUpdate
+    ModuloNotaUpdate,
+    BulkEnrollmentRequest,
+    BulkEnrollmentResponse,
+    BulkEnrollmentErrorItem,
 )
 from services import enrollment_service, payment_service
 from beanie import PydanticObjectId
@@ -131,6 +134,144 @@ async def create_enrollment(
         return enriched_enrollment
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/bulk",
+    response_model=BulkEnrollmentResponse,
+    status_code=200,
+    summary="[Staff] Inscripción en lote: múltiples estudiantes a un mismo programa",
+)
+async def create_enrollments_bulk(
+    *,
+    bulk_in: BulkEnrollmentRequest,
+    current_user: User = Depends(require_encargado_curso),  # CPD, ENCARGADO_CURSO, COORDINADOR o superior
+) -> Any:
+    """
+    F-INSCRIPCION-LOTE (2026-07-31): inscribe varios estudiantes al
+    mismo programa en una sola operación. Pensado para cuando llega
+    una lista de admitidos (excel del CPD / Coordinadores) y hay que
+    matricularlos en masa.
+
+    Comportamiento:
+    - Itera secuencialmente (no asyncio.gather) para no perder
+      actualizaciones de `course.inscritos` y `student.lista_cursos_ids`
+      (esos modelos no tienen optimistic locking).
+    - Si un estudiante ya está inscrito en el curso, se reporta como
+      `ya_inscritos` (NO falla toda la operación).
+    - Si un estudiante no existe o el curso no está activo, se reporta
+      como `fallidos` con el motivo específico.
+    - Aplica un mismo descuento_id o descuento_personalizado a todos
+      (útil para becas grupales o promociones).
+
+    Permisos:
+    - superadmin / admin / cpd: cualquier curso.
+    - encargado_curso: solo cursos en cursos_asignados.
+    - coordinador: cualquier curso.
+    """
+    # 1. Verificar que el usuario puede inscribir en este curso
+    if (
+        current_user.rol == UserRole.ENCARGADO_CURSO
+        and bulk_in.curso_id not in (current_user.cursos_asignados or [])
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="No tienes asignado este curso (encargado_curso).",
+        )
+
+    # 2. Cargar el curso UNA vez (reutilizado para todos los estudiantes)
+    course = await Course.get(bulk_in.curso_id)
+    if not course:
+        raise HTTPException(status_code=404, detail="Curso no encontrado")
+
+    if not course.activo:
+        raise HTTPException(
+            status_code=400,
+            detail="Este curso no está activo y no acepta nuevas inscripciones",
+        )
+
+    # 3. Pre-cargar todos los estudiantes (1 sola query Mongo, no N)
+    estudiante_ids_unicos = list({str(eid) for eid in bulk_in.estudiantes_ids})
+    students = await Student.find(
+        {"_id": {"$in": [PydanticObjectId(sid) for sid in estudiante_ids_unicos]}}
+    ).to_list()
+    student_map: dict = {str(s.id): s for s in students}
+
+    # 4. Iterar y crear inscripciones (secuencial para no chocar con
+    # course.inscritos / student.lista_cursos_ids)
+    exitosos = 0
+    ya_inscritos_count = 0
+    fallidos = 0
+    enrollments_creados: List[EnrollmentResponse] = []
+    errores: List[BulkEnrollmentErrorItem] = []
+
+    for est_id in bulk_in.estudiantes_ids:
+        est_id_str = str(est_id)
+        try:
+            student = student_map.get(est_id_str)
+            if not student:
+                raise ValueError(f"Estudiante {est_id_str} no encontrado")
+
+            enrollment_in = EnrollmentCreate(
+                estudiante_id=est_id,
+                curso_id=bulk_in.curso_id,
+                descuento_id=bulk_in.descuento_id,
+                descuento_personalizado=bulk_in.descuento_personalizado,
+            )
+            # skip_link_updates=True: actualizamos course.inscritos /
+            # student.lista_cursos_ids en batch al final (ver abajo)
+            enrollment = await enrollment_service.create_enrollment(
+                enrollment_in=enrollment_in,
+                admin_username=current_user.nombre_visible,
+                student=student,
+                course=course,
+                skip_link_updates=True,
+            )
+            enriched = await enrollment_service.enrich_enrollment_dates(enrollment)
+            enrollments_creados.append(enriched)
+            exitosos += 1
+        except ValueError as e:
+            msg = str(e)
+            if "ya está inscrito" in msg.lower():
+                ya_inscritos_count += 1
+            else:
+                fallidos += 1
+                errores.append(BulkEnrollmentErrorItem(
+                    estudiante_id=est_id_str,
+                    error=msg,
+                ))
+        except Exception as e:
+            fallidos += 1
+            errores.append(BulkEnrollmentErrorItem(
+                estudiante_id=est_id_str,
+                error=f"Error inesperado: {str(e)}",
+            ))
+
+    # 5. Batch update de course.inscritos y student.lista_cursos_ids.
+    # Como usamos `skip_link_updates=True` en create_enrollment para no
+    # chocar con optimistic locking durante el loop, ahora actualizamos
+    # las referencias cruzadas en una sola pasada.
+    if exitosos > 0:
+        inscritos_set = {e.estudiante_id for e in enrollments_creados}
+        # Actualizar course.inscritos
+        for sid in inscritos_set:
+            if sid not in course.inscritos:
+                course.inscritos.append(sid)
+        await course.save()
+        # Actualizar student.lista_cursos_ids
+        for s in students:
+            if bulk_in.curso_id not in s.lista_cursos_ids:
+                s.lista_cursos_ids.append(bulk_in.curso_id)
+                await s.save()
+
+    return BulkEnrollmentResponse(
+        total_solicitados=len(bulk_in.estudiantes_ids),
+        exitosos=exitosos,
+        ya_inscritos=ya_inscritos_count,
+        fallidos=fallidos,
+        enrollments_creados=enrollments_creados,
+        errores=errores,
+    )
 
 
 @router.get(

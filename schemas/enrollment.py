@@ -137,10 +137,66 @@ class EnrollmentWithDetails(EnrollmentResponse):
     curso_codigo: Optional[str] = None
     monto_cuota: Optional[float] = None
     porcentaje_pagado: Optional[float] = None
-    
+
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True,
         "from_attributes": True
     }
+
+
+class BulkEnrollmentRequest(BaseModel):
+    """
+    F-INSCRIPCION-LOTE (2026-07-31): esquema para inscribir múltiples
+    estudiantes al mismo programa en una sola operación.
+
+    Pensado para el caso real: llega una lista de admitidos (excel del
+    CPD) y hay que inscribirlos a todos al mismo programa. Antes había
+    que hacerlo de uno en uno desde la UI de Nueva Inscripción.
+    """
+    curso_id: PyObjectId = Field(..., description="ID del curso/programa")
+    estudiantes_ids: List[PyObjectId] = Field(
+        ...,
+        min_length=1,
+        max_length=200,
+        description="IDs de los estudiantes a inscribir (1-200)",
+    )
+    # Opcionales: aplicar el mismo descuento/beca a todos los del lote.
+    descuento_id: Optional[PyObjectId] = Field(None, description="ID de un Discount a aplicar a todos")
+    descuento_personalizado: Optional[float] = Field(
+        None, ge=0, le=100, description="% libre de descuento (0-100) para todos"
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "curso_id": "507f1f77bcf86cd799439012",
+                "estudiantes_ids": [
+                    "507f1f77bcf86cd799439011",
+                    "507f1f77bcf86cd799439013",
+                ],
+                "descuento_personalizado": 10,
+            }
+        }
+    }
+
+
+class BulkEnrollmentErrorItem(BaseModel):
+    """Detalle de un fallo dentro de la inscripción en lote."""
+    estudiante_id: str
+    error: str
+
+
+class BulkEnrollmentResponse(BaseModel):
+    """
+    F-INSCRIPCION-LOTE: respuesta de la inscripción en lote con
+    desglose de éxitos, duplicados y errores para que la UI pueda
+    mostrar un resumen accionable.
+    """
+    total_solicitados: int
+    exitosos: int
+    ya_inscritos: int
+    fallidos: int
+    enrollments_creados: List[EnrollmentResponse] = Field(default_factory=list)
+    errores: List[BulkEnrollmentErrorItem] = Field(default_factory=list)
     
