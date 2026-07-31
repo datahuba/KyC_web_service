@@ -488,9 +488,18 @@ async def create_payment(
         # bloqueaba con "comprobantes duplicados" incluso para comprobantes
         # anulados, lo cual no tiene sentido: si el pago se anuló, el número
         # de transacción quedó liberado.
+        #
+        # BUG-PAYMENTS-INOPERATOR (2026-07-31): NO usar `Payment.estado_pago.in_([...])`
+        # con Beanie 1.30 — devuelve "ExpressionField object is not callable"
+        # porque el `.in_()` está pensado para listas Python, NO para queries
+        # de ExpressionField. Hay que armar el dict con `$in` y valores `.value`
+        # de los enums. Idéntico patrón al fix de get_next_pending_payment
+        # (commit 49bbb9c) y al de get_payments_pendientes / DxC.
         existing_transaction = await Payment.find_one(
-            Payment.numero_transaccion == payment_in.numero_transaccion,
-            Payment.estado_pago.in_([EstadoPago.APROBADO, EstadoPago.PENDIENTE])
+            {
+                "numero_transaccion": payment_in.numero_transaccion,
+                "estado_pago": {"$in": [EstadoPago.APROBADO.value, EstadoPago.PENDIENTE.value]}
+            }
         )
 
         if existing_transaction:
@@ -1768,7 +1777,23 @@ async def get_matriz_deudores(
 
         for i, mod in enumerate(curso.modulos or []):
             mod_estado_e = e.modulos[i] if i < len(e.modulos or []) else None
-            costo = float(mod.costo or 0.0)
+            # BUG-DXC-DESCUENTO (2026-07-31): el costo del módulo viene del CURSO
+            # original (sin descuento) y se compara contra el `monto_pagado` del
+            # ENROLLMENT (que ya tiene el descuento aplicado). Esto marcaba como
+            # deudores a estudiantes con descuento que ya habían completado el
+            # pago. Caso real (2026-07-31): Lic. Anselmo Salguero Arano con
+            # módulo 1 pagado Bs 294 (con 50% descuento) pero marcado como
+            # deudor porque el display decía "294.00/588.00" y la deuda total
+            # del curso quedaba inflada en 294.
+            #
+            # FIX: si el enrollment tiene snapshot del módulo, usar SU `costo`
+            # (que ya viene con descuento aplicado en create_enrollment línea
+            # 145-165). Solo caer al costo del curso si por alguna razón no
+            # hay snapshot (caso edge de migración de datos viejos).
+            if mod_estado_e and getattr(mod_estado_e, "costo", None) is not None:
+                costo = float(mod_estado_e.costo or 0.0)
+            else:
+                costo = float(mod.costo or 0.0)
             pagado = float(mod_estado_e.monto_pagado) if mod_estado_e else 0.0
             pendiente = max(0.0, costo - pagado)
 
