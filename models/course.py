@@ -118,15 +118,17 @@ class Course(MongoBaseModel):
     # nuevo significado (gastos complementarios opcionales al programa).
 
     costo_total_interno: float = Field(
-        ...,
-        gt=0,
-        description="Costo total (colegiatura) del programa. Precio único, aplica a todos los estudiantes por igual."
-    )
-    
-    matricula_interno: float = Field(
-        ...,
+        default=0,
         ge=0,
-        description="Costo de matrícula institucional. Precio único, aplica a todos los estudiantes por igual."
+        description="Costo total (colegiatura) del programa. Precio único, aplica a todos los estudiantes por igual. "
+                    "En programas historicos (es_historico=True) puede ser 0 (no se exige)."
+    )
+
+    matricula_interno: float = Field(
+        default=0,
+        ge=0,
+        description="Costo de matrícula institucional. Precio único, aplica a todos los estudiantes por igual. "
+                    "En programas historicos (es_historico=True) puede ser 0 (no se exige)."
     )
 
     # ========================================================================
@@ -151,9 +153,10 @@ class Course(MongoBaseModel):
     # ========================================================================
     
     cantidad_cuotas: int = Field(
-        ...,
-        ge=1,
-        description="Número de cuotas en las que se puede dividir el pago"
+        default=0,
+        ge=0,
+        description="Número de cuotas en las que se puede dividir el pago. "
+                    "En programas historicos (es_historico=True) puede ser 0 (no se exige)."
     )
 
     modulos: List[Modulo] = Field(
@@ -227,6 +230,21 @@ class Course(MongoBaseModel):
     resolucion_pdf_url: Optional[str] = Field(
         default=None,
         description="URL del PDF de la resolución que respalda el programa (F-080)."
+    )
+
+    # F-HISTORICO (2026-07-31): marca un programa como "historico" (curso pasado
+    # o registro retroactivo). Cuando es True, el sistema NO exige datos
+    # operacionales (docentes, modulos con notas, pagos, requisitos) — solo
+    # identifica el programa (codigo, nombre, tipo, modalidad, fechas) y
+    # opcionalmente una resolucion de respaldo. Esto permite cargar rapidamente
+    # el catalogo de programas antiguos sin tener que reconstruir toda la
+    # estructura academica y financiera de cada uno.
+    es_historico: bool = Field(
+        default=False,
+        description="F-HISTORICO: True si es un programa historico/cerrado del que solo "
+                    "queremos guardar datos basicos + resolucion de respaldo. "
+                    "False (default) si es un programa en ejecucion o por ejecutarse, "
+                    "donde se exige la estructura completa (docentes, modulos, pagos, etc.)."
     )
     
     # ========================================================================

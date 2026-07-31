@@ -46,15 +46,19 @@ class CourseCreate(BaseModel):
     
     # Precio único del programa (ISSUE-P-PRECIO-UNICO, 2026-07-08): mismo
     # costo para todos los estudiantes, sin distinción de procedencia.
-    costo_total_interno: float = Field(..., gt=0, description="Costo total (colegiatura) del programa")
-    matricula_interno: float = Field(..., ge=0, description="Matrícula institucional del programa")
+    # F-HISTORICO (2026-07-31): en programas historicos estos campos pueden
+    # ser 0 (no se exige costo/matricula/cuotas porque son datos pasados
+    # que no necesariamente se conocen exactos). El frontend valida que
+    # para programas en ejecucion sean > 0.
+    costo_total_interno: float = Field(default=0, ge=0, description="Costo total (colegiatura) del programa. Obligatorio > 0 si NO es historico.")
+    matricula_interno: float = Field(default=0, ge=0, description="Matrícula institucional del programa. Obligatorio si NO es historico.")
 
     # ISSUE-P-CARGO-MULTIITEM: lista de ítems de cargo adicional/complementario
     # al programa (ej. varios talleres, cada uno con su propio costo).
     cargo_adicional_items: Optional[List[CargoAdicionalItemCreate]] = Field(default_factory=list)
 
     # Estructura de pago y módulos
-    cantidad_cuotas: int = Field(..., ge=1)
+    cantidad_cuotas: int = Field(default=0, ge=0, description="Cantidad de cuotas/modulos. Obligatorio >= 1 si NO es historico.")
     modulos: Optional[List[ModuloCreate]] = Field(
         default_factory=list,
         description="Lista generada dinámicamente de módulos y sus costos"
@@ -73,6 +77,19 @@ class CourseCreate(BaseModel):
     requisitos: List[RequisitoTemplateCreate] = Field(
         default_factory=list,
         description="Lista de requisitos que debe cumplir el estudiante al inscribirse"
+    )
+
+    # F-HISTORICO (2026-07-31): marca el programa como historico. Si es True,
+    # no se exige estructura operacional (docentes/modulos/notas/pagos).
+    es_historico: bool = Field(
+        default=False,
+        description="F-HISTORICO: True si es programa historico (solo datos basicos + resolucion)."
+    )
+
+    # Resolucion de respaldo (opcional para todos los programas)
+    resolucion_pdf_url: Optional[str] = Field(
+        default=None,
+        description="URL del PDF de la resolucion que respalda el programa (F-080). Opcional."
     )
     
     model_config = {
@@ -135,7 +152,10 @@ class CourseResponse(BaseModel):
         default_factory=list,
         description="Requisitos del curso"
     )
-    
+
+    es_historico: bool = False
+    resolucion_pdf_url: Optional[str] = None
+
     created_at: datetime
     updated_at: datetime
     
@@ -202,6 +222,9 @@ class CourseUpdate(BaseModel):
     activo: Optional[bool] = None
     
     requisitos: Optional[List[RequisitoTemplateCreate]] = None
+
+    es_historico: Optional[bool] = None
+    resolucion_pdf_url: Optional[str] = None
     
     model_config = {
         "json_schema_extra": {
