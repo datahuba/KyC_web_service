@@ -1019,9 +1019,9 @@ async def generar_reporte_excel_pagos(
     enrollment_ids = list({p.inscripcion_id for p in payments if p.inscripcion_id})
     curso_ids = list({p.curso_id for p in payments if p.curso_id})
     
-    students_task = Student.find(In(Student.id, student_ids)).to_list()
-    enrollments_task = Enrollment.find(In(Enrollment.id, enrollment_ids)).to_list()
-    courses_task = Course.find(In(Course.id, curso_ids)).to_list()
+    students_task = Student.find({"_id": {"$in": [str(s) for s in student_ids]}}).to_list()
+    enrollments_task = Enrollment.find({"_id": {"$in": [str(e) for e in enrollment_ids]}}).to_list()
+    courses_task = Course.find({"_id": {"$in": [str(c) for c in curso_ids]}}).to_list()
     
     students, enrollments, courses = await asyncio.gather(students_task, enrollments_task, courses_task)
     
@@ -1269,8 +1269,8 @@ async def generar_reporte_pdf_caja(
     from models.course import Course
     student_ids_pdf = list({p.get("estudiante_id") for p in enriched if p.get("estudiante_id")})
     course_ids_pdf = list({p.get("curso_id") for p in enriched if p.get("curso_id")})
-    students_pdf = await Student.find(In(Student.id, student_ids_pdf)).to_list() if student_ids_pdf else []
-    courses_pdf = await Course.find(In(Course.id, course_ids_pdf)).to_list() if course_ids_pdf else []
+    students_pdf = await Student.find({"_id": {"$in": [str(s) for s in student_ids_pdf]}}).to_list() if student_ids_pdf else []
+    courses_pdf = await Course.find({"_id": {"$in": [str(c) for c in course_ids_pdf]}}).to_list() if course_ids_pdf else []
     students_map_pdf = {s.id: s for s in students_pdf}
     courses_map_pdf = {c.id: c for c in courses_pdf}
 
@@ -1430,9 +1430,9 @@ async def get_extracto_bancario(
     enrollment_ids = list({p.inscripcion_id for p in payments if p.inscripcion_id})
     curso_ids = list({p.curso_id for p in payments if p.curso_id})
 
-    students_task = Student.find(In(Student.id, student_ids)).to_list()
-    enrollments_task = Enrollment.find(In(Enrollment.id, enrollment_ids)).to_list()
-    courses_task = Course.find(In(Course.id, curso_ids)).to_list()
+    students_task = Student.find({"_id": {"$in": [str(s) for s in student_ids]}}).to_list()
+    enrollments_task = Enrollment.find({"_id": {"$in": [str(e) for e in enrollment_ids]}}).to_list()
+    courses_task = Course.find({"_id": {"$in": [str(c) for c in curso_ids]}}).to_list()
 
     students, enrollments, courses = await asyncio.gather(students_task, enrollments_task, courses_task)
     students_map = {s.id: s for s in students}
@@ -1819,9 +1819,9 @@ async def export_payments_excel(
     enrollment_ids = list({p.inscripcion_id for p in payments if p.inscripcion_id})
     curso_ids = list({p.curso_id for p in payments if p.curso_id})
 
-    students_task = Student.find(In(Student.id, student_ids)).to_list()
-    enrollments_task = Enrollment.find(In(Enrollment.id, enrollment_ids)).to_list()
-    courses_task = Course.find(In(Course.id, curso_ids)).to_list()
+    students_task = Student.find({"_id": {"$in": [str(s) for s in student_ids]}}).to_list()
+    enrollments_task = Enrollment.find({"_id": {"$in": [str(e) for e in enrollment_ids]}}).to_list()
+    courses_task = Course.find({"_id": {"$in": [str(c) for c in curso_ids]}}).to_list()
     students, enrollments, courses = await asyncio.gather(students_task, enrollments_task, courses_task)
     students_map = {s.id: s for s in students}
     courses_map = {c.id: c for c in courses}

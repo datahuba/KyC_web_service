@@ -126,8 +126,8 @@ async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dic
     student_ids = list({_get(p, "estudiante_id") for p in payments if _get(p, "estudiante_id")})
     enrollment_ids = list({_get(p, "inscripcion_id") for p in payments if _get(p, "inscripcion_id")})
 
-    students_task = Student.find(In(Student.id, student_ids)).to_list()
-    enrollments_task = Enrollment.find(In(Enrollment.id, enrollment_ids)).to_list()
+    students_task = Student.find({"_id": {"$in": [str(s) for s in student_ids]}}).to_list()
+    enrollments_task = Enrollment.find({"_id": {"$in": [str(e) for e in enrollment_ids]}}).to_list()
 
     students, enrollments = await asyncio.gather(students_task, enrollments_task)
 
@@ -201,13 +201,10 @@ async def get_next_pending_payment(enrollment_id: PydanticObjectId) -> dict:
     if not enrollment:
         raise ValueError("Inscripción no encontrada")
 
-    pagos_activos = await Payment.find(
-        Payment.inscripcion_id == enrollment_id,
-        Or(
-            Payment.estado_pago == EstadoPago.PENDIENTE,
-            Payment.estado_pago == EstadoPago.APROBADO
-        )
-    ).to_list()
+    pagos_activos = await Payment.find({
+        "inscripcion_id": enrollment_id,
+        "estado_pago": {"$in": [EstadoPago.PENDIENTE.value, EstadoPago.APROBADO.value]}
+    }).to_list()
 
     conceptos_cubiertos = {
         (p.concepto, p.numero_cuota) for p in pagos_activos
@@ -2415,7 +2412,7 @@ async def generar_lista_habilitados(
     estudiante_ids = list({e.estudiante_id for e in enrollments if e.estudiante_id})
     estudiantes_map = {}
     if estudiante_ids:
-        estudiantes = await Student.find(In(Student.id, estudiante_ids)).to_list()
+        estudiantes = await Student.find({"_id": {"$in": [str(s) for s in estudiante_ids]}}).to_list()
         estudiantes_map = {e.id: e for e in estudiantes}
 
     # 3.6) BATCH LOADING: cargar TODOS los pagos aprobados de todos los enrollments
@@ -2442,7 +2439,7 @@ async def generar_lista_habilitados(
             discount_ids_set.add(enr.descuento_estudiante_id)
     discounts_map = {}
     if discount_ids_set:
-        descuentos = await Discount.find(In(Discount.id, list(discount_ids_set))).to_list()
+        descuentos = await Discount.find({"_id": {"$in": [str(d) for d in discount_ids_set]}}).to_list()
         for d in descuentos:
             discounts_map[d.id] = d
 
