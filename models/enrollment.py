@@ -44,6 +44,16 @@ class ModuloEstado(BaseModel):
         description="UTC. Cuándo el encargado del programa marcó este módulo como 'en curso'. None = aún no se ha iniciado.",
     )
 
+    # F-MODULOS-MODAL (2026-07-31): marca cuándo el encargado marcó este
+    # módulo como "finalizado/cerrado" (el estudiante ya terminó de cursarlo).
+    # Un módulo finalizado NO puede volver a abrirse para pagos -- el siguiente
+    # paso es calcular la nota final. Se implementó para que el kardex pueda
+    # tener el ciclo completo: Pendiente → En curso → Finalizado.
+    finalizado_en: Optional[datetime] = Field(
+        default=None,
+        description="UTC. Cuándo el encargado cerró este módulo. None = aún no se cerró.",
+    )
+
     # ISSUE-P-RECALCULO-NOTA: costo de respaldo sin el descuento personal (beca)
     costo_sin_beca_personal: Optional[float] = Field(
         default=None, ge=0,

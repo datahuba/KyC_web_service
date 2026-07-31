@@ -1863,3 +1863,105 @@ async def deshacer_inicio_modulo_endpoint(
         current_user=current_user,
     )
     return await enrollment_service.enrich_enrollment_dates(enrollment)
+
+
+# ========================================================================
+# ENDPOINTS: FINALIZAR MÓDULO (F-MODULOS-MODAL 2026-07-31)
+# ========================================================================
+# Cierra un módulo iniciado. El kardex del estudiante usa el ciclo:
+#   Pendiente → En curso → Finalizado
+# Cuando se finaliza, el módulo ya no se considera "activo" para
+# recaudación -- el siguiente paso natural es registrar la nota.
+# También expone deshacer_finalizacion por si fue un error humano.
+
+@router.post(
+    "/{id}/modulos/{index}/finalizar",
+    response_model=EnrollmentResponse,
+    summary="[Staff] Cerrar/finalizar módulo N (ciclo completo)",
+)
+async def finalizar_modulo_endpoint(
+    *,
+    id: PydanticObjectId,
+    index: int = Path(..., ge=0, description="Índice del módulo (0, 1, 2...)"),
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    F-MODULOS-MODAL (2026-07-31): marca un módulo como finalizado/cerrado.
+    Requisito: el módulo debe estar iniciado (iniciado_en != null).
+    Idempotente: si ya estaba finalizado, no-op.
+    """
+    enrollment = await Enrollment.get(id)
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="Inscripción no encontrada")
+
+    if not await _puede_iniciar_modulo(current_user, enrollment):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Solo Admin, Superadmin, o el Encargado del Curso de este "
+                "programa específico pueden finalizar módulos."
+            ),
+        )
+
+    if index < 0 or index >= len(enrollment.modulos):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Índice de módulo {index} inválido",
+        )
+
+    modulo = enrollment.modulos[index]
+    if modulo.iniciado_en is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No se puede finalizar un módulo que no está iniciado. "
+                "Primero márcalo como 'en curso'."
+            ),
+        )
+
+    if modulo.finalizado_en is None:
+        modulo.finalizado_en = utcnow_naive()
+        await enrollment.save()
+
+    return await enrollment_service.enrich_enrollment_dates(enrollment)
+
+
+@router.post(
+    "/{id}/modulos/{index}/deshacer-finalizacion",
+    response_model=EnrollmentResponse,
+    summary="[Staff] Revertir cierre de módulo N (caso de error)",
+)
+async def deshacer_finalizacion_modulo_endpoint(
+    *,
+    id: PydanticObjectId,
+    index: int = Path(..., ge=0, description="Índice del módulo (0, 1, 2...)"),
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    F-MODULOS-MODAL: revierte la finalización de un módulo. Útil si fue un
+    error humano (ej: cerró el módulo equivocado).
+    """
+    enrollment = await Enrollment.get(id)
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="Inscripción no encontrada")
+
+    if not await _puede_iniciar_modulo(current_user, enrollment):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Solo Admin, Superadmin, o el Encargado del Curso de este "
+                "programa específico pueden revertir la finalización."
+            ),
+        )
+
+    if index < 0 or index >= len(enrollment.modulos):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Índice de módulo {index} inválido",
+        )
+
+    modulo = enrollment.modulos[index]
+    modulo.finalizado_en = None
+    await enrollment.save()
+
+    return await enrollment_service.enrich_enrollment_dates(enrollment)
