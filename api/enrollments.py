@@ -252,9 +252,10 @@ async def create_enrollments_bulk(
     # chocar con optimistic locking durante el loop, ahora actualizamos
     # las referencias cruzadas en una sola pasada.
     if exitosos > 0:
-        inscritos_set = {e.estudiante_id for e in enrollments_creados}
-        # Actualizar course.inscritos
-        for sid in inscritos_set:
+        inscritos_set = {str(e["estudiante_id"]) for e in enrollments_creados}
+        # Actualizar course.inscritos (lista de PyObjectId)
+        for sid_str in inscritos_set:
+            sid = PydanticObjectId(sid_str)
             if sid not in course.inscritos:
                 course.inscritos.append(sid)
         await course.save()
