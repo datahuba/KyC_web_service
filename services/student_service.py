@@ -667,6 +667,18 @@ async def import_students_from_excel(
                 if email in emails_en_archivo:
                     errors.append(f"Fila {row_idx}: El Correo Electrónico '{email}' de '{nombre}' está duplicado dentro de este archivo Excel.")
                     continue
+                # ISSUE-EXCEL-EMAIL-VALID (2026-08-03, Kevin): pre-validar el
+                # formato del email en el Excel ANTES de intentar crear el
+                # Student (que tiene EmailStr de Pydantic y fallaba al
+                # insertar el primero inválido, sin listar los demás).
+                # Detectamos: espacios, formato mal escrito, etc.
+                if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+                    errors.append(
+                        f"Fila {row_idx}: El Correo Electrónico '{email}' de "
+                        f"'{nombre}' no tiene un formato válido. "
+                        f"Verifica que no tenga espacios ni caracteres raros."
+                    )
+                    continue
                 emails_en_archivo.add(email)
                 
             registros_en_archivo.add(registro)
