@@ -967,25 +967,29 @@ async def import_students_from_excel(
 
             await asyncio.gather(*[
                 _inscribir_estudiante_importado(student_id, student_obj, fin)
-                for student_id, student_obj, fin in zip(inserted_ids, students_to_insert, financials_to_insert)
+                for student_id, student_obj, fin in enrollable_inputs
             ])
 
             # Persistir en batch las referencias cruzadas acumuladas (1 sola
             # escritura de red para el Course, en vez de una por estudiante).
-            # `student_obj.lista_cursos_ids` de cada estudiante NUEVO recién
-            # insertado se persiste con 1 update_many puntual por id (los
-            # estudiantes son documentos independientes entre sí, sin riesgo
-            # de condición de carrera entre ellos).
+            # `student_obj.lista_cursos_ids` de cada estudiante recién
+            # procesado (NUEVO o EXISTENTE) se persiste en batch.
             if course.inscritos:
                 await course.save()
 
-            estudiantes_con_curso_nuevo = [
+            # Actualizar lista_cursos_ids SOLO de los estudiantes NUEVOS insertados
+            # (los existentes ya tienen su lista en la BD; modificarla indiscriminadamente
+            # borraría cursos previamente inscritos).
+            estudiantes_nuevos_con_curso = [
                 student_id for student_id, student_obj in zip(inserted_ids, students_to_insert)
                 if curso_id in student_obj.lista_cursos_ids
             ]
-            if estudiantes_con_curso_nuevo:
-                await Student.find(In(Student.id, estudiantes_con_curso_nuevo)).update(
-                    {"$set": {"lista_cursos_ids": [curso_id]}}
+            if estudiantes_nuevos_con_curso:
+                # update_many agregando el curso sin duplicar (no tocamos existentes
+                # porque podrían tener otros cursos inscritos).
+                from beanie.operators import AddToSet
+                await Student.find(In(Student.id, estudiantes_nuevos_con_curso)).update(
+                    AddToSet({"lista_cursos_ids": curso_id})
                 )
     elif hay_columnas_financieras and not curso_id and success_count > 0:
         errors.append(
