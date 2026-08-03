@@ -267,6 +267,7 @@ async def iniciar_modulo(
     enrollment: Enrollment,
     modulo_index: int,
     current_user: User,
+    force: bool = False,
 ) -> Enrollment:
     """
     Marca un módulo como 'iniciado_en = utcnow()'.
@@ -276,6 +277,9 @@ async def iniciar_modulo(
     - el módulo no estaba ya iniciado (idempotencia: si ya lo está, no-op).
     - el enrollment no está excluido (COMPLETADO, RETIRADO, SUSPENDIDO,
       CANCELADO).
+    - F-MODAL-GESTION-MODULOS (2026-08-03, Kevin): el módulo anterior debe
+      estar FINALIZADO (encadenamiento académico), excepto el primero.
+      Se puede saltar con `force=True` (solo superadmin en el endpoint).
 
     Raises:
         HTTPException 400 / 404 / 409 según el caso.
@@ -299,6 +303,24 @@ async def iniciar_modulo(
                 f"El programa tiene {len(enrollment.modulos)} módulos (0..{len(enrollment.modulos) - 1})."
             ),
         )
+
+    # F-MODAL-GESTION-MODULOS (2026-08-03, Kevin): encadenamiento.
+    # El módulo N+1 solo se puede iniciar si el módulo N está finalizado
+    # (refleja el flujo académico real). El superadmin puede saltarse esta
+    # regla con force=True (caso de excepción o plan especial).
+    if modulo_index > 0 and not force:
+        anterior = enrollment.modulos[modulo_index - 1]
+        if not anterior.finalizado_en:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"No se puede iniciar el módulo #{modulo_index + 1} "
+                    f"('{enrollment.modulos[modulo_index].nombre[:40]}') "
+                    f"porque el módulo anterior #{modulo_index} no está finalizado. "
+                    f"Cierra el módulo anterior primero, o usa force=true "
+                    f"si eres superadmin."
+                ),
+            )
 
     m = enrollment.modulos[modulo_index]
     if m.iniciado_en is not None:

@@ -1794,6 +1794,7 @@ async def iniciar_modulo_endpoint(
     *,
     id: PydanticObjectId,
     index: int = Path(..., ge=0, description="Índice del módulo (0, 1, 2...)"),
+    force: bool = Query(False, description="Solo superadmin: saltar la validación de encadenamiento"),
     current_user: User = Depends(require_staff),
 ) -> Any:
     """
@@ -1803,6 +1804,9 @@ async def iniciar_modulo_endpoint(
 
     Permisos: Admin, Superadmin, o Encargado del Curso del programa específico.
     Idempotente: si el módulo ya estaba iniciado, no-op (devuelve 200 OK).
+
+    F-MODAL-GESTION-MODULOS (2026-08-03, Kevin): el módulo N+1 solo se puede
+    iniciar si el N está finalizado. Solo superadmin puede saltarse con `?force=true`.
     """
     enrollment = await Enrollment.get(id)
     if not enrollment:
@@ -1817,11 +1821,20 @@ async def iniciar_modulo_endpoint(
             ),
         )
 
+    # F-MODAL-GESTION-MODULOS: el flag force solo lo puede usar superadmin
+    from models.enums import UserRole
+    if force and current_user.rol != UserRole.SUPERADMIN:
+        raise HTTPException(
+            status_code=403,
+            detail="Solo SUPERADMIN puede usar force=true para iniciar un módulo fuera de orden.",
+        )
+
     from services import cuentas_por_cobrar_service
     enrollment = await cuentas_por_cobrar_service.iniciar_modulo(
         enrollment=enrollment,
         modulo_index=index,
         current_user=current_user,
+        force=force,
     )
     return await enrollment_service.enrich_enrollment_dates(enrollment)
 
