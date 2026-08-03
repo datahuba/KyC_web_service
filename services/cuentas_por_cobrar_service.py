@@ -9,11 +9,14 @@ Concepto contable:
 - CxC estimada (o "Por Cobrar Total") = suma de todos los saldo_pendiente
   de todos los enrollments activos. Es lo que la universidad espera cobrar
   si todos los estudiantes terminan el programa completo.
-- CxC a la fecha (o "Por Cobrar Real") = suma del saldo_pendiente SOLO de
-  los módulos que Sandra/Rocío ya marcó como 'iniciado_en' en cada
-  enrollment. Es lo que contablemente se considera "devengado" porque ya se
-  empezó a prestar el servicio (los módulos no iniciados no se han cursado,
-  por lo que no hay servicio prestado que cobrar).
+- CxC a la fecha (o "Por Cobrar Real") = suma de (total_a_pagar -
+  pagos aprobados) por cada enrollment activo. Refleja el saldo contable
+  real basado en los pagos efectivamente aprobados, independiente de si
+  el módulo está marcado como iniciado o no.
+
+  F-CUENTAS-POR-COBRAR v2 (2026-08-03): se cambió la definición. Antes era
+  "módulos iniciados" pero eso podía inflar la CxC con módulos marcados
+  manualmente como iniciados sin pago. Ahora es contable puro.
 
 Excluidos automáticamente del reporte:
 - Enrollments SUSPENDIDO (pasivos), RETIRADO, CANCELADO, COMPLETADO.
@@ -28,6 +31,7 @@ from beanie import PydanticObjectId
 from models.course import Course
 from models.enrollment import Enrollment, ModuloEstado
 from models.enums import EstadoInscripcion
+from models.payment import Payment
 from models.student import Student
 from models.user import User
 
@@ -178,12 +182,18 @@ async def generar_resumen_cxc(
 
         # Saldo del enrollment
         saldo_estimado = e.saldo_pendiente
-        # Saldo a la fecha: solo módulos iniciados
-        saldo_a_la_fecha = sum(
-            _calcular_saldo_modulo(m)
-            for m in e.modulos
-            if _modulo_cuenta_cxc(m)
-        )
+        # F-CUENTAS-POR-COBRAR v2 (2026-08-03, Kevin): CxC real ahora es
+        # "Inscripción total - Pagos aprobados", NO depende de los módulos
+        # marcados como iniciados. Recalculamos en tiempo real con los pagos
+        # de la tabla payments (estado_pago=APROBADO) para corregir
+        # automáticamente cualquier desincronización del campo
+        # enrollment.total_pagado.
+        pagos_aprobados = await Payment.find(
+            Payment.inscripcion_id == e.id,
+            Payment.estado_pago == "APROBADO",
+        ).to_list()
+        total_pagado_real = sum(p.cantidad_pago for p in pagos_aprobados)
+        saldo_a_la_fecha = max(0.0, e.total_a_pagar - total_pagado_real)
 
         # Contar módulos
         for m in e.modulos:
