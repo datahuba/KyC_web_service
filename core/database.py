@@ -40,6 +40,10 @@ from models.certificate_request import CertificateRequest
 # F-TRAMITES-SOLICITUD (2026-07-29): solicitudes de Convalidación,
 # Tutoría, Readmisión y Titulación que el estudiante crea desde /app/requests.
 from models.tramite_solicitud import TramiteSolicitud
+# US-003 (2026-08-03): Módulo Comunicados. Anuncios oficiales del personal
+# (superadmin/encargado/cobranzas) hacia los estudiantes, con pop-up al login
+# y tracking de "visto" por estudiante.
+from models.comunicado import Comunicado, ComunicadoVisto
 
 
 async def _sanitize_legacy_database(db):
@@ -215,6 +219,9 @@ async def init_db():
             CertificateRequest,
             # F-TRAMITES-SOLICITUD (2026-07-29)
             TramiteSolicitud,
+            # US-003 (2026-08-03): Comunicados
+            Comunicado,
+            ComunicadoVisto,
         ]
     )
     print(f"[OK] Conectado a MongoDB ({settings.DATABASE_NAME}) y Beanie inicializado con Connection Pool optimizado.")
