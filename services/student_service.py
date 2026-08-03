@@ -703,15 +703,21 @@ async def import_students_from_excel(
             errors.append(f"Fila {row_idx}: Error al procesar datos de la fila: {str(e)}")
             
     # 3. VERIFICAR DUPLICADOS EN BASE DE DATOS (1 SOLA CONSULTA DE RED)
+    # F-EXCEL-IMPORT-EXISTING (2026-08-03, Kevin): si el estudiante YA EXISTE
+    # en la BD, NO lo rechazamos — lo inscribimos al curso seleccionado (si lo
+    # hay). El usuario puede subir un Excel con estudiantes que ya están
+    # registrados para inscribirlos en masa a un nuevo programa.
     existing_registros = set()
     existing_carnets = set()
     existing_emails = set()
-    
+    existing_students_by_carnet: dict = {}  # carnet -> Student object (para inscribir)
+    existing_students_by_registro: dict = {}
+
     if candidates:
         all_registros_excel = [c["registro"] for c in candidates]
         all_carnets_excel = [c["carnet"] for c in candidates]
         all_emails_excel = [c["email"] for c in candidates if c["email"]]
-        
+
         db_query = {
             "$or": [
                 {"registro": {"$in": all_registros_excel}},
@@ -720,39 +726,42 @@ async def import_students_from_excel(
         }
         if all_emails_excel:
             db_query["$or"].append({"email": {"$in": all_emails_excel}})
-            
+
         existing_students_db = await Student.find(db_query).to_list()
-        
+
         for s in existing_students_db:
             if s.registro:
                 existing_registros.add(s.registro)
+                existing_students_by_registro[s.registro] = s
             if s.carnet:
                 existing_carnets.add(s.carnet)
+                existing_students_by_carnet[s.carnet] = s
             if s.email:
                 existing_emails.add(s.email.lower())
-        
+
     # 4. PREPARAR OBJETOS DE INSERTIÓN Y HASHEAR CONTRASEÑAS (PROCESADOR CPU CONTINUO)
+    # Y también identificar estudiantes existentes para inscribir al curso.
     students_to_insert = []
     financials_to_insert = []  # pagos por estudiante, alineado 1:1 con students_to_insert
+    existing_to_enroll: list = []  # tuplas (c, student_obj) para inscribir al curso
     for c in candidates:
-        has_error = False
-        if c["registro"] in existing_registros:
-            errors.append(f"Fila {c['row_idx']}: El Registro/Usuario '{c['registro']}' ya está registrado en la base de datos.")
-            has_error = True
+        # Buscar si el estudiante ya existe
+        existing_student = None
         if c["carnet"] in existing_carnets:
-            errors.append(f"Fila {c['row_idx']}: El Carnet de Identidad '{c['carnet']}' de '{c['nombre']}' ya está registrado en la base de datos.")
-            has_error = True
-        if c["email"] and c["email"].lower() in existing_emails:
-            errors.append(f"Fila {c['row_idx']}: El Correo Electrónico '{c['email']}' de '{c['nombre']}' ya está registrado en la base de datos.")
-            has_error = True
-            
-        if has_error:
+            existing_student = existing_students_by_carnet.get(c["carnet"])
+        elif c["registro"] in existing_registros:
+            existing_student = existing_students_by_registro.get(c["registro"])
+
+        if existing_student:
+            # Estudiante YA EXISTE en BD — lo inscribimos al curso
+            # (NO es un error, es flujo normal de re-inscripción).
+            existing_to_enroll.append((c, existing_student))
             continue
-            
+
         # ISSUE-Q-PASSWORD-UNIFICADA: contraseña inicial 'Uagrm.<CI>' (misma
         # convención institucional que docentes/staff, GAP-1).
         hashed_password = get_password_hash(f"Uagrm.{c['carnet']}")
-        
+
         students_to_insert.append(
             Student(
                 registro=c["registro"],
@@ -795,7 +804,20 @@ async def import_students_from_excel(
     matricula_vouchers_count = 0  # comprobantes de matrícula (link) registrados como pago pendiente
     hay_columnas_financieras = bool(col_matricula or columnas_modulos or col_matricula_comprobante)
 
-    if curso_id and inserted_ids:
+    # F-EXCEL-IMPORT-EXISTING (2026-08-03, Kevin): inscribir TANTO los estudiantes
+    # nuevos COMO los que ya existen en BD (y no están inscritos en este curso).
+    # Unificamos la lista de "estudiantes a inscribir" antes del loop paralelo.
+    enrollable_inputs: list = []  # tuplas (student_id, student_obj, fin_dict)
+    for i, sid in enumerate(inserted_ids):
+        enrollable_inputs.append((sid, students_to_insert[i], financials_to_insert[i]))
+    for c, existing_student in existing_to_enroll:
+        # Para los existentes, también migramos los pagos del Excel (histórico)
+        enrollable_inputs.append((existing_student.id, existing_student, {
+            "pagos": c["pagos"],
+            "matricula_comprobante_url": c["matricula_comprobante_url"]
+        }))
+
+    if curso_id and enrollable_inputs:
         import asyncio
         from core.timezone_utils import utcnow_naive
         from models.course import Course
@@ -808,12 +830,14 @@ async def import_students_from_excel(
         if not course:
             errors.append(
                 f"Auto-inscripción cancelada: el curso seleccionado ({curso_id}) no existe. "
-                f"Los {success_count} estudiantes se crearon correctamente pero no fueron inscritos."
+                f"Los {len(inserted_ids)} estudiantes se crearon correctamente pero no fueron inscritos."
             )
-        elif not course.activo:
+        elif not course.activo and not course.es_historico:
+            # F-HISTORICO (2026-08-03, Kevin): los programas historicos aceptan
+            # inscripciones aunque activo=False (cursos cerrados para carga retroactiva).
             errors.append(
                 f"Auto-inscripción cancelada: el curso '{course.nombre_programa}' está inactivo y no acepta inscripciones. "
-                f"Los {success_count} estudiantes se crearon correctamente pero no fueron inscritos."
+                f"Los {len(inserted_ids)} estudiantes se crearon correctamente pero no fueron inscritos."
             )
         else:
             # ============================================================

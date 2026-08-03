@@ -68,7 +68,12 @@ async def create_enrollment(
     # estudiante) sí valida curso.activo, pero esta vía directa (CPD/Encargado
     # de Curso) no lo hacía -- dos rutas de entrada con validación asimétrica,
     # permitiendo inscribir gente en cursos ya desactivados/cerrados.
-    if not course.activo:
+    # F-HISTORICO (2026-08-03, Kevin): los programas historicos (es_historico=True)
+    # SIEMPRE deben aceptar inscripciones, porque su proposito es cargar
+    # retroactivamente estudiantes que cursaron en el pasado. El flag activo
+    # puede estar en False (cerrado) pero es_historico=True significa que
+    # es solo para carga historica, no operativo.
+    if not course.activo and not course.es_historico:
         raise ValueError("Este curso no está activo y no acepta nuevas inscripciones")
 
     # 2. Validar que no esté ya inscrito
