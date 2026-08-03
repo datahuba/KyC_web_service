@@ -93,6 +93,13 @@ async def create_enrollment(
     # 4. Obtener precios del curso (precio único)
     costo_total = course.get_costo_total()
     costo_matricula = course.get_matricula()
+
+    # F-HISTORICO-IMPORT (2026-08-03, Kevin): los programas historicos pueden
+    # tener cantidad_cuotas=0 (no se exige en historicos). Enrollment requiere
+    # >= 1, asi que forzamos a 1 cuando es historico y no tiene cuotas.
+    cantidad_cuotas_efectiva = course.cantidad_cuotas
+    if course.es_historico and cantidad_cuotas_efectiva < 1:
+        cantidad_cuotas_efectiva = 1
     
     # 5. Aplicar descuento del curso 
     descuento_curso = 0.0
@@ -188,7 +195,7 @@ async def create_enrollment(
         curso_id=enrollment_in.curso_id,
         costo_total=costo_total,
         costo_matricula=costo_matricula,
-        cantidad_cuotas=course.cantidad_cuotas,
+        cantidad_cuotas=cantidad_cuotas_efectiva,
         modulos=modulos_enrollment,
         
         descuento_curso_id=descuento_curso_id,
