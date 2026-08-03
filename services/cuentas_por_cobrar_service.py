@@ -30,7 +30,7 @@ from beanie import PydanticObjectId
 
 from models.course import Course
 from models.enrollment import Enrollment, ModuloEstado
-from models.enums import EstadoInscripcion
+from models.enums import EstadoInscripcion, EstadoPago
 from models.payment import Payment
 from models.student import Student
 from models.user import User
@@ -190,7 +190,7 @@ async def generar_resumen_cxc(
         # enrollment.total_pagado.
         pagos_aprobados = await Payment.find(
             Payment.inscripcion_id == e.id,
-            Payment.estado_pago == "APROBADO",
+            Payment.estado_pago == EstadoPago.APROBADO,
         ).to_list()
         total_pagado_real = sum(p.cantidad_pago for p in pagos_aprobados)
         saldo_a_la_fecha = max(0.0, e.total_a_pagar - total_pagado_real)
