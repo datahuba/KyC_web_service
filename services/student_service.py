@@ -778,20 +778,11 @@ async def import_students_from_excel(
     # 5. INSERCIÓN MASIVA DE ALTO RENDIMIENTO (1 SOLA ESCRITURA DE RED)
     success_count = 0
     inserted_ids: List[PydanticObjectId] = []
-    # ISSUE-EXCEL-EMAIL-VALID (2026-08-03, Kevin): si hubo errores de validación
-    # (emails mal escritos, duplicados, formato inválido), NO importamos NADA.
-    # El usuario debe corregir el Excel y re-subir. Esto evita la confusión
-    # de "se importaron 2 pero faltaban 3" sin saber cuáles.
-    if errors:
-        return {
-            "success_count": 0,
-            "error_count": len(errors),
-            "errors": errors,
-            "message": (
-                f"No se importó ningún estudiante. Se detectaron {len(errors)} "
-                f"problema(s) en el archivo. Corrígelos y vuelve a subir."
-            ),
-        }
+    # ISSUE-EXCEL-EMAIL-VALID (2026-08-03, Kevin): si hay errores de validación
+    # (emails mal escritos, duplicados, formato inválido), SE IMPORTAN LAS
+    # FILAS VALIDAS y se reportan las filas malas en `errors[]`. El usuario
+    # puede corregir el Excel y re-subir las filas malas por separado.
+    # Esto evita que 1 fila con email mal escrito impida importar el resto.
     if students_to_insert:
         insert_result = await Student.insert_many(students_to_insert)
         # inserted_ids conserva el mismo orden que students_to_insert
