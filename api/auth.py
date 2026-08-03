@@ -188,14 +188,18 @@ async def resend_verification(
 )
 async def login_user(login_data: LoginRequest, request: Request) -> Any:
     """
-    Login para administradores
-    
+    Login para administradores y personal (docente/staff)
+
     **Acceso público** (no requiere autenticación)
-    
+
     **Credenciales:**
-    - `username`: Username del admin
+    - `username`: Username, email o carnet (CI) del personal
     - `password`: Contraseña
-    
+
+    **US-002 (2026-08-03):** Si el identificador matchea un estudiante pero
+    NO un usuario administrativo, retorna 403 con mensaje indicando que use
+    el portal "Estudiantes". No expone si la cuenta existe.
+
     **Retorna:** JWT Token de acceso
     """
     # AUDITORÍA (ALTO #8 - seguridad): sin límite, fuerza bruta de contraseñas
@@ -206,6 +210,10 @@ async def login_user(login_data: LoginRequest, request: Request) -> Any:
     # puede iniciar sesión indistintamente con su username, su email o su carnet
     # (CI). Para administrativos con perfiles personalizados, username/email
     # siguen funcionando igual; el carnet solo hace match si la cuenta lo tiene.
+    # US-002 (2026-08-03): endurecimiento por perfil. Si el identificador matchea
+    # un Student pero NO un User, devolvemos 403 con mensaje claro para que el
+    # frontend redirija al portal correcto, en vez de "credenciales incorrectas"
+    # (que confundiría al usuario y no respeta la separación de perfiles).
     identificador = login_data.username.strip()
     
     # Buscar todos los usuarios que coincidan
@@ -218,6 +226,21 @@ async def login_user(login_data: LoginRequest, request: Request) -> Any:
     ).to_list()
     
     if not users:
+        # US-002: ¿quizás es un carnet de estudiante intentando entrar al portal
+        # administrativo? Lo verificamos para devolver un error más informativo.
+        student = await Student.find_one(
+            Or(
+                Student.registro == identificador,
+                Student.email == identificador.lower(),
+                Student.carnet == identificador
+            )
+        )
+        if student:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Esta cuenta es de Estudiante. Para ingresar, use el portal 'Estudiantes' desde la pantalla principal.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Credenciales incorrectas",
@@ -289,13 +312,17 @@ async def login_user(login_data: LoginRequest, request: Request) -> Any:
 async def login_student(login_data: LoginRequest, request: Request) -> Any:
     """
     Login para estudiantes
-    
+
     **Acceso público** (no requiere autenticación)
-    
+
     **Credenciales:**
     - `username`: Registro, correo o carnet (CI) del estudiante
-    - `password`: Contraseña (inicialmente = 'Uagrm.<CI>')
-    
+    - `password`: Contraseña (convención por defecto: 'Uagrm.<CI>')
+
+    **US-002 (2026-08-03):** Si el identificador matchea un usuario
+    administrativo/docente pero NO un estudiante, retorna 403 con mensaje
+    indicando que use el portal correspondiente. No expone si la cuenta existe.
+
     **Retorna:** JWT Token de acceso
     """
     # AUDITORÍA (ALTO #8 - seguridad): ver nota equivalente en login_user.
@@ -304,6 +331,9 @@ async def login_student(login_data: LoginRequest, request: Request) -> Any:
     # ISSUE-Q-LOGIN-MULTIPLE (2026-07-09): el estudiante puede iniciar sesión
     # indistintamente con su número de registro, su correo o su carnet (CI).
     # La contraseña inicial por defecto es 'Uagrm.<CI>' (ya la puede cambiar).
+    # US-002 (2026-08-03): endurecimiento por perfil. Si el identificador matchea
+    # un User (docente/admin) pero NO un Student, devolvemos 403 con mensaje
+    # claro en vez de "credenciales incorrectas".
     identificador = login_data.username.strip()
     student = await Student.find_one(
         Or(
@@ -314,6 +344,22 @@ async def login_student(login_data: LoginRequest, request: Request) -> Any:
     )
     
     if not student:
+        # US-002: ¿quizás es una cuenta de personal/staff intentando entrar al
+        # portal de Estudiantes? Lo verificamos para devolver un error más
+        # informativo y no exponer que la cuenta existe.
+        user = await User.find_one(
+            Or(
+                User.username == identificador,
+                User.email == identificador.lower(),
+                User.carnet == identificador
+            )
+        )
+        if user:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Esta cuenta es de Personal (docente/administrativo). Para ingresar, use el portal correspondiente desde la pantalla principal.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Credenciales incorrectas",
