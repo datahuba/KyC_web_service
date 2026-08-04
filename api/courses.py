@@ -1,4 +1,4 @@
-from typing import List, Any, Union, Optional
+from typing import List, Any, Union, Optional, Dict
 import asyncio
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
@@ -277,6 +277,15 @@ class InitialEnrollmentItem(BaseModel):
         default=False,
         description="Si el estudiante ya pago la matricula (caso retroactivo/historico)."
     )
+    # Opcional: pagos por modulo del Excel del CPD (carga retroactiva).
+    # Llave = indice del modulo en el curso (0-based string), valor = monto pagado.
+    # F-HISTORICO-AUTOSERVICIO-EXCEL (2026-08-04): al subir el Excel, el sistema
+    # detecta "Pago Modulo1", "Pago Modulo2", etc. y los envia aqui para que
+    # el estado del modulo se registre como Pagado/Parcial segun corresponda.
+    pagos_modulos: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Dict {modulo_index_str: monto_pagado} del Excel del CPD. Ej: {'0': 294, '1': 294}."
+    )
 
 
 class InitialEnrollmentRequest(BaseModel):
@@ -428,6 +437,29 @@ async def post_initial_enrollments(
                     enrollment.modulos[idx].monto_pagado = (
                         enrollment.modulos[idx].costo or 0.0
                     )
+            # F-HISTORICO-AUTOSERVICIO-EXCEL (2026-08-04): aplicar pagos por
+            # modulo del Excel del CPD. Dict {modulo_index_str: monto_pagado}.
+            # Se actualiza monto_pagado y estado (Pagado si cubre el costo,
+            # Parcial si no). NO sobreescribe pagos mayores ya registrados.
+            if item.pagos_modulos and enrollment.modulos:
+                for idx_str, monto in item.pagos_modulos.items():
+                    try:
+                        idx = int(idx_str)
+                    except (ValueError, TypeError):
+                        continue
+                    if 0 <= idx < len(enrollment.modulos):
+                        mod = enrollment.modulos[idx]
+                        # Acumular (no sobreescribir): si Excel dice 294 pero
+                        # ya habia 100, queda 394 (cap al costo)
+                        nuevo_pagado = (mod.monto_pagado or 0.0) + float(monto or 0.0)
+                        if mod.costo and nuevo_pagado > mod.costo + 0.01:
+                            nuevo_pagado = mod.costo
+                        mod.monto_pagado = nuevo_pagado
+                        # Estado segun cobertura
+                        if mod.costo and nuevo_pagado >= mod.costo - 0.01:
+                            mod.estado = "Pagado"
+                        elif nuevo_pagado > 0:
+                            mod.estado = "Parcial"
             await enrollment.save()
 
             # Batch update de referencias cruzadas
