@@ -149,6 +149,18 @@ class Enrollment(MongoBaseModel):
     
     matricula_pagada: bool = Field(default=False, description="¿Ya pagó la matrícula el estudiante para este curso?")
 
+    # F-US-006-3TIPOS-3A (2026-08-04): marca si esta inscripcion fue creada
+    # como carga inicial del programa (caso retroactivo, programa en_ejecucion
+    # o historico). Sirve para auditoria: distinguir una inscripcion que
+    # el estudiante hizo por su cuenta vs una que el admin/encargado metio
+    # manualmente al crear el programa.
+    es_carga_inicial: bool = Field(
+        default=False,
+        description="True si la inscripcion fue creada como carga inicial del programa "
+                    "(estudiante ya estaba/curso en el programa antes de que el sistema "
+                    "lo registrara). Usado para auditoria."
+    )
+
     # ISSUE-M-EXENCION: bypass de matrícula otorgado por MAE. NO condona la
     # deuda financiera (saldo_pendiente sigue reflejando la realidad); solo
     # desacopla el estado académico (poder cursar) del pago de matrícula.

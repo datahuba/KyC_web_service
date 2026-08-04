@@ -8,13 +8,36 @@ from models.course import Course
 from models.user import User
 from models.student import Student
 from models.enrollment import Enrollment
+from models.estado_programa import EstadoPrograma
 from models.enums import UserRole
 from schemas.course import CourseCreate, CourseResponse, CourseUpdate, CourseEnrolledStudent
+from schemas.enrollment import EnrollmentCreate
 from services import course_service
 from beanie import PydanticObjectId
 
 # Nuevas dependencias de seguridad del ISSUE L
 from api.dependencies import require_superadmin, require_cpd, require_staff, get_current_user, require_encargado_curso
+
+
+# F-US-006-3TIPOS-3A (2026-08-04): dependencia que permite a CPD, admin,
+# superadmin, encargado_curso o coordinador realizar operaciones de carga
+# inicial. La verificacion de si el encargado tiene asignado el curso
+# especifico se hace DENTRO del endpoint (no en la dep) porque depende del
+# id del curso en el path.
+def require_cpd_or_encargado_curso_or_coordinador(current_user: User = Depends(get_current_user)) -> User:
+    """F-US-006-3TIPOS: permite a CPD/ADMIN/SUPERADMIN/ENCARGADO_CURSO/COORDINADOR."""
+    if current_user.rol not in (
+        UserRole.SUPERADMIN,
+        UserRole.ADMIN,
+        UserRole.CPD,
+        UserRole.ENCARGADO_CURSO,
+        UserRole.COORDINADOR,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Solo CPD, admin, superadmin, encargado de curso o coordinador pueden realizar esta accion.",
+        )
+    return current_user
 
 router = APIRouter()
 
@@ -197,9 +220,15 @@ async def get_disponibles(
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
     """
-    Devuelve SOLO los cursos en estado PROGRAMADO o EN_EJECUCION (F-080).
-    Es el endpoint que consume el dashboard del estudiante para mostrar
-    los cursos donde podría pedir inscripción. Los CERRADOS no aparecen.
+    F-080 + F-US-006-3TIPOS (2026-08-04): devuelve SOLO los cursos en
+    estado PROGRAMADO (los únicos que aceptan nuevas inscripciones de
+    estudiantes). Es el endpoint que consume el dashboard del estudiante
+    para mostrar los cursos donde podría pedir inscripción.
+
+    Antes retornaba PROGRAMADO + EN_EJECUCION. Tras el cambio de Kevin, un
+    programa en ejecución ya cerró inscripciones — los rezagados los mete
+    el admin/encargado manualmente. Los CERRADOS e HISTÓRICOS nunca
+    aparecen aquí.
     """
     courses = await course_service.get_courses_disponibles_para_estudiante()
     return {
@@ -222,6 +251,222 @@ async def get_disponibles(
             for c in courses
         ],
     }
+
+
+# ============================================================================
+# F-US-006-3TIPOS-3A (2026-08-04): CARGA INICIAL DE ESTUDIANTES
+# ============================================================================
+# Cuando se crea un programa en_ejecucion o historico, el admin/encargado
+# debe poder cargar la lista de estudiantes que ya estaban/estan en el
+# programa (sin pasar por el flujo de inscripcion normal, que ya cerro).
+# Este endpoint reutiliza la logica del bulk enrollment pero:
+#   - NO valida que el curso este activo (puede estar cerrado/historico)
+#   - NO valida que el curso acepte inscripciones nuevas (es carga retroactiva)
+#   - Marca cada inscripcion con el flag `es_carga_inicial` para auditoria
+class InitialEnrollmentItem(BaseModel):
+    """Un estudiante a inscribir en la carga inicial."""
+    estudiante_id: str = Field(..., description="ID del estudiante (PydanticObjectId)")
+    # Opcional para en_ejecucion: modulo desde el cual se inscribe
+    modulo_inicial_index: Optional[int] = Field(
+        None,
+        ge=0,
+        description="Indice del modulo desde el cual entra el estudiante (0-based). Solo para programas en_ejecucion."
+    )
+    # Opcional: si ya pago la matricula
+    matricula_pagada: bool = Field(
+        default=False,
+        description="Si el estudiante ya pago la matricula (caso retroactivo/historico)."
+    )
+
+
+class InitialEnrollmentRequest(BaseModel):
+    """Lista de estudiantes a inscribir como carga inicial del programa."""
+    estudiantes: List[InitialEnrollmentItem] = Field(..., min_length=1, max_length=200)
+
+
+class InitialEnrollmentResultado(BaseModel):
+    """Resultado de inscribir a un estudiante en la carga inicial."""
+    estudiante_id: str
+    success: bool
+    message: str
+    enrollment_id: Optional[str] = None
+
+
+class InitialEnrollmentResponse(BaseModel):
+    total_solicitados: int
+    exitosos: int
+    ya_inscritos: int
+    fallidos: int
+    resultados: List[InitialEnrollmentResultado]
+
+
+@router.post(
+    "/{id}/initial-enrollments",
+    response_model=InitialEnrollmentResponse,
+    status_code=200,
+    summary="F-US-006-3TIPOS: Carga inicial de estudiantes para programas en_ejecucion o historicos",
+)
+async def post_initial_enrollments(
+    id: PydanticObjectId,
+    payload: InitialEnrollmentRequest,
+    current_user: User = Depends(require_cpd_or_encargado_curso_or_coordinador),
+) -> Any:
+    """
+    F-US-006-3TIPOS-3A (2026-08-04): carga la lista inicial de estudiantes
+    para un programa en_ejecucion (los que ya estan inscritos) o historico
+    (los que cursaron en el pasado). NO valida acepta_inscripciones() ni
+    que el curso este activo: es una operacion administrativa de carga
+    retroactiva.
+
+    Permisos:
+    - superadmin / admin / cpd: cualquier curso.
+    - encargado_curso: solo cursos en cursos_asignados.
+    - coordinador: cualquier curso.
+
+    Para programas en_ejecucion, se puede especificar el modulo_inicial_index
+    desde el cual se inscribe el estudiante (los modulos anteriores ya los
+    curso/pago, este es desde donde arranca en el sistema). Para historicos,
+    no se usa este campo.
+    """
+    from services import enrollment_service
+
+    # 1. Verificar permisos del encargado_curso
+    if (
+        current_user.rol == UserRole.ENCARGADO_CURSO
+        and id not in (current_user.cursos_asignados or [])
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="No tienes asignado este curso (encargado_curso).",
+        )
+
+    # 2. Cargar el curso
+    course = await Course.get(id)
+    if not course:
+        raise HTTPException(status_code=404, detail="Curso no encontrado")
+
+    # 3. Validar tipo de programa
+    es_historico = getattr(course, "es_historico", False)
+    estado_actual = course.get_estado_actual()
+    if estado_actual == EstadoPrograma.PROGRAMADO.value:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Este endpoint es SOLO para programas en_ejecucion o historicos. "
+                "Para programas en estado programado usa el flujo normal de "
+                "inscripcion (el estudiante se inscribe por su cuenta desde "
+                "su dashboard)."
+            ),
+        )
+
+    # 4. Pre-cargar estudiantes
+    estudiante_ids_unicos = list({item.estudiante_id for item in payload.estudiantes})
+    try:
+        estudiante_obj_ids = [PydanticObjectId(sid) for sid in estudiante_ids_unicos]
+    except Exception:
+        raise HTTPException(status_code=400, detail="estudiante_id invalido (debe ser PydanticObjectId)")
+
+    students = await Student.find({"_id": {"$in": estudiante_obj_ids}}).to_list()
+    student_map: dict = {str(s.id): s for s in students}
+
+    exitosos = 0
+    ya_inscritos_count = 0
+    fallidos = 0
+    resultados: List[InitialEnrollmentResultado] = []
+
+    for item in payload.estudiantes:
+        est_id_str = item.estudiante_id
+        try:
+            student = student_map.get(est_id_str)
+            if not student:
+                raise ValueError(f"Estudiante {est_id_str} no encontrado")
+
+            # Verificar si ya esta inscrito en este curso
+            existing = await Enrollment.find_one(
+                Enrollment.estudiante_id == student.id,
+                Enrollment.curso_id == course.id,
+            )
+            if existing:
+                ya_inscritos_count += 1
+                resultados.append(InitialEnrollmentResultado(
+                    estudiante_id=est_id_str,
+                    success=False,
+                    message="Ya esta inscrito en este curso",
+                    enrollment_id=str(existing.id),
+                ))
+                continue
+
+            # Crear la inscripcion (carga inicial, bypasea validaciones de
+            # acepta_inscripciones porque es una operacion administrativa)
+            enrollment_in = EnrollmentCreate(
+                estudiante_id=student.id,
+                curso_id=course.id,
+            )
+            enrollment = await enrollment_service.create_enrollment(
+                enrollment_in=enrollment_in,
+                admin_username=current_user.nombre_visible,
+                student=student,
+                course=course,
+                skip_link_updates=True,
+            )
+
+            # Marcar la carga inicial (auditoria)
+            enrollment.es_carga_inicial = True
+            # Si es historico o si el item lo pide, marcar matricula como pagada
+            if es_historico or item.matricula_pagada:
+                enrollment.matricula_pagada = True
+            # Si se especifico modulo inicial (en_ejecucion), marcar ese modulo
+            # como "iniciado" para que el dashboard lo muestre en la fase correcta
+            if (
+                item.modulo_inicial_index is not None
+                and enrollment.modulos
+                and 0 <= item.modulo_inicial_index < len(enrollment.modulos)
+            ):
+                # El estudiante arranca a partir de este modulo; los anteriores
+                # se marcan como pagados (asumimos que ya los curso)
+                for idx in range(item.modulo_inicial_index):
+                    enrollment.modulos[idx].monto_pagado = (
+                        enrollment.modulos[idx].costo or 0.0
+                    )
+            await enrollment.save()
+
+            # Batch update de referencias cruzadas
+            if course.id not in student.lista_cursos_ids:
+                student.lista_cursos_ids.append(course.id)
+                await student.save()
+            if student.id not in course.inscritos:
+                course.inscritos.append(student.id)
+                await course.save()
+
+            exitosos += 1
+            resultados.append(InitialEnrollmentResultado(
+                estudiante_id=est_id_str,
+                success=True,
+                message="Inscripcion creada como carga inicial",
+                enrollment_id=str(enrollment.id),
+            ))
+        except ValueError as e:
+            fallidos += 1
+            resultados.append(InitialEnrollmentResultado(
+                estudiante_id=est_id_str,
+                success=False,
+                message=str(e),
+            ))
+        except Exception as e:
+            fallidos += 1
+            resultados.append(InitialEnrollmentResultado(
+                estudiante_id=est_id_str,
+                success=False,
+                message=f"Error inesperado: {str(e)}",
+            ))
+
+    return InitialEnrollmentResponse(
+        total_solicitados=len(payload.estudiantes),
+        exitosos=exitosos,
+        ya_inscritos=ya_inscritos_count,
+        fallidos=fallidos,
+        resultados=resultados,
+    )
 
 
 class EstadoOverrideRequest(BaseModel):
