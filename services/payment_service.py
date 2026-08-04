@@ -1301,16 +1301,28 @@ async def get_resumen_economico(
     cobros_pendientes = 0
     for e in enrollments:
         total_esperado += e.total_a_pagar or 0.0
-        # US-004 (2026-08-03): NO excluir suspendidos/completados/cancelados
-        # del Por Cobrar. La fórmula de Kevin es "por programa completo":
-        #   Por Cobrar = (matrícula + módulos) de TODOS los inscritos
-        #                - (pagos aprobados de TODOS)
-        # El costo del programa está completo, no se reduce por estar
-        # suspendido (al reactivarse vuelven a deber). El `cobros_pendientes`
-        # sigue contando solo los que tienen saldo > 0.
-        # (F-073 y F-083 excluían estos estados, pero Kevin decidió
-        # 2026-08-03 que el dashboard debe mostrar la deuda teórica
-        # del programa completo.)
+        # F-COBRANZA-POR-COBRAR: "Por Cobrar" NO incluye inscripciones suspendidas
+        # (congelado, pasivo, abandono), completadas ni canceladas. Sandra Cobranza
+        # reportó (2026-07-23) que el sistema le sumaba Bs 13.230 de 3 pasivos al
+        # "Por Cobrar", desalineándolo de su Excel. El `total_esperado` se mantiene
+        # intacto porque es la suma teórica de lo que TODOS los inscritos deberían
+        # pagar (incluye pasivos porque al reactivarse vuelven a deber).
+        #
+        # F-083 (2026-07-28): se agrega RETIRADO a la lista de excluidos del
+        # "Por Cobrar". Distinto de SUSPENDIDO+abandono (que es automático):
+        # RETIRADO es VOLUNTARIO y DEFINITIVO, no vuelve nunca.
+        #
+        # US-004 (2026-08-03, sesión 2da): Kevin revirtió la exclusión pidiendo
+        # que se incluyeran todos. Implementé el cambio. PERO en su Excel
+        # de Sandra, los 4 congelados/pasivos (Roger, Fátima, Luis Alberto,
+        # Herlan Piter) muestran Por Cobrar = 0, NO el costo del programa
+        # completo. El Por Cobrar refleja lo que se está COBRANDO actualmente,
+        # no la deuda teórica histórica. Vuelvo a la exclusión original.
+        # Sus pagos SÍ cuentan en ingreso_matricula/colegiatura (lo que ya
+        # pagaron es dinero real), pero el Por Cobrar no suma lo que
+        # deberían en módulos futuros porque están congelados/suspendidos.
+        if e.estado in estados_excluidos_por_cobrar:
+            continue
         saldo = (e.total_a_pagar or 0.0) - (e.total_pagado or 0.0)
         saldo = max(0, saldo)  # no negativo (caso edge: pago de más)
         por_cobrar += saldo
