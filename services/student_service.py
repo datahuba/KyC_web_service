@@ -136,7 +136,11 @@ async def create_student(student_in: StudentCreate) -> Student:
         course_obj = await Course.get(course_id)
         if not course_obj:
             raise ValueError("Curso no encontrado")
-        if not course_obj.activo:
+        # F-HISTORICO-AUTOSERVICIO-EXCEL-FIX (2026-08-04): los cursos historicos
+        # aceptan carga de estudiantes aunque activo=False (cursos cerrados para
+        # carga retroactiva). Mismo criterio que el endpoint de auto-enroll
+        # (linea 835). Si no es historico y esta inactivo, rechazar.
+        if not course_obj.activo and not course_obj.es_historico:
             raise ValueError("El curso seleccionado está inactivo")
 
     # 3. Lógica Inteligente de Contraseña
