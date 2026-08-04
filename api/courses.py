@@ -549,9 +549,21 @@ async def put_resolucion(
 async def create_course(
     *,
     course_in: CourseCreate,
-    current_user: User = Depends(require_cpd) # <-- CPD CREA LOS PROGRAMAS
+    current_user: User = Depends(require_cpd) # F-HISTORICO-AUTOSERVICIO (2026-08-04): Kevin decidio SOLO CPD y SUPERADMIN pueden crear. Inline check abajo porque require_cpd tambien permite ADMIN.
 ) -> Any:
-    """Crear nuevo curso"""
+    """Crear nuevo curso.
+
+    F-HISTORICO-AUTOSERVICIO (2026-08-04): Kevin decidio que SOLO CPD y SUPERADMIN
+    pueden crear programas. El dep `require_cpd` permite CPD, ADMIN y SUPERADMIN,
+    asi que hacemos un check inline adicional para BLOQUEAR a ADMIN.
+    Encargado_curso, coordinador, cobranza, docente, estudiante → 403.
+    """
+    # F-HISTORICO-AUTOSERVICIO: check inline para SOLO CPD y SUPERADMIN (no ADMIN)
+    if current_user.rol not in (UserRole.CPD, UserRole.SUPERADMIN):
+        raise HTTPException(
+            status_code=403,
+            detail="Solo CPD o superadmin pueden crear programas.",
+        )
     try:
         course = await course_service.create_course(course_in=course_in)
         return course
