@@ -1281,7 +1281,15 @@ async def get_resumen_economico(
     # RETIRADOS SÍ cuentan en ingreso_colegiatura (lo que ya pagaron es
     # ingreso real), pero NO cuentan en por_cobrar (lo que falta ya no
     # se cobra).
-    estados_excluidos_por_cobrar = {
+    #
+    # US-004 (2026-08-03): Kevin revierte esta decision. El "Por Cobrar" del
+    # dashboard debe ser la deuda TEORICA del programa completo:
+    #   Por Cobrar = (matrícula + módulos) de TODOS los inscritos
+    #                - (pagos aprobados de TODOS)
+    # El costo del programa está completo, no se reduce por estar suspendido.
+    # Por eso NO excluimos estados. Esta variable queda definida pero no
+    # se usa (se mantiene para no romper otros lugares que la referencien).
+    estados_excluidos_por_cobrar = {  # noqa: variable mantenida por retrocompat
         EstadoInscripcion.SUSPENDIDO,
         EstadoInscripcion.COMPLETADO,
         EstadoInscripcion.CANCELADO,
@@ -1293,16 +1301,16 @@ async def get_resumen_economico(
     cobros_pendientes = 0
     for e in enrollments:
         total_esperado += e.total_a_pagar or 0.0
-        if e.estado in estados_excluidos_por_cobrar:
-            continue
-        # US-004 (2026-08-03): calcular al vuelo en vez de usar el campo
-        # almacenado e.saldo_pendiente. La fórmula de Kevin es:
-        #   Por Cobrar = (matrícula + módulos) - (pagos aprobados)
-        # que es EXACTAMENTE (total_a_pagar - total_pagado). El campo
-        # almacenado `saldo_pendiente` puede estar desactualizado por
-        # bugs históricos (ej. F-085 Luis Fernando con -2640) o
-        # asignaciones manuales incorrectas. Calcular al vuelo es
-        # idempotente y auto-corrector.
+        # US-004 (2026-08-03): NO excluir suspendidos/completados/cancelados
+        # del Por Cobrar. La fórmula de Kevin es "por programa completo":
+        #   Por Cobrar = (matrícula + módulos) de TODOS los inscritos
+        #                - (pagos aprobados de TODOS)
+        # El costo del programa está completo, no se reduce por estar
+        # suspendido (al reactivarse vuelven a deber). El `cobros_pendientes`
+        # sigue contando solo los que tienen saldo > 0.
+        # (F-073 y F-083 excluían estos estados, pero Kevin decidió
+        # 2026-08-03 que el dashboard debe mostrar la deuda teórica
+        # del programa completo.)
         saldo = (e.total_a_pagar or 0.0) - (e.total_pagado or 0.0)
         saldo = max(0, saldo)  # no negativo (caso edge: pago de más)
         por_cobrar += saldo
