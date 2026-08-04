@@ -1231,7 +1231,13 @@ async def get_resumen_economico(
       - ingreso_colegiatura: suma de pagos APROBADOS de módulos/cuotas (no matrícula).
       - total_ingresos: ingreso_matricula + ingreso_colegiatura.
       - total_esperado: suma de total_a_pagar de todas las inscripciones del alcance.
-      - por_cobrar: suma de saldo_pendiente (lo que falta recaudar).
+      - por_cobrar: suma de (total_a_pagar - total_pagado) al vuelo de los
+        enrollments ACTIVOS (excluye SUSPENDIDO, COMPLETADO, CANCELADO, RETIRADO).
+        US-004 (2026-08-03): fórmula de Kevin — el card del dashboard debe
+        mostrar la "deuda total del programa por estudiante", es decir el
+        costo completo (matrícula + 5 módulos) menos lo pagado. Se calcula
+        al vuelo (no se usa e.saldo_pendiente almacenado) para evitar
+        inconsistencias con bugs históricos.
       - cobros_pendientes: cantidad de PERSONAS/inscripciones con saldo pendiente (> 0).
       - total_inscritos: cantidad de inscripciones en el alcance.
 
@@ -1289,7 +1295,16 @@ async def get_resumen_economico(
         total_esperado += e.total_a_pagar or 0.0
         if e.estado in estados_excluidos_por_cobrar:
             continue
-        saldo = e.saldo_pendiente or 0.0
+        # US-004 (2026-08-03): calcular al vuelo en vez de usar el campo
+        # almacenado e.saldo_pendiente. La fórmula de Kevin es:
+        #   Por Cobrar = (matrícula + módulos) - (pagos aprobados)
+        # que es EXACTAMENTE (total_a_pagar - total_pagado). El campo
+        # almacenado `saldo_pendiente` puede estar desactualizado por
+        # bugs históricos (ej. F-085 Luis Fernando con -2640) o
+        # asignaciones manuales incorrectas. Calcular al vuelo es
+        # idempotente y auto-corrector.
+        saldo = (e.total_a_pagar or 0.0) - (e.total_pagado or 0.0)
+        saldo = max(0, saldo)  # no negativo (caso edge: pago de más)
         por_cobrar += saldo
         if saldo > 0.01:
             cobros_pendientes += 1
