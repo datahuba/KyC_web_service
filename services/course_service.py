@@ -353,14 +353,20 @@ async def get_courses_para_calendario(
 
 async def get_courses_disponibles_para_estudiante() -> List[Course]:
     """
-    F-080: devuelve los cursos en los que un estudiante PODRÍA pedir
-    inscripción (estado = programado o en_ejecucion, activo=True).
-    Un curso cerrado NO aparece.
+    F-080 + F-US-006-3TIPOS (2026-08-04): devuelve los cursos en los que un
+    estudiante PODRÍA pedir inscripción. Tras el cambio de Kevin, solo los
+    cursos en estado PROGRAMADO aceptan nuevas inscripciones de estudiantes.
+    Un programa en_ejecucion, cerrado o histórico NO aparece en esta lista
+    (los ya inscritos lo ven en su "mis programas", pero nadie nuevo puede
+    unirse por su cuenta).
+
+    Se delega al helper `Course.acepta_inscripciones()` para que la regla
+    viva en un solo lugar.
     """
     from models.enums import EstadoPrograma
 
     courses = await Course.find(Course.activo == True).to_list()
-    return [c for c in courses if c.get_estado_actual() != EstadoPrograma.CERRADO.value]
+    return [c for c in courses if c.acepta_inscripciones()]
 
 
 async def set_estado_override(

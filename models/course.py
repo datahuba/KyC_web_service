@@ -302,11 +302,17 @@ class Course(MongoBaseModel):
 
     def acepta_inscripciones(self) -> bool:
         """
-        F-080: True si el estado actual del programa permite nuevas
-        solicitudes de inscripción. Un programa CERRADO NO acepta.
-        PROGRAMADO y EN_EJECUCION sí.
+        F-080 + F-US-006-3TIPOS (2026-08-04): True SOLO si el estado actual
+        del programa es PROGRAMADO. Un programa en_ejecucion, cerrado o
+        histórico NO acepta nuevas solicitudes de inscripción de estudiantes
+        (los ya inscritos siguen, pero nadie nuevo puede entrar por su cuenta).
+
+        Razón: Kevin decidió que un programa en ejecución ya cerró inscripciones
+        — los rezagados los mete el admin/encargado manualmente a un módulo
+        futuro. Un histórico/cerrado es solo archivo, no se inscribe nadie nuevo
+        (salvo superadmin en caso retroactivo excepcional).
         """
-        return self.get_estado_actual() != EstadoPrograma.CERRADO.value
+        return self.get_estado_actual() == EstadoPrograma.PROGRAMADO.value
     
     class Settings:
         name = "courses"

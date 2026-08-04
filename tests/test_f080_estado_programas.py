@@ -1,14 +1,16 @@
 """
-F-080 · Estado de programas académicos (calendario + override)
+F-080 + F-US-006-3TIPOS · Estado de programas académicos (calendario + override)
 
 Cubre:
   - Cálculo de estado por fechas (función pura, 9+ casos)
   - Override manual tiene prioridad
   - Cálculo en el modelo Course (método de instancia)
-  - `acepta_inscripciones()` bloquea CERRADO
+  - `acepta_inscripciones()` SOLO permite PROGRAMADO
+    (F-US-006-3TIPOS, 2026-08-04: en_ejecucion ya NO acepta nuevas
+    inscripciones, los rezagados los mete el admin manualmente)
   - set_estado_override valida y sincroniza
   - set_resolucion_pdf_url guarda la URL
-  - Validación de inscripción a curso CERRADO en enrollment_request_service
+  - Validación de inscripción a curso NO-programado en enrollment_request_service
   - Endpoints en api/courses.py
   - Campos en modelo Course
 
@@ -131,20 +133,25 @@ class TestF080OverrideManual(unittest.TestCase):
 
 
 class TestF080AceptaInscripciones(unittest.TestCase):
-    """Regla de negocio: solo PROGRAMADO y EN_EJECUCION aceptan inscripciones."""
+    """Regla de negocio: SOLO PROGRAMADO acepta inscripciones de estudiantes
+    (F-US-006-3TIPOS, 2026-08-04). EN_EJECUCION y CERRADO/HISTORICO no aceptan
+    nuevas solicitudes — los ya inscritos se mantienen, pero nadie nuevo
+    puede entrar por su cuenta."""
 
     def test_cerrado_NO_acepta_inscripciones(self):
         ahora = dt(2026, 7, 27)
         resultado = calcular_estado_actual(None, None, estado_override="cerrado", ahora=ahora)
         assert resultado == EstadoPrograma.CERRADO.value
-        # La lógica de acepta_inscripciones() es: estado != CERRADO
-        assert resultado != EstadoPrograma.EN_EJECUCION.value
+        # F-US-006-3TIPOS: ahora la regla es estado == PROGRAMADO (no != CERRADO)
         assert resultado != EstadoPrograma.PROGRAMADO.value
 
-    def test_en_ejecucion_SI_acepta(self):
+    def test_en_ejecucion_NO_acepta_inscripciones(self):
+        """NUEVO (2026-08-04): un programa en ejecución ya cerró inscripciones."""
         ahora = dt(2026, 7, 27)
         resultado = calcular_estado_actual(dt(2026, 6, 1), dt(2026, 12, 1), ahora=ahora)
         assert resultado == EstadoPrograma.EN_EJECUCION.value
+        # F-US-006-3TIPOS: en_ejecucion NO acepta nuevas inscripciones
+        assert resultado != EstadoPrograma.PROGRAMADO.value
 
     def test_programado_SI_acepta(self):
         ahora = dt(2026, 7, 27)
