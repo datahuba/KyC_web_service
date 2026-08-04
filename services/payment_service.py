@@ -1341,6 +1341,11 @@ async def get_resumen_economico(
         # desactualizados (Wilford, Katya/Lurdes con pagos faltantes, etc).
         if e.estado in estados_excluidos_por_cobrar:
             continue
+        # US-004 v4 (2026-08-04): excluir_por_cobrar=True salta esta inscripción
+        # del cálculo del Por Cobrar. Caso típico: PENDIENTE_PAGO en curso NUEVO
+        # que Sandra aún no incluye en su planilla. Ver models/enrollment.py.
+        if getattr(e, 'excluir_por_cobrar', False):
+            continue
         # FÓRMULA DE SANDRA: NO incluye matrícula, solo módulos.
         costo_modulos = sum(m.costo or 0.0 for m in (e.modulos or []))
         pagos_modulos = sum(m.monto_pagado or 0.0 for m in (e.modulos or []))

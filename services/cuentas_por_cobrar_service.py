@@ -159,6 +159,18 @@ async def generar_resumen_cxc(
     cursos = await Course.find({"_id": {"$in": curso_ids}}).to_list()
     curso_map: dict = {c.id: c for c in cursos}
 
+    # US-004 v5 (2026-08-04): filtrar cursos PROGRAMADOS (que aún no inician)
+    # del desglose de CxC. Kevin: "ESTO NO DEBE EXISTIR PORQUE EL PROGRAMA
+    # AÚN NO SE SABE SI VA INICIAR". Los cursos cerrados tampoco se incluyen
+    # (ya terminaron, no se cobra más). Solo se muestran EN_EJECUCION.
+    cursos_a_excluir = set()
+    for c in cursos:
+        estado = c.get_estado_actual() if hasattr(c, "get_estado_actual") else None
+        if estado in ("programado", "cerrado"):
+            cursos_a_excluir.add(c.id)
+    if cursos_a_excluir:
+        enrollments = [e for e in enrollments if e.curso_id not in cursos_a_excluir]
+
     # Indexar estudiantes
     estudiante_ids = list({e.estudiante_id for e in enrollments})
     estudiantes = await Student.find({"_id": {"$in": estudiante_ids}}).to_list()

@@ -156,6 +156,15 @@ class Enrollment(MongoBaseModel):
     matricula_exenta_otorgada_por: Optional[str] = Field(default=None, description="Username del MAE/Admin/Superadmin que otorgó la exención.")
     matricula_exenta_fecha: Optional[datetime] = Field(default=None, description="Fecha (UTC) en que se otorgó la exención vigente.")
 
+    # US-004 v4 (2026-08-04): Kevin. Excluir esta inscripción del cálculo del
+    # "Por Cobrar" del dashboard sin cambiar su estado. Caso típico: estudiante
+    # con inscripción PENDIENTE_PAGO en un curso NUEVO que Sandra aún no incluye
+    # en su planilla (porque es un programa recién comenzando). No queremos
+    # que sume al Por Cobrar del curso viejo, pero tampoco queremos marcarlos
+    # como SUSPENDIDO (todavía pueden iniciar el nuevo curso). Se salta
+    # en get_resumen_economico pero sigue visible en otras vistas.
+    excluir_por_cobrar: bool = Field(default=False, description="Si True, esta inscripción NO suma al Por Cobrar del dashboard. El estado se mantiene.")
+
     # ISSUE-P-CONGELADO: motivo específico cuando estado=SUSPENDIDO. Reutiliza
     # el mismo estado que ISSUE-R-SOLICITUD-PASIVO ('pasivo') para no explotar
     # el enum EstadoInscripcion con valores redundantes; este campo diferencia
