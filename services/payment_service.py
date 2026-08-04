@@ -1321,10 +1321,30 @@ async def get_resumen_economico(
         # Sus pagos SÍ cuentan en ingreso_matricula/colegiatura (lo que ya
         # pagaron es dinero real), pero el Por Cobrar no suma lo que
         # deberían en módulos futuros porque están congelados/suspendidos.
+        #
+        # US-004 v3 (2026-08-04): cambié la fórmula del Por Cobrar para alinearla
+        # con la planilla real de Sandra (Excel "IA_Control de Pagos 2v1E").
+        # FÓRMULA DE SANDRA (verificada leyendo el Excel con openpyxl):
+        #   Por Cobrar = max(0, costo_modulos - pagos_modulos)
+        # Donde:
+        #   - costo_modulos = sum(m.costo for m in e.modulos)  # NO incluye matrícula
+        #   - pagos_modulos = sum(m.monto_pagado for m in e.modulos)  # NO incluye matrícula
+        # Sandra ve el costo del programa sin la matrícula (porque la matrícula
+        # ya la cobra por separado en su flujo). En su Excel, la fórmula es
+        # exactamente =H - módulos_pagados (con H = 2940 o 1470 si becado).
+        # Si el estudiante es becado, su descuento ya está reflejado en m.costo
+        # (un módulo becado cuesta 294 en vez de 588, costo total 1470 en vez
+        # de 2940). Por eso Wilford, que en Sandra es becado, debe tener costo
+        # 1470 — pero en mi sistema actualmente tiene 2940 (error de dato).
+        # Si la fórmula es correcta y los datos cuadran, da 87,600 igual que
+        # el Excel de Sandra. Si no cuadra, la diferencia viene de datos
+        # desactualizados (Wilford, Katya/Lurdes con pagos faltantes, etc).
         if e.estado in estados_excluidos_por_cobrar:
             continue
-        saldo = (e.total_a_pagar or 0.0) - (e.total_pagado or 0.0)
-        saldo = max(0, saldo)  # no negativo (caso edge: pago de más)
+        # FÓRMULA DE SANDRA: NO incluye matrícula, solo módulos.
+        costo_modulos = sum(m.costo or 0.0 for m in (e.modulos or []))
+        pagos_modulos = sum(m.monto_pagado or 0.0 for m in (e.modulos or []))
+        saldo = max(0, costo_modulos - pagos_modulos)  # cap a 0 (no negativo)
         por_cobrar += saldo
         if saldo > 0.01:
             cobros_pendientes += 1
