@@ -34,7 +34,7 @@ async def read_students(
     students, total_count = await student_service.get_students(
         page=page, per_page=per_page, q=q, activo=activo, estado_titulo=estado_titulo, curso_id=curso_id
     )
-    
+
     total_pages = math.ceil(total_count / per_page) if total_count > 0 else 0
     return {
         "data": students,
@@ -43,6 +43,63 @@ async def read_students(
             hasNextPage=(page < total_pages), hasPrevPage=(page > 1)
         )
     }
+
+
+# F-HISTORICO-EXCEL-BATCH-LOOKUP (2026-08-04): endpoint batch para
+# buscar multiples carnets en UNA sola query. Antes el modal hacia 1
+# request por carnet (~12s c/u, 62 carnets = 12+ min de timeout).
+# Con este endpoint, 1 sola query MongoDB con $in resuelve todo.
+class BatchLookupRequest(BaseModel):
+    carnets: List[str] = Field(..., min_length=1, max_length=500, description="Lista de carnets a buscar")
+
+
+class BatchLookupItem(BaseModel):
+    carnet: str
+    estudiante_id: Optional[str] = None
+    nombre: Optional[str] = None
+    existe: bool = False
+
+
+@router.post(
+    "/batch-lookup",
+    response_model=List[BatchLookupItem],
+    summary="F-HISTORICO-EXCEL: Buscar multiples carnets en una sola query"
+)
+async def batch_lookup_students(
+    payload: BatchLookupRequest,
+    current_user: User = Depends(require_staff)
+) -> Any:
+    """
+    F-HISTORICO-AUTOSERVICIO-EXCEL (2026-08-04): dado una lista de carnets,
+    devuelve para cada uno si existe en la BD y sus datos basicos. Usado
+    por el modal de Carga Inicial de Estudiantes para no hacer 1 llamada
+    HTTP por carnet.
+    """
+    # Limpiar carnets: trim, eliminar vacios
+    carnets_limpios = [c.strip() for c in payload.carnets if c and c.strip()]
+    if not carnets_limpios:
+        return []
+
+    # 1 sola query MongoDB con $in
+    students = await Student.find({"carnet": {"$in": carnets_limpios}}).to_list()
+
+    # Indexar por carnet para busqueda O(1)
+    by_carnet: dict = {s.carnet: s for s in students if s.carnet}
+
+    # Devolver en el mismo orden que se pidio
+    resultado = []
+    for carnet in carnets_limpios:
+        s = by_carnet.get(carnet)
+        if s:
+            resultado.append(BatchLookupItem(
+                carnet=carnet,
+                estudiante_id=str(s.id),
+                nombre=s.nombre or "",
+                existe=True,
+            ))
+        else:
+            resultado.append(BatchLookupItem(carnet=carnet, existe=False))
+    return resultado
 
 @router.post(
     "/",
