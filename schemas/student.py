@@ -14,9 +14,18 @@ Schemas incluidos:
 
 from datetime import datetime
 from typing import Optional, List
+import re
 from pydantic import BaseModel, Field, EmailStr, field_validator
 from models.enums import Sexo, EstadoCivil, TipoSangre
 from models.base import PyObjectId
+
+# Helper para validar carnets con formato boliviano
+# Acepta carnet puro (8130604) o con sufijo (8099472-1A, 8130604-1J) o float mal exportado (1234567.0)
+_CARNET_RE = re.compile(r'^\d{5,12}([-/][A-Z0-9]{1,3})?$')
+
+def _carnet_valido_boliviano(v: str) -> bool:
+    """True si el carnet tiene formato valido de Bolivia (con o sin sufijo de letra)."""
+    return bool(_CARNET_RE.match(v))
 
 
 class ChangePassword(BaseModel):
@@ -118,8 +127,11 @@ class StudentCreate(BaseModel):
         if v is None:
             return v
         v = str(v).strip()
-        if v and not v.isdigit():
-            raise ValueError('El carnet debe contener solo números.')
+        # Acepta carnet puro (8130604) o con sufijo de letra boliviano (8099472-1A, 8130604-1J)
+        # y carnet float (8130604.0) que algunos Excels exportan mal.
+        # NO acepta letras sueltas o simbolos raros.
+        if v and not (v.isdigit() or _carnet_valido_boliviano(v)):
+            raise ValueError('El carnet debe contener solo numeros (admite sufijo tipo 1234567-1A).')
         return v
 
     @field_validator('celular', 'telefono')
