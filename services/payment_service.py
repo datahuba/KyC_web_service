@@ -2262,6 +2262,11 @@ async def get_matriz_por_pago(
             # (queda "—" para todas las filas). Ahora línea 1783 puede resolver
             # el curso desde el primer item del estudiante.
             "curso_id": str(p.curso_id) if p.curso_id else None,
+            # R35-FASE2-RECONCILIATION (2026-08-05): expone el flag origen para
+            # que la UI pueda identificar pagos sinteticos (los de la
+            # reconciliacion post-restore) y mostrarlos con un badge o color
+            # distinto. None = pago real, 'reconciliacion_*' = pago sintetico.
+            "origen": p.origen,
         }
         pagos_por_est[p.estudiante_id].append(item)
 
