@@ -6,7 +6,7 @@ Define los schemas Pydantic para operaciones CRUD de pagos.
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict
 from pydantic import BaseModel, Field
 from models.enums import EstadoPago
 from models.base import PyObjectId
@@ -75,7 +75,26 @@ class PaymentCreate(BaseModel):
         None,
         description="Monto del pago (igual al monto_comprobante)"
     )
-    
+
+    # F-SYNC-PAGOS-MODULOS (2026-08-04, Kevin): sincronizar el endpoint de pagos
+    # con la logica del modal de carga inicial. Si viene este dict, el backend
+    # aplica los pagos directo a los modulos (en vez de prorratear en cascada
+    # con get_next_pending_payment). Llave = indice del modulo (0-based string),
+    # valor = monto a aplicar a ese modulo.
+    # Ej: {"0": 294, "1": 294} = paga modulo 1 y 2 completos.
+    pagos_modulos: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Dict {modulo_index_str: monto_pagado}. Si viene, se aplica directo a los modulos en vez de prorratear."
+    )
+
+    # F-SYNC-PAGOS-MODULOS (2026-08-04, Kevin): detalle desglosado por modulo.
+    # Ej: "Módulo 1: Bs 294, Módulo 2: Bs 294". Se genera automaticamente si
+    # el caller envio pagos_modulos.
+    detalle: Optional[str] = Field(
+        default=None,
+        description="Detalle desglosado del pago. Ej: 'Módulo 1: Bs 294, Módulo 2: Bs 294'."
+    )
+
     comprobante_url: Optional[str] = Field(
         None,
         description="URL del comprobante/voucher. Nulo si el pago fue en Caja."

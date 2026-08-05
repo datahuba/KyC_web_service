@@ -9,6 +9,7 @@ rollback financiero y control de Caja/Bancos.
 
 from typing import List, Any, Optional, Union
 import asyncio
+import json
 import re
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, status
@@ -51,7 +52,7 @@ async def create_payment(
     metodo_pago: str = Form(default="Transferencia", description="Transferencia, Depósito o Caja"),
     monto_comprobante: float = Form(...),
     concepto: Optional[str] = Form(None),
-    
+
     # Datos opcionales según el método de pago
     numero_transaccion: Optional[str] = Form(None),
     remitente: Optional[str] = Form(None),
@@ -63,6 +64,18 @@ async def create_payment(
     # caja o todo lo demas". El comprobante es OBLIGATORIO para todos los
     # metodos, incluyendo Caja.
     file: UploadFile = File(..., description="Comprobante obligatorio (imagen o PDF)"),
+
+    # F-SYNC-PAGOS-MODULOS (2026-08-04, Kevin): sincronizar con la logica
+    # del modal CargaInicialModal. Si viene, se aplica directo a los modulos
+    # en vez de prorratear. Formato JSON: '{"2": 294}' = paga modulo 3 (Bs 294).
+    pagos_modulos_json: Optional[str] = Form(
+        default=None,
+        description='JSON con Dict[str, float]. Ej: \'{"2": 294}\' = paga modulo 3.'
+    ),
+    detalle: Optional[str] = Form(
+        default=None,
+        description="Detalle desglosado del pago (opcional, se genera auto si vienen pagos_modulos)."
+    ),
 
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
@@ -110,6 +123,17 @@ async def create_payment(
                 )
         
         # 3. Ensamblaje del Payload Relajado
+        # F-SYNC-PAGOS-MODULOS (2026-08-04, Kevin): parsear pagos_modulos_json
+        # si viene (formato JSON string). Si no, queda None.
+        pagos_modulos_dict = None
+        if pagos_modulos_json:
+            try:
+                pagos_modulos_dict = json.loads(pagos_modulos_json)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"pagos_modulos_json invalido (debe ser JSON valido): {e}"
+                )
         payment_in = PaymentCreate(
             inscripcion_id=inscripcion_id,
             metodo_pago=metodo_pago,
@@ -121,7 +145,9 @@ async def create_payment(
             banco=banco,
             fecha_comprobante=fecha_comprobante,
             cuenta_destino=cuenta_destino,
-            comprobante_url=comprobante_url
+            comprobante_url=comprobante_url,
+            pagos_modulos=pagos_modulos_dict,
+            detalle=detalle,
         )
         
         if is_staff:
@@ -260,7 +286,7 @@ async def create_payment_by_staff(
         fecha_comprobante=fecha_comprobante,
         cuenta_destino=cuenta_destino,
         comprobante_url=comprobante_url,
-    )
+    )  # /payments/by-staff ya no soporta pagos_modulos (no es Form-friendly); se usa /payments/ con pagos_modulos_json.
 
     try:
         # F-COBRANZA-017: el pago se crea APROBADO al registrarlo desde

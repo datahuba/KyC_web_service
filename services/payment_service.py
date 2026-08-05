@@ -515,6 +515,59 @@ async def create_payment(
 
     monto_real = payment_in.monto_comprobante if payment_in.monto_comprobante else payment_in.cantidad_pago
 
+    # F-SYNC-PAGOS-MODULOS (2026-08-04, Kevin): si el frontend envia pagos_modulos,
+    # aplicar directo a los modulos (no usar cascada automatica). Esto sincroniza
+    # el endpoint /payments/ con la logica del modal CargaInicialModal.
+    # Caso de uso: el estudiante o cobranza quiere pagar un modulo especifico
+    # sin pasar por la cascada de "siguiente cuota pendiente".
+    pagos_modulos_aplicados = False
+    modulos_cubiertos_nombres: list = []
+    if payment_in.pagos_modulos and enrollment.modulos:
+        pagos_modulos_aplicados = True
+        for idx_str, monto in payment_in.pagos_modulos.items():
+            try:
+                idx = int(idx_str)
+            except (ValueError, TypeError):
+                continue
+            if 0 <= idx < len(enrollment.modulos):
+                mod = enrollment.modulos[idx]
+                monto_aplicar = float(monto or 0.0)
+                nuevo_pagado = (mod.monto_pagado or 0.0) + monto_aplicar
+                if mod.costo and nuevo_pagado > mod.costo + 0.01:
+                    monto_aplicar = max(0.0, mod.costo - (mod.monto_pagado or 0.0))
+                    nuevo_pagado = mod.costo
+                mod.monto_pagado = nuevo_pagado
+                if mod.costo and nuevo_pagado >= mod.costo - 0.01:
+                    mod.estado = "Pagado"
+                elif nuevo_pagado > 0:
+                    mod.estado = "Parcial"
+                modulos_cubiertos_nombres.append(mod.nombre)
+        # Recalcular total_pagado del enrollment desde los modulos
+        total_pagado_de_modulos = sum(
+            (m.monto_pagado or 0.0) for m in (enrollment.modulos or [])
+        )
+        if total_pagado_de_modulos > enrollment.total_pagado:
+            diferencia = total_pagado_de_modulos - enrollment.total_pagado
+            enrollment.actualizar_saldo(diferencia)
+        # Si paga todo, sacar de PENDIENTE_PAGO
+        if (
+            enrollment.estado == EstadoInscripcion.PENDIENTE_PAGO.value
+            and enrollment.esta_completamente_pagado()
+        ):
+            enrollment.estado = EstadoInscripcion.ACTIVO.value
+        await enrollment.save()
+        # Sobrescribir el concepto con uno especifico de los modulos
+        if modulos_cubiertos_nombres:
+            if len(modulos_cubiertos_nombres) == 1:
+                payment_in.concepto = f"Pago {modulos_cubiertos_nombres[0]}"
+            else:
+                payment_in.concepto = "Pago " + ", ".join(modulos_cubiertos_nombres)
+        payment_in.detalle = ", ".join(
+            f"{modulos_cubiertos_nombres[i]}: Bs {payment_in.pagos_modulos[str(i)]}"
+            for i in range(len(modulos_cubiertos_nombres))
+            if str(i) in payment_in.pagos_modulos
+        ) if modulos_cubiertos_nombres else None
+
     # F-COBRANZA-015 (2026-07-21): generar glosa DETALLADA por módulo(s) en vez
     # de "Cuota N" genérico. Joel: "los pagos deben ser detallados, tipo
     # 'Pago Módulo 1' o 'Módulo 1, 2, 3'". Previsualizamos el cascading para
@@ -524,7 +577,7 @@ async def create_payment(
     # del PaymentForm.svelte: "Matrícula" o "Módulo"), lo sobrescribimos con
     # la glosa detallada calculada. Si el usuario forzó un concepto específico
     # (caso de "Caja" o un valor distinto a los genéricos), lo respetamos.
-    if payment_in.concepto and not _es_concepto_generico_placeholder(payment_in.concepto):
+    if (payment_in.concepto and not _es_concepto_generico_placeholder(payment_in.concepto)) or pagos_modulos_aplicados:
         # El usuario forzó un concepto específico (caso "Caja", carga manual)
         concepto_final = payment_in.concepto
         detalle_final = None  # F-COBRANZA-034 (2026-07-22): inicializar para que no explote
@@ -550,7 +603,7 @@ async def create_payment(
     # límite -- "Pagado > Total" quedaba permanente sin ningún mecanismo de
     # crédito/devolución. Se permite un pequeño margen (1 Bs) para redondeos
     # legítimos del estudiante.
-    if monto_real > enrollment.saldo_pendiente + 1.0:
+    if not pagos_modulos_aplicados and monto_real > enrollment.saldo_pendiente + 1.0:
         raise ValueError(
             f"El monto reportado (Bs. {monto_real}) supera el saldo pendiente de la inscripción "
             f"(Bs. {enrollment.saldo_pendiente}). Verifica el monto antes de registrar el pago."
@@ -563,7 +616,10 @@ async def create_payment(
 
         metodo_pago=payment_in.metodo_pago,
         concepto=concepto_final,
-        detalle=detalle_final,  # F-COBRANZA-020: desglose separado del concepto
+        # F-SYNC-PAGOS-MODULOS (2026-08-04, Kevin): si el caller envio
+        # pagos_modulos, sobrescribimos el detalle con el desglose por modulo.
+        # Si no, usamos el detalle generado por la cascada automatica.
+        detalle=payment_in.detalle if pagos_modulos_aplicados else detalle_final,
         cantidad_pago=monto_real,
         numero_cuota=cuota_final,
 
