@@ -227,6 +227,15 @@ class Course(MongoBaseModel):
         description="Override manual del estado (F-080). Si está definido y es válido, tiene prioridad sobre el cálculo por fechas. Útil para suspensiones o extensiones manuales."
     )
 
+    # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): estado calculado
+    # en runtime segun fechas/override. Se persiste (no es un @property)
+    # porque Beanie/Pydantic v2 no permite setear atributos dinamicos
+    # que no esten en el schema. El endpoint lo popula antes de retornar.
+    estado_calculado: Optional[str] = Field(
+        default=None,
+        description="F-CREAR-PROGRAMA-EN-EJECUCION: estado calculado por fechas+override. Populado por el endpoint antes de retornar."
+    )
+
     resolucion_pdf_url: Optional[str] = Field(
         default=None,
         description="URL del PDF de la resolución que respalda el programa (F-080)."
