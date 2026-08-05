@@ -383,7 +383,11 @@ async def post_initial_enrollments(
     fallidos = 0
     resultados: List[InitialEnrollmentResultado] = []
 
-    for item in payload.estudiantes:
+    # F-HISTORICO-EXCEL-PARALLEL (2026-08-04): procesar items en paralelo
+    # con asyncio.gather y un semaforo para no saturar la BD. El loop
+    # serial anterior tomaba ~2s por item, total 62 items = 2 min = timeout.
+    # Con gather (sem=5), el total se reduce a ~25s para 62 items.
+    async def procesar_item(item: InitialEnrollmentItem) -> InitialEnrollmentResultado:
         est_id_str = item.estudiante_id
         try:
             student = student_map.get(est_id_str)
@@ -447,14 +451,12 @@ async def post_initial_enrollments(
                     elif total_pagos_a_aplicar > 0:
                         existing.actualizar_saldo(total_pagos_a_aplicar)
                     await existing.save()
-                ya_inscritos_count += 1
-                resultados.append(InitialEnrollmentResultado(
+                return InitialEnrollmentResultado(
                     estudiante_id=est_id_str,
                     success=True,
                     message="Ya estaba inscrito; se actualizaron pagos" if actualizado else "Ya esta inscrito en este curso",
                     enrollment_id=str(existing.id),
-                ))
-                continue
+                )
 
             # Crear la inscripcion (carga inicial, bypasea validaciones de
             # acepta_inscripciones porque es una operacion administrativa)
@@ -490,8 +492,6 @@ async def post_initial_enrollments(
                     )
             # F-HISTORICO-AUTOSERVICIO-EXCEL (2026-08-04): aplicar pagos por
             # modulo del Excel del CPD. Dict {modulo_index_str: monto_pagado}.
-            # Se actualiza monto_pagado y estado (Pagado si cubre el costo,
-            # Parcial si no). NO sobreescribe pagos mayores ya registrados.
             total_pagos_a_aplicar = 0.0
             if item.pagos_modulos and enrollment.modulos:
                 for idx_str, monto in item.pagos_modulos.items():
@@ -501,28 +501,18 @@ async def post_initial_enrollments(
                         continue
                     if 0 <= idx < len(enrollment.modulos):
                         mod = enrollment.modulos[idx]
-                        # Acumular (no sobreescribir): si Excel dice 294 pero
-                        # ya habia 100, queda 394 (cap al costo)
                         monto_aplicar = float(monto or 0.0)
                         nuevo_pagado = (mod.monto_pagado or 0.0) + monto_aplicar
                         if mod.costo and nuevo_pagado > mod.costo + 0.01:
-                            # Si se pasa del costo, el excedente se registra como
-                            # pago pero solo contamos hasta el costo para
-                            # actualizar total_pagado (evita inflar la deuda)
                             monto_aplicar = max(0.0, mod.costo - (mod.monto_pagado or 0.0))
                             nuevo_pagado = mod.costo
                         mod.monto_pagado = nuevo_pagado
-                        # Estado segun cobertura
                         if mod.costo and nuevo_pagado >= mod.costo - 0.01:
                             mod.estado = "Pagado"
                         elif nuevo_pagado > 0:
                             mod.estado = "Parcial"
                         total_pagos_a_aplicar += monto_aplicar
-            # F-HISTORICO-EXCEL-TOTAL-PAGADO (2026-08-04): CRITICO. Si solo
-            # actualizamos modulos[i].monto_pagado sin tocar enrollment.total_pagado,
-            # la UI (courseService.get_course_students) sigue mostrando
-            # total_pagado=0 y saldo_pendiente=total_a_pagar. Hay que recalcular
-            # el total a partir de los modulos y llamar actualizar_saldo().
+            # F-HISTORICO-EXCEL-TOTAL-PAGADO (2026-08-04): recalcular total.
             total_pagado_de_modulos = sum(
                 (m.monto_pagado or 0.0) for m in (enrollment.modulos or [])
             )
@@ -541,27 +531,56 @@ async def post_initial_enrollments(
                 course.inscritos.append(student.id)
                 await course.save()
 
-            exitosos += 1
-            resultados.append(InitialEnrollmentResultado(
+            return InitialEnrollmentResultado(
                 estudiante_id=est_id_str,
                 success=True,
                 message="Inscripcion creada como carga inicial",
                 enrollment_id=str(enrollment.id),
-            ))
+            )
         except ValueError as e:
-            fallidos += 1
-            resultados.append(InitialEnrollmentResultado(
+            return InitialEnrollmentResultado(
                 estudiante_id=est_id_str,
                 success=False,
                 message=str(e),
-            ))
+            )
         except Exception as e:
-            fallidos += 1
-            resultados.append(InitialEnrollmentResultado(
+            return InitialEnrollmentResultado(
                 estudiante_id=est_id_str,
                 success=False,
                 message=f"Error inesperado: {str(e)}",
+            )
+
+    # Procesar items con semaforo para no saturar la BD
+    SEM = 5
+    sem = asyncio.Semaphore(SEM)
+
+    async def procesar_con_semaforo(item: InitialEnrollmentItem) -> InitialEnrollmentResultado:
+        async with sem:
+            return await procesar_item(item)
+
+    # asyncio.gather con return_exceptions=True para que un fallo no aborte los demas
+    tasks = [procesar_con_semaforo(item) for item in payload.estudiantes]
+    results_raw = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for r in results_raw:
+        if isinstance(r, Exception):
+            fallidos += 1
+            resultados.append(InitialEnrollmentResultado(
+                estudiante_id="?",
+                success=False,
+                message=f"Error inesperado: {str(r)}",
             ))
+            continue
+        resultados.append(r)
+        if r.success:
+            if "actualizaron pagos" in (r.message or ""):
+                exitosos += 1
+            elif "ya esta inscrito" in (r.message or "").lower() or "ya estaba inscrito" in (r.message or "").lower():
+                ya_inscritos_count += 1
+            else:
+                exitosos += 1
+        else:
+            fallidos += 1
 
     return InitialEnrollmentResponse(
         total_solicitados=len(payload.estudiantes),
