@@ -248,6 +248,9 @@ class EnrollmentInfo(BaseModel):
     id: PyObjectId
     fecha_inscripcion: datetime
     estado: EstadoInscripcion
+    # F-HISTORICO-EXCEL-ESTADO (2026-08-04): exponer matricula_pagada
+    # para que el frontend pueda mostrar el badge correcto en la UI.
+    matricula_pagada: bool = False
 
 class FinancialInfo(BaseModel):
     total_a_pagar: float

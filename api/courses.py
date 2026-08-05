@@ -450,6 +450,13 @@ async def post_initial_enrollments(
                         existing.actualizar_saldo(diferencia)
                     elif total_pagos_a_aplicar > 0:
                         existing.actualizar_saldo(total_pagos_a_aplicar)
+                    # F-HISTORICO-EXCEL-ESTADO (2026-08-04): si ya pago todo,
+                    # pasar de PENDIENTE_PAGO a ACTIVO.
+                    if (
+                        existing.estado == EstadoInscripcion.PENDIENTE_PAGO.value
+                        and existing.esta_completamente_pagado()
+                    ):
+                        existing.estado = EstadoInscripcion.ACTIVO.value
                     await existing.save()
                 return InitialEnrollmentResultado(
                     estudiante_id=est_id_str,
@@ -521,6 +528,14 @@ async def post_initial_enrollments(
                 enrollment.actualizar_saldo(diferencia)
             elif total_pagos_a_aplicar > 0:
                 enrollment.actualizar_saldo(total_pagos_a_aplicar)
+            # F-HISTORICO-EXCEL-ESTADO (2026-08-04): si ya pago todo, sacar
+            # del estado PENDIENTE_PAGO. La UI muestra el badge de la
+            # matricula con enrollment.estado, no con matricula_pagada.
+            if (
+                enrollment.estado == EstadoInscripcion.PENDIENTE_PAGO.value
+                and enrollment.esta_completamente_pagado()
+            ):
+                enrollment.estado = EstadoInscripcion.ACTIVO.value
             await enrollment.save()
 
             # Batch update de referencias cruzadas

@@ -226,7 +226,12 @@ async def get_course_students(course_id: PydanticObjectId) -> List[CourseEnrolle
             inscripcion={
                 "id": enrollment.id,
                 "fecha_inscripcion": enrollment.fecha_inscripcion,
-                "estado": enrollment.estado
+                "estado": enrollment.estado,
+                # F-HISTORICO-EXCEL-ESTADO (2026-08-04): exponer el flag
+                # matricula_pagada para que el frontend pueda mostrar el
+                # badge correcto cuando la UI del modal 'Estudiantes
+                # Inscritos' lo necesite.
+                "matricula_pagada": enrollment.matricula_pagada,
             },
             financiero={
                 "total_a_pagar": enrollment.total_a_pagar,
