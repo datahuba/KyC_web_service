@@ -562,11 +562,22 @@ async def create_payment(
                 payment_in.concepto = f"Pago {modulos_cubiertos_nombres[0]}"
             else:
                 payment_in.concepto = "Pago " + ", ".join(modulos_cubiertos_nombres)
-        payment_in.detalle = ", ".join(
-            f"{modulos_cubiertos_nombres[i]}: Bs {payment_in.pagos_modulos[str(i)]}"
-            for i in range(len(modulos_cubiertos_nombres))
-            if str(i) in payment_in.pagos_modulos
-        ) if modulos_cubiertos_nombres else None
+        # F-SYNC-PAGOS-MODULOS: generar detalle desglosado.
+        # Recorremos los modulos pagados con su idx original (key del dict).
+        if modulos_cubiertos_nombres:
+            partes_detalle = []
+            for idx_str, monto in payment_in.pagos_modulos.items():
+                try:
+                    idx = int(idx_str)
+                except (ValueError, TypeError):
+                    continue
+                if 0 <= idx < len(enrollment.modulos):
+                    partes_detalle.append(
+                        f"{enrollment.modulos[idx].nombre}: Bs {monto}"
+                    )
+            payment_in.detalle = ", ".join(partes_detalle) if partes_detalle else None
+        else:
+            payment_in.detalle = None
 
     # F-COBRANZA-015 (2026-07-21): generar glosa DETALLADA por módulo(s) en vez
     # de "Cuota N" genérico. Joel: "los pagos deben ser detallados, tipo
