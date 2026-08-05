@@ -203,6 +203,17 @@ async def create_payment_by_staff(
     estudiante_id: str = Form(..., description="ID del estudiante (para asociar el comprobante en Cloudinary)"),
     metodo_pago: str = Form(default="Transferencia", description="Transferencia, Depósito o Caja"),
     monto_comprobante: float = Form(..., gt=0, description="Monto del pago en BOB (>0)"),
+    # F-SYNC-PAGOS-MODULOS (2026-08-04, Kevin): sincronizar /payments/by-staff
+    # con la logica de modulo especifico. Si viene, se aplica directo a los
+    # modulos en vez de prorratear. Mismo formato que /payments/ (JSON string).
+    pagos_modulos_json: Optional[str] = Form(
+        default=None,
+        description='JSON Dict[str, float]. Ej: \'{"2": 294}\' = paga modulo 3 con Bs 294.'
+    ),
+    detalle: Optional[str] = Form(
+        default=None,
+        description="Detalle desglosado del pago (opcional, se genera auto si vienen pagos_modulos)."
+    ),
     concepto: Optional[str] = Form(None, description="Concepto (opcional; si vacío, backend calcula glosa detallada)"),
 
     numero_transaccion: Optional[str] = Form(None),
@@ -286,7 +297,12 @@ async def create_payment_by_staff(
         fecha_comprobante=fecha_comprobante,
         cuenta_destino=cuenta_destino,
         comprobante_url=comprobante_url,
-    )  # /payments/by-staff ya no soporta pagos_modulos (no es Form-friendly); se usa /payments/ con pagos_modulos_json.
+        # F-SYNC-PAGOS-MODULOS (2026-08-04, Kevin): parsear pagos_modulos_json
+        # para aplicar el pago a un modulo especifico. Si no viene, usa
+        # la cascada automatica (proximo modulo pendiente).
+        pagos_modulos=json.loads(pagos_modulos_json) if pagos_modulos_json else None,
+        detalle=detalle,
+    )
 
     try:
         # F-COBRANZA-017: el pago se crea APROBADO al registrarlo desde
