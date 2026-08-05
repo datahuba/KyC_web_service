@@ -22,6 +22,27 @@ class ModuloEstado(BaseModel):
     """
     Copia del módulo del curso para este estudiante específico.
     Lleva el control financiero (pagos) y académico (notas) del módulo.
+
+    F-MAESTRIA-EN-EJECUCION (2026-08-05, Kevin): agregado campo
+    `estado_operacional` que distingue entre el estado FINANCIERO
+    (`estado`: Pendiente/Parcial/Pagado) y el estado OPERACIONAL del
+    modulo en el cronograma del programa:
+    - Pendiente: modulo no se ha iniciado todavia
+    - En Ejecucion: modulo actualmente en curso (este es el "momento actual")
+    - Ejecutado: modulo ya finalizo
+
+    Mientras `estado` se calcula automaticamente desde los pagos,
+    `estado_operacional` lo define MANUALMENTE el admin/encargado del
+    programa (boton en el form del curso). Esto permite representar
+    la realidad: un modulo puede estar "Pagado" pero aun no haberse
+    dictado (estado_operacional=Pendiente), o estar "Pendiente" pero
+    ya haberse dictado (estado_operacional=Ejecutado, deuda pendiente).
+
+    Si el campo no se setea explicitamente, se puede derivar de
+    `iniciado_en` y `finalizado_en`:
+    - ambos None -> Pendiente
+    - solo iniciado_en -> En Ejecucion
+    - ambos -> Ejecutado
     """
     nombre: str = Field(..., description="Nombre del módulo (Ej: Módulo 1)")
     
@@ -29,6 +50,15 @@ class ModuloEstado(BaseModel):
     costo: float = Field(..., ge=0, description="Costo que debe pagar por este módulo")
     estado: str = Field(default="Pendiente", description="Puede ser: Pendiente, Parcial, Pagado")
     monto_pagado: float = Field(default=0.0, ge=0, description="Cuánto ha pagado de este módulo")
+
+    # F-MAESTRIA-EN-EJECUCION (2026-08-05, Kevin): estado operacional
+    # del modulo en el cronograma del programa. Mientras `estado`
+    # refleja el pago, `estado_operacional` refleja SI el modulo ya
+    # se dio o se esta dando. Default 'Pendiente' (no se ha iniciado).
+    estado_operacional: str = Field(
+        default="Pendiente",
+        description="Estado operacional: 'Pendiente' | 'En Ejecucion' | 'Ejecutado'. Define si el modulo se esta dando, ya se dio, o falta."
+    )
     
     # --- Control Académico (ISSUE P) ---
     nota: Optional[float] = Field(default=None, ge=0, le=100, description="Calificación obtenida en el módulo (0-100)")
