@@ -891,8 +891,49 @@ async def actualizar_nota_modulo(
         # No modifica ni elimina ningún registro de Payment.
         await actualizar_saldo_enrollment(enrollment_id)
         enrollment = await Enrollment.get(enrollment_id)
-    
+
     return enrollment
+
+
+# ========================================================================
+# F-FIX-DESCUENTO-ITEM (2026-08-05, Kevin): helper para recalcular el
+# total_a_pagar de un enrollment YA EXISTENTE al cual se le acaba de
+# asignar un descuento (individual o del curso). Aplica la logica MAX
+# (max entre descuento del curso y descuento personal) y redistribuye
+# el costo entre los modulos proporcionalmente.
+#
+# Usado por /courses/{id}/initial-enrollments cuando el item trae
+# descuento_id o descuento_personalizado y el estudiante ya estaba
+# inscrito (rama "existing").
+# ========================================================================
+async def _recalcular_total_enrollment(enrollment: Enrollment, course: Course) -> None:
+    """Recalcula total_a_pagar + redistribuye costo entre modulos con la logica MAX."""
+    desc_curso = float(enrollment.descuento_curso_aplicado or 0)
+    desc_personal = float(enrollment.descuento_personalizado or 0) if enrollment.descuento_personalizado is not None else 0.0
+    # F-LOGICA-DESCUENTOS-MAX: el estudiante se queda con el descuento
+    # de mayor porcentaje. Si personal > curso, gana personal. Si no,
+    # gana el curso.
+    descuento_efectivo = max(desc_curso, desc_personal)
+    colegiatura_final = enrollment.costo_total - (enrollment.costo_total * descuento_efectivo / 100)
+    cargo_adicional = enrollment.get_cargo_adicional_total()
+    total_final = colegiatura_final + enrollment.costo_matricula + cargo_adicional
+    # Redistribuir el costo entre los modulos proporcionalmente
+    if enrollment.modulos:
+        suma_costo_modulos = sum(m.costo for m in course.modulos)
+        total_asignado = 0.0
+        for i, mod in enumerate(enrollment.modulos):
+            es_ultimo = i == len(enrollment.modulos) - 1
+            if es_ultimo:
+                mod.costo = max(0.0, round(colegiatura_final - total_asignado, 2))
+            else:
+                if suma_costo_modulos > 0:
+                    proporcion = course.modulos[i].costo / suma_costo_modulos
+                else:
+                    proporcion = 1.0 / len(enrollment.modulos)
+                mod.costo = round(proporcion * colegiatura_final, 2)
+                total_asignado += mod.costo
+    enrollment.total_a_pagar = round(total_final, 2)
+    enrollment.saldo_pendiente = round(max(0.0, enrollment.total_a_pagar - enrollment.total_pagado), 2)
 
 
 # ========================================================================

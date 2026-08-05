@@ -292,6 +292,19 @@ class InitialEnrollmentItem(BaseModel):
         default=None,
         description="Dict {modulo_index_str: monto_pagado} del Excel del CPD. Ej: {'0': 294, '1': 294}."
     )
+    # F-FIX-DESCUENTO-ITEM (2026-08-05, Kevin): el item puede traer el descuento
+    # individual del estudiante. Esto permite re-aplicar el descuento del 50%
+    # institucional a los 64 inscritos sin tener que borrar y re-cargar.
+    # Si el item NO trae descuento, el backend usa el descuento del CURSO.
+    descuento_id: Optional[str] = Field(
+        None,
+        description="ID del descuento individual del estudiante (PydanticObjectId). Si se pasa, se aplica al enrollment."
+    )
+    descuento_personalizado: Optional[float] = Field(
+        None,
+        ge=0, le=100,
+        description="Porcentaje de descuento personalizado (0-100). Se usa si no hay descuento_id."
+    )
 
 
 class InitialEnrollmentRequest(BaseModel):
@@ -416,10 +429,48 @@ async def post_initial_enrollments(
                 # Razon: los modulos pueden ya estar Pagado (de intentos
                 # anteriores que no actualizaron total_pagado), pero igual
                 # necesitamos recalcular el total del enrollment.
+                # F-FIX-DESCUENTO-ITEM (2026-08-05, Kevin): ademas actualizar
+                # el descuento individual del estudiante si el item lo trae.
                 actualizado = False
                 if item.matricula_pagada and not existing.matricula_pagada:
                     existing.matricula_pagada = True
                     actualizado = True
+                # F-FIX-MATRICULA-TOTAL-PAGADO (2026-08-05, Kevin): si la matricula
+                # vale > 0 y el item dice que ya esta pagada, sumar el costo
+                # de la matricula al total_pagado. Antes solo se seteaba el flag
+                # sin actualizar el saldo, dejando el estado en PENDIENTE_PAGO.
+                if (
+                    item.matricula_pagada
+                    and (existing.costo_matricula or 0) > 0
+                    and (existing.matricula_pagada or False)
+                ):
+                    # Sumar la matricula al total_pagado si no estaba ya sumado
+                    if (existing.total_pagado or 0) < (existing.costo_matricula or 0):
+                        existing.actualizar_saldo(existing.costo_matricula)
+                        actualizado = True
+                # F-FIX-DESCUENTO-ITEM: actualizar descuento individual si viene
+                if item.descuento_id is not None or item.descuento_personalizado is not None:
+                    if item.descuento_id:
+                        try:
+                            disc = await Discount.get(PydanticObjectId(item.descuento_id))
+                            if disc and disc.activo:
+                                existing.descuento_estudiante_id = disc.id
+                                existing.descuento_personalizado = float(disc.porcentaje)
+                                actualizado = True
+                        except Exception:
+                            pass
+                    elif item.descuento_personalizado is not None:
+                        existing.descuento_estudiante_id = None
+                        existing.descuento_personalizado = float(item.descuento_personalizado)
+                        actualizado = True
+                    # Recalcular el total_a_pagar con la nueva logica MAX
+                    from services.enrollment_service import _recalcular_total_enrollment
+                    try:
+                        _recalcular_total_enrollment(existing, course)
+                        actualizado = True
+                    except Exception as e:
+                        # Si falla, no romper
+                        pass
                 total_pagos_a_aplicar = 0.0
                 if item.pagos_modulos and existing.modulos:
                     for idx_str, monto in item.pagos_modulos.items():
@@ -456,6 +507,16 @@ async def post_initial_enrollments(
                         existing.actualizar_saldo(diferencia)
                     elif total_pagos_a_aplicar > 0:
                         existing.actualizar_saldo(total_pagos_a_aplicar)
+                    # F-FIX-MATRICULA: si matricula_pagada=True y no hay modulos
+                    # (programa historico SIN modulos), pasar a ACTIVO
+                    if (
+                        existing.matricula_pagada
+                        and (existing.costo_matricula or 0) > 0
+                        and (existing.costo_matricula or 0) >= (existing.total_pagado or 0)
+                    ):
+                        # La matricula cubre el total
+                        if existing.estado == EstadoInscripcion.PENDIENTE_PAGO.value:
+                            existing.estado = EstadoInscripcion.ACTIVO.value
                     # F-HISTORICO-EXCEL-ESTADO (2026-08-04): si ya pago todo,
                     # pasar de PENDIENTE_PAGO a ACTIVO.
                     if (
@@ -490,6 +551,27 @@ async def post_initial_enrollments(
             # Si es historico o si el item lo pide, marcar matricula como pagada
             if es_historico or item.matricula_pagada:
                 enrollment.matricula_pagada = True
+            # F-FIX-DESCUENTO-ITEM (2026-08-05, Kevin): aplicar descuento
+            # individual del item al enrollment nuevo. Si el item NO trae
+            # descuento, el create_enrollment ya leyo el descuento del CURSO.
+            if item.descuento_id is not None or item.descuento_personalizado is not None:
+                if item.descuento_id:
+                    try:
+                        disc = await Discount.get(PydanticObjectId(item.descuento_id))
+                        if disc and disc.activo:
+                            enrollment.descuento_estudiante_id = disc.id
+                            enrollment.descuento_personalizado = float(disc.porcentaje)
+                    except Exception:
+                        pass
+                elif item.descuento_personalizado is not None:
+                    enrollment.descuento_estudiante_id = None
+                    enrollment.descuento_personalizado = float(item.descuento_personalizado)
+                # Recalcular total_a_pagar con la logica MAX
+                from services.enrollment_service import _recalcular_total_enrollment
+                try:
+                    _recalcular_total_enrollment(enrollment, course)
+                except Exception:
+                    pass
             # Si se especifico modulo inicial (en_ejecucion), marcar ese modulo
             # como "iniciado" para que el dashboard lo muestre en la fase correcta
             if (
