@@ -111,6 +111,15 @@ class EnrollmentResponse(BaseModel):
     # sobre él, quedando la función completamente sin usar.
     requisitos: List[RequisitoResponse] = Field(default_factory=list)
 
+    # F-LOGICA-DESCUENTOS-MAX (2026-08-05, Kevin): campos informativos que
+    # enrich_enrollment_dates() agrega al response de TODOS los endpoints
+    # que devuelven enrollment. El frontend los usa para mostrar el mensaje
+    # "se aplicó el descuento de mayor porcentaje" cuando el personal es
+    # menor al del curso.
+    descuento_efectivo: Optional[float] = None  # % realmente aplicado (max)
+    descuento_efectivo_origen: Optional[str] = None  # 'curso' | 'personal' | 'ninguno'
+    advertencia_descuento: Optional[str] = None  # mensaje si personal < curso
+
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True,
