@@ -159,14 +159,25 @@ async def generar_resumen_cxc(
     cursos = await Course.find({"_id": {"$in": curso_ids}}).to_list()
     curso_map: dict = {c.id: c for c in cursos}
 
-    # US-004 v5 (2026-08-04): filtrar cursos PROGRAMADOS (que aún no inician)
-    # del desglose de CxC. Kevin: "ESTO NO DEBE EXISTIR PORQUE EL PROGRAMA
-    # AÚN NO SE SABE SI VA INICIAR". Los cursos cerrados tampoco se incluyen
-    # (ya terminaron, no se cobra más). Solo se muestran EN_EJECUCION.
+    # F-CXC-EXCLUIR-HISTORICOS (2026-08-04, Kevin): los cursos HISTORICOS
+    # (es_historico=True) NO cuentan para CxC. Esos programas ya terminaron
+    # (son de carga retroactiva/auditoria), no se les cobra nada.
+    # Kevin: "todo curso historico o programa en este caso no debe tomarse
+    # en cuenta para cuentas por cobrar si es que las tienen solamente las
+    # de en ejecucion de modulos ejecutandose y modulos por ejecutarse
+    # como programas por ejecutarse".
+    # En resumen, los que SÍ cuentan para CxC:
+    #   - en_ejecucion: modulos ejecutandose
+    #   - programado:    programas por ejecutarse
+    # Los que NO cuentan:
+    #   - historico:    ya terminaron
+    #   - cerrado:       cancelados/finalizados
     cursos_a_excluir = set()
     for c in cursos:
         estado = c.get_estado_actual() if hasattr(c, "get_estado_actual") else None
-        if estado in ("programado", "cerrado"):
+        es_historico_flag = getattr(c, "es_historico", False)
+        if es_historico_flag or estado == "cerrado":
+            # historicos y cerrados: NO cuentan para CxC
             cursos_a_excluir.add(c.id)
     if cursos_a_excluir:
         enrollments = [e for e in enrollments if e.curso_id not in cursos_a_excluir]

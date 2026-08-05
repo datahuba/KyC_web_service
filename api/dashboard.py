@@ -42,11 +42,25 @@ async def get_dashboard_stats(current_user: User = Depends(require_staff)):
     # Filtramos enrollments cuyo curso_id exista en la coleccion Course.
     cursos_visibles = await Course.find().to_list()
     curso_ids_visibles = [c.id for c in cursos_visibles]
+    # F-CXC-EXCLUIR-HISTORICOS (2026-08-04, Kevin): tambien excluimos los
+    # programas historicos del dashboard. Esos son de carga retroactiva/
+    # auditoria, no se les cobra, no deben contar como "inscritos activos".
+    curso_ids_historicos = {c.id for c in cursos_visibles if getattr(c, "es_historico", False)}
     if curso_ids_visibles:
-        if enrollment_query:
-            enrollment_query["curso_id"] = {"$in": curso_ids_visibles}
+        if enrollment_query and "curso_id" in enrollment_query:
+            # Merge con cursos_asignados si existe (segmentacion)
+            existing = enrollment_query["curso_id"]
+            if isinstance(existing, dict) and "$in" in existing:
+                # Mantener solo cursos visibles Y no historicos
+                enrollment_query["curso_id"]["$in"] = [
+                    cid for cid in existing["$in"] if cid in curso_ids_visibles and cid not in curso_ids_historicos
+                ]
         else:
-            enrollment_query = {"curso_id": {"$in": curso_ids_visibles}}
+            enrollment_query = {"curso_id": {"$in": [cid for cid in curso_ids_visibles if cid not in curso_ids_historicos]}}
+
+    # Tambien excluir historicos del conteo de pagos pendientes? NO:
+    # los pagos ya cobrados de historicos son dinero real (total_ingresos),
+    # deben contar. Solo excluimos los enrollments.
 
     # 3. Enrollments (solo de cursos visibles)
     enrollments_total = await Enrollment.find(enrollment_query).count()

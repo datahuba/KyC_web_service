@@ -1970,6 +1970,10 @@ async def get_matriz_pagos_endpoint(
         ge=0,
         description="Si viene, devuelve solo esa columna de módulo (0=matrícula virtual, 1=Módulo 1, etc.)",
     ),
+    curso_id: Optional[str] = Query(
+        None,
+        description="F-CXC-FILTRO-PROGRAMA: filtrar por un programa específico. None = todos los del alcance del usuario",
+    ),
     current_user: User = Depends(require_staff),
 ) -> Any:
     """
@@ -1984,9 +1988,14 @@ async def get_matriz_pagos_endpoint(
     filtro_rol = filtro_cursos_por_rol(current_user)
     cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
 
+    # F-CXC-FILTRO-PROGRAMA: convertir string a PydanticObjectId
+    from beanie import PydanticObjectId as _POI
+    curso_oid = _POI(curso_id) if curso_id else None
+
     return await payment_service.get_matriz_pagos(
         cursos_permitidos=cursos_permitidos,
         modulo_index=modulo_index,
+        curso_id=curso_oid,
     )
 
 
@@ -2069,6 +2078,10 @@ async def get_matriz_por_pago_endpoint(
     summary="F-074: Resumen por módulo (KPI cards vista Matriz)",
 )
 async def get_resumen_modulos_endpoint(
+    curso_id: Optional[str] = Query(
+        None,
+        description="F-CXC-FILTRO-PROGRAMA: filtrar KPIs por un programa específico. None = todos los del alcance",
+    ),
     current_user: User = Depends(require_staff),
 ) -> Any:
     """
@@ -2081,8 +2094,13 @@ async def get_resumen_modulos_endpoint(
     filtro_rol = filtro_cursos_por_rol(current_user)
     cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
 
+    # F-CXC-FILTRO-PROGRAMA: convertir string a PydanticObjectId
+    from beanie import PydanticObjectId as _POI
+    curso_oid = _POI(curso_id) if curso_id else None
+
     return await payment_service.get_resumen_modulos(
         cursos_permitidos=cursos_permitidos,
+        curso_id=curso_oid,
     )
 
 

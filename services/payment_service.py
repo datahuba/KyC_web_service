@@ -1343,6 +1343,21 @@ async def get_resumen_economico(
         match_pagos["curso_id"] = {"$in": cursos_permitidos}
         match_enroll["curso_id"] = {"$in": cursos_permitidos}
 
+    # F-CXC-EXCLUIR-HISTORICOS (2026-08-04, Kevin): los cursos/programas
+    # historicos NO cuentan para Por Cobrar. Esos ya terminaron, son
+    # de carga retroactiva/auditoria. Solo cuentan los en_ejecucion y
+    # los programados. PERO los ingresos (pagos) SÍ cuentan porque
+    # ya se cobraron (es dinero real). Solo excluimos los ENROLLMENTS
+    # de historicos para que no se sumen a "por_cobrar".
+    cursos = await Course.find({}).to_list()
+    curso_historico_ids = {c.id for c in cursos if getattr(c, "es_historico", False)}
+    if curso_historico_ids:
+        if "curso_id" in match_enroll:
+            # Merge con el filtro de cursos_permitidos si existe
+            match_enroll["curso_id"]["$nin"] = list(curso_historico_ids)
+        else:
+            match_enroll["curso_id"] = {"$nin": list(curso_historico_ids)}
+
     pagos_task = Payment.find(match_pagos).to_list()
     enrollments_task = Enrollment.find(match_enroll).to_list()
     pagos, enrollments = await asyncio.gather(pagos_task, enrollments_task)
@@ -1473,6 +1488,7 @@ async def get_resumen_economico(
 async def get_matriz_pagos(
     cursos_permitidos: Optional[List[PydanticObjectId]] = None,
     modulo_index: Optional[int] = None,
+    curso_id: Optional[PydanticObjectId] = None,
 ) -> dict:
     """
     F-074: devuelve la matriz estudiante-vs-módulos para vista alternativa de
@@ -1534,9 +1550,35 @@ async def get_matriz_pagos(
     if cursos_permitidos is not None:
         match_enroll["curso_id"] = {"$in": cursos_permitidos}
 
+    # F-CXC-FILTRO-PROGRAMA (2026-08-04, Kevin): si el usuario filtra por un
+    # programa especifico en /app/payments, respetamos ese filtro. Se combina
+    # con cursos_permitidos si existe (segmentacion de cobranza).
+    if curso_id is not None:
+        if "curso_id" in match_enroll and isinstance(match_enroll["curso_id"], dict):
+            # Convertir a $in de un solo elemento para mantener la estructura
+            match_enroll["curso_id"]["$in"] = [curso_id]
+        else:
+            match_enroll["curso_id"] = curso_id
+
+    # F-CXC-EXCLUIR-HISTORICOS (2026-08-04, Kevin): los cursos historicos
+    # NO aparecen en la matriz (ya terminaron, son de auditoria).
+    curso_historico_ids = {
+        c.id for c in (await Course.find({}).to_list())
+        if getattr(c, "es_historico", False)
+    }
+
     enrollments_task = Enrollment.find(match_enroll).to_list()
-    courses_task = Course.find({}).to_list()
+    # F-CXC-FILTRO-PROGRAMA: si hay curso_id especifico, NO traer todos los
+    # cursos (optimizacion + consistencia con lo que ve el usuario).
+    if curso_id is not None:
+        courses_task = Course.find({"_id": curso_id}).to_list()
+    else:
+        courses_task = Course.find({}).to_list()
     enrollments, courses = await asyncio.gather(enrollments_task, courses_task)
+
+    # Filtrar enrollments y cursos historicos
+    enrollments = [e for e in enrollments if e.curso_id not in curso_historico_ids]
+    courses = [c for c in courses if c.id not in curso_historico_ids]
 
     courses_map = {c.id: c for c in courses}
     courses_list: list = [
@@ -1853,6 +1895,18 @@ async def get_matriz_deudores(
 
     # 2) Cargar enrollments del curso
     enrollments = await Enrollment.find(Enrollment.curso_id == curso_id).to_list()
+
+    # F-CXC-EXCLUIR-HISTORICOS (2026-08-04, Kevin): si el curso es
+    # historico, devolver vacio (no se cobra nada, es solo auditoria).
+    curso_check = await Course.get(curso_id)
+    if curso_check and getattr(curso_check, "es_historico", False):
+        return {
+            "curso": None,
+            "estudiantes": [],
+            "totales": {"total_por_cobrar": 0, "total_pagado": 0, "estudiantes_pendientes": 0},
+            "filtros_aplicados": {"curso_id": str(curso_id), "curso_historico": True, "solo_deudores": solo_deudores},
+        }
+
     if not enrollments:
         return {
             "curso": {
@@ -2135,6 +2189,18 @@ async def get_matriz_por_pago(
     from models.course import Course
     from models.enrollment import Enrollment
 
+    # F-CXC-EXCLUIR-HISTORICOS (2026-08-04, Kevin): los pagos de cursos
+    # historicos NO cuentan en esta vista de auditoria. Es dinero retroactivo
+    # cargado para tener el expediente completo, no es deuda real a cobrar.
+    cursos_historicos = await Course.find(Course.es_historico == True).to_list()
+    curso_historico_ids = [c.id for c in cursos_historicos]
+    if curso_historico_ids:
+        if "curso_id" in match and isinstance(match["curso_id"], dict) and "$in" in match["curso_id"]:
+            # Merge con cursos_permitidos si existe
+            match["curso_id"]["$nin"] = list(curso_historico_ids)
+        else:
+            match["curso_id"] = {"$nin": list(curso_historico_ids)}
+
     pagos = await Payment.find(match).sort("+fecha_subida").to_list()
 
     # Estudiantes y cursos en batch
@@ -2361,6 +2427,7 @@ def _pago_to_fila(p, estudiante, curso, modulo_index, monto_asignado, concepto, 
 
 async def get_resumen_modulos(
     cursos_permitidos: Optional[List[PydanticObjectId]] = None,
+    curso_id: Optional[PydanticObjectId] = None,
 ) -> dict:
     """
     F-074: resumen por módulo para KPI cards de la vista Matriz.
@@ -2391,6 +2458,35 @@ async def get_resumen_modulos(
     match_enroll: dict = {}
     if cursos_permitidos is not None:
         match_enroll["curso_id"] = {"$in": cursos_permitidos}
+
+    # F-CXC-FILTRO-PROGRAMA (2026-08-04, Kevin): si el usuario filtra por un
+    # programa especifico, las KPI cards (matricula, modulos, por cobrar) se
+    # recalculan SOLO para ese programa.
+    if curso_id is not None:
+        if "curso_id" in match_enroll and isinstance(match_enroll["curso_id"], dict):
+            match_enroll["curso_id"]["$in"] = [curso_id]
+        else:
+            match_enroll["curso_id"] = curso_id
+
+    # F-CXC-EXCLUIR-HISTORICOS (2026-08-04, Kevin): excluir enrollments
+    # de cursos historicos del calculo de pendientes (ya terminaron).
+    cursos = await Course.find({}).to_list()
+    curso_historico_ids = {c.id for c in cursos if getattr(c, "es_historico", False)}
+    if curso_historico_ids:
+        if "curso_id" in match_enroll and isinstance(match_enroll["curso_id"], dict):
+            # Merge con $in (cursos_permitidos o curso_id) y $nin (historicos)
+            ids_in = match_enroll["curso_id"].get("$in", [])
+            match_enroll["curso_id"]["$in"] = [cid for cid in ids_in if cid not in curso_historico_ids]
+            match_enroll["curso_id"]["$nin"] = list(curso_historico_ids)
+        elif "curso_id" in match_enroll:
+            # match_enroll["curso_id"] = PydanticObjectId directo
+            if match_enroll["curso_id"] not in curso_historico_ids:
+                pass  # ok, el curso puntual NO es historico
+            else:
+                # El curso pedido ES historico: no devolver nada
+                match_enroll["curso_id"] = {"$in": []}
+        else:
+            match_enroll["curso_id"] = {"$nin": list(curso_historico_ids)}
 
     enrollments = await Enrollment.find(match_enroll).to_list()
 
