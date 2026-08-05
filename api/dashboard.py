@@ -35,8 +35,20 @@ async def get_dashboard_stats(current_user: User = Depends(require_staff)):
     # 2. Students
     students_total = await Student.find(student_query).count()
     students_active = await Student.find(student_query, Student.activo == True).count()
-    
-    # 3. Enrollments
+
+    # F-R35-DASHBOARD-HUERFANOS (2026-08-04): cuando Kevin elimina un programa
+    # y lo crea de nuevo, los enrollments del curso viejo SIGUEN en la BD
+    # pero el curso ya no existe. Esto inflaba el conteo de inscritos.
+    # Filtramos enrollments cuyo curso_id exista en la coleccion Course.
+    cursos_visibles = await Course.find().to_list()
+    curso_ids_visibles = [c.id for c in cursos_visibles]
+    if curso_ids_visibles:
+        if enrollment_query:
+            enrollment_query["curso_id"] = {"$in": curso_ids_visibles}
+        else:
+            enrollment_query = {"curso_id": {"$in": curso_ids_visibles}}
+
+    # 3. Enrollments (solo de cursos visibles)
     enrollments_total = await Enrollment.find(enrollment_query).count()
     enrollments_active = await Enrollment.find(enrollment_query, Enrollment.estado == "activo").count()
     
