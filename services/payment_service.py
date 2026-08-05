@@ -726,10 +726,36 @@ async def create_payment(
     # por Bs 588 cada uno sin que nadie se enterara hasta que Sandra lo reportó
     # manualmente desde Excel.
     try:
-        await enrollment_service.actualizar_saldo_enrollment(
-            enrollment_id=payment.inscripcion_id,
-            monto_pago_aprobado=payment.cantidad_pago
-        )
+        if pagos_modulos_aplicados:
+            # F-SYNC-PAGOS-MODULOS (2026-08-04, Kevin): si se aplicaron pagos
+            # a modulos especificos, NO llamar a actualizar_saldo_enrollment
+            # porque esa funcion RESETEA todos los modulos a 0 y redistribuye
+            # en cascada, sobrescribiendo los pagos_modulos que acabamos de
+            # aplicar. En su lugar, hacer el recálculo basándose en los
+            # modulos ya actualizados.
+            #
+            # total_pagado = costo_matricula (si matricula_pagada) + sum(modulos.monto_pagado)
+            total_pagado_modulos = sum(m.monto_pagado or 0.0 for m in (enrollment.modulos or []))
+            total_matricula = enrollment.costo_matricula or 0.0
+            if enrollment.matricula_pagada:
+                enrollment.total_pagado = total_matricula + total_pagado_modulos
+            else:
+                enrollment.total_pagado = total_pagado_modulos
+            enrollment.saldo_pendiente = max(
+                0.0, round(enrollment.total_a_pagar - enrollment.total_pagado, 2)
+            )
+            # Evolucion de estado
+            if enrollment.esta_completamente_pagado() and enrollment.matricula_pagada:
+                enrollment.estado = EstadoInscripcion.COMPLETADO
+            elif enrollment.matricula_pagada:
+                enrollment.estado = EstadoInscripcion.ACTIVO
+            enrollment.updated_at = utcnow_naive()
+            await enrollment.save()
+        else:
+            await enrollment_service.actualizar_saldo_enrollment(
+                enrollment_id=payment.inscripcion_id,
+                monto_pago_aprobado=payment.cantidad_pago
+            )
     except Exception as first_error:
         # Retry: 1 intento más por si fue race condition
         try:
