@@ -1,3 +1,4 @@
+import time
 from fastapi import APIRouter, Depends
 from models.user import User
 from models.student import Student
@@ -8,11 +9,52 @@ from api.dependencies import require_staff
 
 router = APIRouter()
 
+# F-PERF-DASHBOARD-CACHE (2026-08-05, Kevin): cache in-memory del response
+# de /dashboard/stats con TTL de 30s. La idea es que el dashboard carga
+# lento porque hace 5+ queries (cursos, enrollments, payments, stats,
+# descuentos, etc). Cacheando el response entero por 30s, el segundo
+# request del mismo usuario tarda < 50ms en vez de 1-3s.
+# Key: (user_id, scope_key). scope_key incluye cursos_asignados +
+# rol + sub_rol, para invalidar el cache cuando el usuario cambia de
+# scope (ej: le asignan un curso nuevo).
+_DASHBOARD_CACHE: dict[str, tuple[float, dict]] = {}
+DASHBOARD_CACHE_TTL = 30  # segundos
+
+def _dashboard_cache_key(user: User) -> str:
+    """Genera una key unica por (usuario, scope). El scope depende de
+    los cursos asignados y el rol; si Kevin le asigna un curso nuevo
+    al usuario, la key cambia y se invalida el cache."""
+    cursos = sorted([str(c) for c in (user.cursos_asignados or [])])
+    return f"{user.id}:{user.rol or ''}:{user.subtipo_coordinador or ''}:{','.join(cursos)}"
+
+def _get_cached_dashboard(user: User) -> dict | None:
+    """Devuelve el dashboard cacheado si existe y no expiro. None si no."""
+    key = _dashboard_cache_key(user)
+    if key not in _DASHBOARD_CACHE:
+        return None
+    ts, data = _DASHBOARD_CACHE[key]
+    if time.time() - ts > DASHBOARD_CACHE_TTL:
+        del _DASHBOARD_CACHE[key]
+        return None
+    return data
+
+def _set_cached_dashboard(user: User, data: dict) -> None:
+    """Guarda el dashboard en cache."""
+    key = _dashboard_cache_key(user)
+    _DASHBOARD_CACHE[key] = (time.time(), data)
+
 @router.get("/stats")
 async def get_dashboard_stats(current_user: User = Depends(require_staff)):
     """
     Get aggregate stats for the admin dashboard.
+    F-PERF-DASHBOARD-CACHE (2026-08-05, Kevin): cache in-memory con TTL
+    de 30s por (user_id, scope). El primer request tarda ~1-3s; los
+    siguientes dentro de los 30s tardan < 50ms (cache hit).
     """
+    # F-PERF-DASHBOARD-CACHE: servir desde cache si existe y no expiro
+    cached = _get_cached_dashboard(current_user)
+    if cached is not None:
+        return cached
     # Base query filters based on user's assigned courses if they are segmented
     course_query = {}
     if current_user.cursos_asignados:
@@ -93,7 +135,7 @@ async def get_dashboard_stats(current_user: User = Depends(require_staff)):
     if revenue_result:
         payments_revenue = revenue_result[0]["total"]
     
-    return {
+    result = {
         "students": {
             "total": students_total,
             "active": students_active
@@ -127,6 +169,12 @@ async def get_dashboard_stats(current_user: User = Depends(require_staff)):
             payment_query=payment_query,
         ),
     }
+    # F-PERF-DASHBOARD-CACHE (2026-08-05, Kevin): cachear el response
+    # para que el siguiente request del mismo usuario (mismo scope)
+    # tarde < 50ms en vez de 1-3s. TTL 30s.
+    _set_cached_dashboard(current_user, result)
+    return result
+
 
 
 async def _build_course_breakdown(
