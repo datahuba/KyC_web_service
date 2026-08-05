@@ -907,7 +907,21 @@ async def actualizar_nota_modulo(
 # inscrito (rama "existing").
 # ========================================================================
 async def _recalcular_total_enrollment(enrollment: Enrollment, course: Course) -> None:
-    """Recalcula total_a_pagar + redistribuye costo entre modulos con la logica MAX."""
+    """Recalcula total_a_pagar + redistribuye costo entre modulos con la logica MAX.
+
+    F-FIX-DESCUENTO-TOTAL-PAGAR (2026-08-05, Kevin): el bug era que
+    `total_a_pagar` se calculaba desde `enrollment.costo_total` (sin
+    descuento) en vez de sumar los `enrollment.modulos[].costo` (que ya
+    estan con el descuento aplicado a cada modulo). Resultado: para
+    estudiantes con 50% de descuento, total_a_pagar quedaba en 3240
+    (2940 modulos + 300 matricula, sin descuento) en vez de 1770
+    (1470 modulos con 50% + 300 matricula). El Por Cobrar del sistema
+    quedaba inflado en ~Bs 11,550 para DIPL-IA-2026 y ~Bs 23,790
+    sumando todos los programas.
+
+    Fix: total_a_pagar = SUM(modulos[].costo) + costo_matricula + cargo_adicional.
+    Si los modulos no tienen costo seteado, los redistribuimos primero
+    desde colegiatura_final (que SI incluye el descuento)."""
     desc_curso = float(enrollment.descuento_curso_aplicado or 0)
     desc_personal = float(enrollment.descuento_personalizado or 0) if enrollment.descuento_personalizado is not None else 0.0
     # F-LOGICA-DESCUENTOS-MAX: el estudiante se queda con el descuento
@@ -916,9 +930,18 @@ async def _recalcular_total_enrollment(enrollment: Enrollment, course: Course) -
     descuento_efectivo = max(desc_curso, desc_personal)
     colegiatura_final = enrollment.costo_total - (enrollment.costo_total * descuento_efectivo / 100)
     cargo_adicional = enrollment.get_cargo_adicional_total()
-    total_final = colegiatura_final + enrollment.costo_matricula + cargo_adicional
-    # Redistribuir el costo entre los modulos proporcionalmente
-    if enrollment.modulos:
+    # Redistribuir el costo entre los modulos proporcionalmente (solo si
+    # los modulos no tienen ya el costo seteado, ej. cuando se acaba de
+    # asignar el descuento y los modulos siguen con el costo sin descuento).
+    suma_costo_modulos_actual = sum(m.costo or 0 for m in enrollment.modulos)
+    # Si los modulos tienen costo 0 o todos iguales al costo original del
+    # curso, redistribuir. Si ya tienen costos con descuento aplicados
+    # (modulos[i].costo < course.modulos[i].costo), respetarlos.
+    if enrollment.modulos and all(
+        m.costo == (course.modulos[i].costo if i < len(course.modulos) else 0)
+        for i, m in enumerate(enrollment.modulos)
+    ):
+        # Modulos sin descuento previo: redistribuir colegiatura_final
         suma_costo_modulos = sum(m.costo for m in course.modulos)
         total_asignado = 0.0
         for i, mod in enumerate(enrollment.modulos):
@@ -932,6 +955,13 @@ async def _recalcular_total_enrollment(enrollment: Enrollment, course: Course) -
                     proporcion = 1.0 / len(enrollment.modulos)
                 mod.costo = round(proporcion * colegiatura_final, 2)
                 total_asignado += mod.costo
+
+    # F-FIX-DESCUENTO-TOTAL-PAGAR: total_a_pagar se calcula desde la
+    # SUMA de los costos actuales de los modulos (que ya tienen el descuento
+    # aplicado) + matricula + cargo. Esto garantiza que si los modulos
+    # fueron actualizados por separado, total_a_pagar refleja esa realidad.
+    suma_modulos_actual = sum(m.costo or 0 for m in enrollment.modulos)
+    total_final = suma_modulos_actual + enrollment.costo_matricula + cargo_adicional
     enrollment.total_a_pagar = round(total_final, 2)
     enrollment.saldo_pendiente = round(max(0.0, enrollment.total_a_pagar - enrollment.total_pagado), 2)
 
