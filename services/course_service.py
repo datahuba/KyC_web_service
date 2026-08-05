@@ -100,6 +100,17 @@ async def create_course(course_in: CourseCreate) -> Course:
     await _validate_active_discount(payload.get("descuento_id"))
 
     course = Course(**payload)
+
+    # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): sincronizar
+    # el campo `estado` persistido con el calculo automatico aplicado
+    # al `estado_override` recibido. Asi el campo persistido refleja
+    # la realidad operacional y el badge de la UI es consistente.
+    # Si el usuario envio estado_override='en_ejecucion', persistimos
+    # el campo `estado` como 'en_ejecucion' para que el `get_estado_actual`
+    # que ya respeta el override devuelva lo que el usuario quiso.
+    if payload.get("estado_override"):
+        course.estado = payload["estado_override"]
+
     await course.create()
     return course
 
@@ -125,7 +136,12 @@ async def update_course(
 
     for field, value in update_data.items():
         setattr(course, field, value)
-        
+
+    # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): sincronizar
+    # el campo `estado` persistido si el usuario envio estado_override.
+    if "estado_override" in update_data and update_data["estado_override"]:
+        course.estado = update_data["estado_override"]
+
     await course.save()
 
     if requisitos_actualizados:

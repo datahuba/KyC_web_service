@@ -163,6 +163,12 @@ async def read_courses(
         estado=estado,
     )
 
+    # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): popular
+    # `estado_calculado` para cada curso (no es un campo del modelo, es
+    # un metodo). El frontend lo usa para mostrar el badge correcto.
+    for c in courses:
+        c.estado_calculado = c.get_estado_actual()
+
     total_pages = math.ceil(total_count / per_page) if total_count > 0 else 0
 
     return {
@@ -703,6 +709,10 @@ async def create_course(
         )
     try:
         course = await course_service.create_course(course_in=course_in)
+        # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): popular
+        # estado_calculado para que el frontend muestre el badge correcto
+        # inmediatamente despues de crear.
+        course.estado_calculado = course.get_estado_actual()
         return course
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -721,6 +731,9 @@ async def read_course(
     course = await course_service.get_course(id=id)
     if not course:
         raise HTTPException(status_code=404, detail="Curso no encontrado")
+    # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): popular
+    # estado_calculado para que el frontend muestre el badge correcto.
+    course.estado_calculado = course.get_estado_actual()
     return course
 
 @router.put(
@@ -740,6 +753,9 @@ async def update_course(
         raise HTTPException(status_code=404, detail="Curso no encontrado")
     try:
         course = await course_service.update_course(course=course, course_in=course_in)
+        # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): popular
+        # estado_calculado para que el frontend muestre el badge correcto.
+        course.estado_calculado = course.get_estado_actual()
         return course
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

@@ -86,6 +86,16 @@ class CourseCreate(BaseModel):
         description="F-HISTORICO: True si es programa historico (solo datos basicos + resolucion)."
     )
 
+    # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): override manual del
+    # estado calculado por fechas. Sin esto, si el usuario crea un programa
+    # con fecha_inicio futura, el calculo automatico dira 'programado' y no
+    # 'en_ejecucion' como el usuario queria. Valores: 'programado' |
+    # 'en_ejecucion' | 'cerrado'. None = calcular segun fechas.
+    estado_override: Optional[str] = Field(
+        default=None,
+        description="F-CREAR-PROGRAMA-EN-EJECUCION: override del estado calculado. None=calcular por fechas. 'programado'|'en_ejecucion'|'cerrado'=forzar."
+    )
+
     # Resolucion de respaldo (opcional para todos los programas)
     resolucion_pdf_url: Optional[str] = Field(
         default=None,
@@ -156,6 +166,14 @@ class CourseResponse(BaseModel):
     es_historico: bool = False
     resolucion_pdf_url: Optional[str] = None
 
+    # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): expone el estado
+    # calculado (programado/en_ejecucion/cerrado) y el override manual.
+    # El frontend prefiere el calculado pero el override es util para
+    # debugging.
+    estado: Optional[str] = None
+    estado_override: Optional[str] = None
+    estado_calculado: Optional[str] = None
+
     created_at: datetime
     updated_at: datetime
     
@@ -225,6 +243,12 @@ class CourseUpdate(BaseModel):
 
     es_historico: Optional[bool] = None
     resolucion_pdf_url: Optional[str] = None
+
+    # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): ver CourseCreate.
+    estado_override: Optional[str] = Field(
+        default=None,
+        description="F-CREAR-PROGRAMA-EN-EJECUCION: override del estado calculado."
+    )
     
     model_config = {
         "json_schema_extra": {
