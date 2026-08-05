@@ -400,6 +400,12 @@ async def post_initial_enrollments(
                 # trae pagos_modulos o matricula_pagada, actualizar el enrollment
                 # existente en vez de saltar. Esto cubre el caso donde el CPD
                 # volvio a subir el Excel despues de un intento parcial.
+                # F-HISTORICO-EXCEL-TOTAL-PAGADO-FIX2 (2026-08-04): el flag
+                # 'actualizado' debe dispararse SIEMPRE que el item traiga
+                # pagos_modulos, no solo si el monto del modulo cambia.
+                # Razon: los modulos pueden ya estar Pagado (de intentos
+                # anteriores que no actualizaron total_pagado), pero igual
+                # necesitamos recalcular el total del enrollment.
                 actualizado = False
                 if item.matricula_pagada and not existing.matricula_pagada:
                     existing.matricula_pagada = True
@@ -424,8 +430,10 @@ async def post_initial_enrollments(
                                     mod.estado = "Pagado"
                                 elif nuevo_pagado > 0:
                                     mod.estado = "Parcial"
-                                actualizado = True
-                                total_pagos_a_aplicar += monto_aplicar
+                            # Marcar actualizado siempre que el item TRAIGA pagos_modulos,
+                            # asi recalculamos total_pagado aunque los modulos no cambien
+                            actualizado = True
+                            total_pagos_a_aplicar += monto_aplicar
                 # F-HISTORICO-EXCEL-TOTAL-PAGADO (2026-08-04): recalcular
                 # total_pagado y saldo_pendiente a partir de los modulos,
                 # porque el endpoint /courses/{id}/students los lee de ahi.
