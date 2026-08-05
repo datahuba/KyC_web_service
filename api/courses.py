@@ -396,11 +396,39 @@ async def post_initial_enrollments(
                 Enrollment.curso_id == course.id,
             )
             if existing:
+                # F-HISTORICO-AUTOSERVICIO-EXCEL-PAGOS2 (2026-08-04): si el item
+                # trae pagos_modulos o matricula_pagada, actualizar el enrollment
+                # existente en vez de saltar. Esto cubre el caso donde el CPD
+                # volvio a subir el Excel despues de un intento parcial.
+                actualizado = False
+                if item.matricula_pagada and not existing.matricula_pagada:
+                    existing.matricula_pagada = True
+                    actualizado = True
+                if item.pagos_modulos and existing.modulos:
+                    for idx_str, monto in item.pagos_modulos.items():
+                        try:
+                            idx = int(idx_str)
+                        except (ValueError, TypeError):
+                            continue
+                        if 0 <= idx < len(existing.modulos):
+                            mod = existing.modulos[idx]
+                            nuevo_pagado = (mod.monto_pagado or 0.0) + float(monto or 0.0)
+                            if mod.costo and nuevo_pagado > mod.costo + 0.01:
+                                nuevo_pagado = mod.costo
+                            if nuevo_pagado != (mod.monto_pagado or 0.0):
+                                mod.monto_pagado = nuevo_pagado
+                                if mod.costo and nuevo_pagado >= mod.costo - 0.01:
+                                    mod.estado = "Pagado"
+                                elif nuevo_pagado > 0:
+                                    mod.estado = "Parcial"
+                                actualizado = True
+                if actualizado:
+                    await existing.save()
                 ya_inscritos_count += 1
                 resultados.append(InitialEnrollmentResultado(
                     estudiante_id=est_id_str,
-                    success=False,
-                    message="Ya esta inscrito en este curso",
+                    success=True,
+                    message="Ya estaba inscrito; se actualizaron pagos" if actualizado else "Ya esta inscrito en este curso",
                     enrollment_id=str(existing.id),
                 ))
                 continue
