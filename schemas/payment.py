@@ -99,7 +99,14 @@ class PaymentCreate(BaseModel):
         None,
         description="URL del comprobante/voucher. Nulo si el pago fue en Caja."
     )
-    
+
+    # R35-FASE2-RECONCILIATION (2026-08-05): origen del pago para distinguir
+    # pagos sinteticos de pagos reales. None = pago real cargado por usuario.
+    origen: Optional[str] = Field(
+        None,
+        description='Origen del pago. None=pago real. "reconciliacion_*"=pago sintetico'
+    )
+
     model_config = {
         "json_schema_extra": {
             "example": {
@@ -157,7 +164,10 @@ class PaymentResponse(BaseModel):
     verificado_por: Optional[str] = None
     motivo_rechazo: Optional[str] = None
     motivo_reversion: Optional[str] = None
-    
+
+    # R35-FASE2-RECONCILIATION (2026-08-05): expone origen en la respuesta API
+    origen: Optional[str] = None
+
     created_at: datetime
     updated_at: datetime
 

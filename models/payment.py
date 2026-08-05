@@ -161,6 +161,16 @@ class Payment(MongoBaseModel):
         description='Quién subió el comprobante: "estudiante" | "encargado" | None (pagos antiguos)'
     )
 
+    # R35-FASE2-RECONCILIATION (2026-08-05): origen del pago. None = pago real
+    # cargado por usuario. "reconciliacion_restore_2026-08-05" = pago sintetico
+    # generado por el script de reconciliacion post-perdida-de-datos. Permite
+    # distinguir pagos reconstructivos de pagos reales en auditoria, sin perder
+    # la informacion de que el dinero si fue cobrado (estado_pago=aprobado).
+    origen: Optional[str] = Field(
+        None,
+        description='Origen del pago. None=pago real. "reconciliacion_*"=pago sintetico'
+    )
+
     # ========================================================================
     # MÉTODOS
     # ========================================================================
