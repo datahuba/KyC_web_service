@@ -129,21 +129,10 @@ async def create_enrollment(
     elif enrollment_in.descuento_personalizado:
         descuento_personal = enrollment_in.descuento_personalizado
 
-    # F-LOGICA-DESCUENTOS-MAX (2026-08-05, Kevin): "el estudiante se queda
-    # con el descuento más alto". Lógica de resta-suma:
-    #   - Si descuento_personal > descuento_curso, gana el personal
-    #     (la diferencia se suma al curso = personal).
-    #   - Si descuento_personal <= descuento_curso, gana el curso
-    #     (la diferencia sería negativa, no se resta, se queda con el mayor).
-    # Ejemplos:
-    #   curso=50 + personal=70 → 70-50=20 → 50+20=70% → paga 30%
-    #   curso=50 + personal=30 → 30-50=-20 → usa 50% → paga 50%
-    #   curso=50 + personal=100 → 100-50=50 → 50+50=100% → paga 0%
-    if descuento_personal > descuento_curso:
-        diferencia = descuento_personal - descuento_curso
-        descuento_efectivo = descuento_curso + diferencia  # = descuento_personal
-    else:
-        descuento_efectivo = descuento_curso
+    # F-LOGICA-DESCUENTOS-MAX (2026-08-05, Kevin): "se queda con el descuento
+    # de mayor porcentaje". Si el personal es menor, gana el curso y se
+    # descarta el personal (el endpoint avisa al usuario).
+    descuento_efectivo = max(descuento_curso, descuento_personal)
 
     colegiatura_final = costo_total - (costo_total * descuento_efectivo / 100)
 
@@ -259,6 +248,33 @@ async def enrich_enrollment_dates(enrollment: Enrollment) -> dict:
     enrollment_dict["fecha_inscripcion"] = to_bolivia_time(enrollment.fecha_inscripcion)
     enrollment_dict["created_at"] = to_bolivia_time(enrollment.created_at)
     enrollment_dict["updated_at"] = to_bolivia_time(enrollment.updated_at)
+
+    # F-LOGICA-DESCUENTOS-MAX (2026-08-05, Kevin): exponer al frontend el
+    # descuento que REALMENTE se aplicó y de dónde viene, para que pueda
+    # mostrar el mensaje "se aplicó el mayor (X%)" cuando corresponda.
+    desc_curso = float(enrollment.descuento_curso_aplicado or 0)
+    desc_personal = float(enrollment.descuento_personalizado or 0) if enrollment.descuento_personalizado is not None else 0.0
+    descuento_efectivo = max(desc_curso, desc_personal)
+    if descuento_efectivo > 0 and desc_personal > 0 and desc_curso >= desc_personal:
+        # El personal fue menor, se aplicó el curso (se descarta el personal)
+        origen = "curso"
+        advertencia = (
+            f"El descuento personal seleccionado ({desc_personal:.0f}%) es menor al "
+            f"descuento del curso ({desc_curso:.0f}%). Se aplicó el descuento de mayor "
+            f"porcentaje: el del curso ({desc_curso:.0f}%)."
+        )
+    elif descuento_efectivo > 0 and desc_personal > desc_curso:
+        origen = "personal"
+        advertencia = None
+    elif descuento_efectivo > 0 and desc_curso > 0:
+        origen = "curso"
+        advertencia = None
+    else:
+        origen = "ninguno"
+        advertencia = None
+    enrollment_dict["descuento_efectivo"] = descuento_efectivo
+    enrollment_dict["descuento_efectivo_origen"] = origen
+    enrollment_dict["advertencia_descuento"] = advertencia
     return enrollment_dict
 
 
@@ -395,13 +411,9 @@ async def update_enrollment_descuento(
         descuento_personalizado = enrollment.descuento_personalizado or 0.0
 
     total_con_descuento_curso = enrollment.costo_total - (enrollment.costo_total * enrollment.descuento_curso_aplicado / 100)
-    # F-LOGICA-DESCUENTOS-MAX (2026-08-05, Kevin): "el estudiante se queda
-    # con el descuento más alto" (MAX con narrativa resta-suma).
-    if descuento_personalizado > enrollment.descuento_curso_aplicado:
-        diferencia = descuento_personalizado - enrollment.descuento_curso_aplicado
-        descuento_efectivo_rec = enrollment.descuento_curso_aplicado + diferencia
-    else:
-        descuento_efectivo_rec = enrollment.descuento_curso_aplicado
+    # F-LOGICA-DESCUENTOS-MAX (2026-08-05, Kevin): "se queda con el descuento
+    # de mayor porcentaje". Si el personal es menor, se descarta y se avisa.
+    descuento_efectivo_rec = max(enrollment.descuento_curso_aplicado, descuento_personalizado)
     colegiatura_final = enrollment.costo_total - (enrollment.costo_total * descuento_efectivo_rec / 100)
     # ISSUE-P-CARGO-MULTIITEM: el cargo adicional (snapshot de ítems de esta
     # inscripción) se mantiene fuera del recálculo por descuento -- ningún
