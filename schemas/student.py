@@ -20,11 +20,11 @@ from models.enums import Sexo, EstadoCivil, TipoSangre
 from models.base import PyObjectId
 
 # Helper para validar carnets con formato boliviano
-# Acepta carnet puro (8130604) o con sufijo (8099472-1A, 8130604-1J) o float mal exportado (1234567.0)
-_CARNET_RE = re.compile(r'^\d{5,12}([-/][A-Z0-9]{1,3})?$')
+# Acepta carnet puro (8130604) o con sufijo (8099472-1A, 8130604-1J) o float mal exportado (8130604.0)
+_CARNET_RE = re.compile(r'^\d{5,12}([.\-,/][A-Z0-9]{1,3})?$')
 
 def _carnet_valido_boliviano(v: str) -> bool:
-    """True si el carnet tiene formato valido de Bolivia (con o sin sufijo de letra)."""
+    """True si el carnet tiene formato valido de Bolivia (con o sin sufijo de letra, float mal exportado)."""
     return bool(_CARNET_RE.match(v))
 
 
@@ -127,11 +127,19 @@ class StudentCreate(BaseModel):
         if v is None:
             return v
         v = str(v).strip()
-        # Acepta carnet puro (8130604) o con sufijo de letra boliviano (8099472-1A, 8130604-1J)
-        # y carnet float (8130604.0) que algunos Excels exportan mal.
-        # NO acepta letras sueltas o simbolos raros.
-        if v and not (v.isdigit() or _carnet_valido_boliviano(v)):
+        # F-CARNET-BOLIVIANO (2026-08-05, Kevin): aceptar carnet con:
+        # - Solo digitos: '8130604'
+        # - Sufijo de letra: '8099472-1A', '8130604-1J' (comun en Bolivia)
+        # - Float mal exportado de Excel: '8130604.0' o '8130604,0'
+        # Rechaza: texto, simbolos raros, letras sueltas
+        if v and not _carnet_valido_boliviano(v):
             raise ValueError('El carnet debe contener solo numeros (admite sufijo tipo 1234567-1A).')
+        # Normalizar float mal exportado: '8130604.0' -> '8130604'
+        # y '8130604,0' -> '8130604' (algunos Excels usan coma como decimal)
+        if v.endswith('.0') and v[:-2].isdigit():
+            v = v[:-2]
+        elif v.endswith(',0') and v[:-2].isdigit():
+            v = v[:-2]
         return v
 
     @field_validator('celular', 'telefono')
