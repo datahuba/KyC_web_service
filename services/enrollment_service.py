@@ -101,10 +101,10 @@ async def create_enrollment(
     if course.es_historico and cantidad_cuotas_efectiva < 1:
         cantidad_cuotas_efectiva = 1
     
-    # 5. Aplicar descuento del curso 
+    # 5. Aplicar descuento del curso
     descuento_curso = 0.0
     descuento_curso_id = None
-    
+
     if course.descuento_id:
         discount_obj = await Discount.get(course.descuento_id)
         if discount_obj and discount_obj.activo:
@@ -112,13 +112,15 @@ async def create_enrollment(
             descuento_curso_id = discount_obj.id
     elif course.descuento_curso:
         descuento_curso = course.descuento_curso
-        
+
+    # Total con SOLO descuento del curso (referencia para distribución de
+    # módulos sin beca personal)
     total_con_descuento_curso = costo_total - (costo_total * descuento_curso / 100)
-    
+
     # 6. Aplicar descuento del estudiante
     descuento_personal = 0.0
     descuento_estudiante_id = None
-    
+
     if enrollment_in.descuento_id:
         discount_sel = await Discount.get(enrollment_in.descuento_id)
         if discount_sel and discount_sel.activo:
@@ -126,8 +128,24 @@ async def create_enrollment(
             descuento_estudiante_id = discount_sel.id
     elif enrollment_in.descuento_personalizado:
         descuento_personal = enrollment_in.descuento_personalizado
-        
-    colegiatura_final = total_con_descuento_curso - (total_con_descuento_curso * descuento_personal / 100)
+
+    # F-LOGICA-DESCUENTOS-MAX (2026-08-05, Kevin): "el estudiante se queda
+    # con el descuento más alto". Lógica de resta-suma:
+    #   - Si descuento_personal > descuento_curso, gana el personal
+    #     (la diferencia se suma al curso = personal).
+    #   - Si descuento_personal <= descuento_curso, gana el curso
+    #     (la diferencia sería negativa, no se resta, se queda con el mayor).
+    # Ejemplos:
+    #   curso=50 + personal=70 → 70-50=20 → 50+20=70% → paga 30%
+    #   curso=50 + personal=30 → 30-50=-20 → usa 50% → paga 50%
+    #   curso=50 + personal=100 → 100-50=50 → 50+50=100% → paga 0%
+    if descuento_personal > descuento_curso:
+        diferencia = descuento_personal - descuento_curso
+        descuento_efectivo = descuento_curso + diferencia  # = descuento_personal
+    else:
+        descuento_efectivo = descuento_curso
+
+    colegiatura_final = costo_total - (costo_total * descuento_efectivo / 100)
 
     # ISSUE-P-CARGO-MULTIITEM: suma de todos los ítems de cargo adicional/
     # complementario al programa (ej. varios talleres incluidos). NINGÚN
@@ -377,7 +395,14 @@ async def update_enrollment_descuento(
         descuento_personalizado = enrollment.descuento_personalizado or 0.0
 
     total_con_descuento_curso = enrollment.costo_total - (enrollment.costo_total * enrollment.descuento_curso_aplicado / 100)
-    colegiatura_final = total_con_descuento_curso - (total_con_descuento_curso * descuento_personalizado / 100)
+    # F-LOGICA-DESCUENTOS-MAX (2026-08-05, Kevin): "el estudiante se queda
+    # con el descuento más alto" (MAX con narrativa resta-suma).
+    if descuento_personalizado > enrollment.descuento_curso_aplicado:
+        diferencia = descuento_personalizado - enrollment.descuento_curso_aplicado
+        descuento_efectivo_rec = enrollment.descuento_curso_aplicado + diferencia
+    else:
+        descuento_efectivo_rec = enrollment.descuento_curso_aplicado
+    colegiatura_final = enrollment.costo_total - (enrollment.costo_total * descuento_efectivo_rec / 100)
     # ISSUE-P-CARGO-MULTIITEM: el cargo adicional (snapshot de ítems de esta
     # inscripción) se mantiene fuera del recálculo por descuento -- ningún
     # ítem recibe descuentos de curso/estudiante, se preserva íntegro.

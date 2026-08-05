@@ -99,6 +99,16 @@ async def create_course(course_in: CourseCreate) -> Course:
     # Seguridad de negocio: impedir asociar descuentos inactivos
     await _validate_active_discount(payload.get("descuento_id"))
 
+    # F-FIX-DESCUENTO-SYNC (2026-08-05, Kevin): si el usuario seleccionó un
+    # descuento del catálogo, sincronizar el campo numérico `descuento_curso`
+    # con el porcentaje del descuento. Sin esto, el campo numérico queda
+    # en 0.0 aunque el `descuento_id` sí está guardado, y la UI muestra
+    # "sin descuento aplicado" aunque SÍ se aplique al inscribir.
+    if payload.get("descuento_id"):
+        discount_obj = await Discount.get(payload["descuento_id"])
+        if discount_obj and discount_obj.activo:
+            payload["descuento_curso"] = float(discount_obj.porcentaje)
+
     course = Course(**payload)
 
     # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): sincronizar
@@ -127,6 +137,20 @@ async def update_course(
     # Seguridad de negocio: impedir asociar descuentos inactivos
     if "descuento_id" in update_data:
         await _validate_active_discount(update_data.get("descuento_id"))
+
+    # F-FIX-DESCUENTO-SYNC (2026-08-05, Kevin): si el usuario asignó/cambió
+    # un descuento del catálogo, sincronizar el campo numérico `descuento_curso`
+    # con el porcentaje. Si se removió el descuento (descuento_id=None),
+    # reseteamos descuento_curso a 0.
+    if "descuento_id" in update_data:
+        new_desc_id = update_data.get("descuento_id")
+        if new_desc_id:
+            discount_obj = await Discount.get(new_desc_id)
+            if discount_obj and discount_obj.activo:
+                update_data["descuento_curso"] = float(discount_obj.porcentaje)
+        else:
+            # El usuario removió el descuento
+            update_data["descuento_curso"] = 0.0
 
     # ISSUE-Q-DOCUMENTOS-KYC (2026-07-09): detectar si se están cambiando los
     # requisitos/documentos del curso para propagarlos a las inscripciones ya

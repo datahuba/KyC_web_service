@@ -1727,7 +1727,15 @@ async def get_matriz_pagos(
         ahorro_modulos = max(0.0, costo_curso_sin_desc - costo_modulos_con_desc_estudiante)
         ahorro_e = ahorro_modulos  # Por regla de Kevin, NUNCA se resta matrícula
         # Beca efectiva del estudiante (puede ser 0% si no tiene descuento)
-        beca_porcentaje = desc_curso + (desc_personal or 0.0)
+        # F-LOGICA-DESCUENTOS-MAX (2026-08-05, Kevin): "el estudiante se queda
+        # con el descuento más alto". Lógica de resta-suma equivalente a MAX
+        # entre descuento del curso y descuento personal. Si personal > curso,
+        # se suma la diferencia al curso (= personal). Si no, gana el curso.
+        if desc_personal > desc_curso:
+            diferencia = desc_personal - desc_curso
+            beca_porcentaje = desc_curso + diferencia  # = desc_personal
+        else:
+            beca_porcentaje = desc_curso
         # Solo se considera "con beca" si el ahorro > 0 (puede haber un descuento
         # que no se aplicó realmente — caso bug histórico)
         tiene_beca = ahorro_e > 0.01 and beca_porcentaje > 0
@@ -2836,7 +2844,15 @@ async def generar_lista_habilitados(
             continue
 
         # Becas del estudiante (siempre incluir, no condicional)
-        beca_pct_total = float(enr.descuento_curso_aplicado or 0) + float(enr.descuento_personalizado or 0)
+        # F-LOGICA-DESCUENTOS-MAX (2026-08-05, Kevin): "el estudiante se queda
+        # con el descuento más alto" (MAX con narrativa resta-suma).
+        desc_curso_e = float(enr.descuento_curso_aplicado or 0)
+        desc_personal_e = float(enr.descuento_personalizado or 0) if enr.descuento_personalizado is not None else 0.0
+        if desc_personal_e > desc_curso_e:
+            diferencia_e = desc_personal_e - desc_curso_e
+            beca_pct_total = desc_curso_e + diferencia_e  # = desc_personal_e
+        else:
+            beca_pct_total = desc_curso_e
         beca_nombre = None
         beca_tiene = False
         if enr.descuento_estudiante_id and enr.descuento_estudiante_id in discounts_map:
