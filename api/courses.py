@@ -9,7 +9,7 @@ from models.user import User
 from models.student import Student
 from models.enrollment import Enrollment
 from models.estado_programa import EstadoPrograma
-from models.enums import UserRole
+from models.enums import UserRole, EstadoInscripcion
 from schemas.course import CourseCreate, CourseResponse, CourseUpdate, CourseEnrolledStudent
 from schemas.enrollment import EnrollmentCreate
 from services import course_service
