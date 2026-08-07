@@ -34,8 +34,21 @@ from models import (
     Course, Student, Enrollment, Payment, Discount, User
 )
 from models.enums import EstadoInscripcion, EstadoPago
-from api.auth import get_current_superadmin
+from models.user import UserRole
+from api.dependencies import get_current_user
 from core.timezone_utils import utcnow_naive
+
+
+def require_superadmin(current_user: User = Depends(get_current_user)) -> User:
+    """Solo superadmin puede ver el reporte de data-health (decision de Kevin 2026-08-07)"""
+    if not isinstance(current_user, User):
+        raise HTTPException(status_code=403, detail="Solo usuarios pueden acceder a /admin/data-health")
+    if current_user.rol != UserRole.SUPERADMIN:
+        raise HTTPException(
+            status_code=403,
+            detail="Solo superadmin puede ver el reporte consolidado de inconsistencias"
+        )
+    return current_user
 
 router = APIRouter(prefix="/admin", tags=["admin-data-health"])
 
@@ -436,7 +449,7 @@ async def check_encargado_inactivo(programas_ids: List[PydanticObjectId]) -> Lis
 
 @router.get("/data-health")
 async def get_data_health(
-    current_user: User = Depends(get_current_superadmin),
+    current_user: User = Depends(require_superadmin),
     programa_id: Optional[str] = None,
     tipo: Optional[str] = None,  # comma-separated: "docs_huerfanos,enrollment_huerfano"
     severidad: Optional[str] = None,  # comma-separated: "critica,alta,media,baja"
@@ -556,7 +569,7 @@ def _apply_filters(data, programa_id, tipo, severidad, current_user):
 async def fix_inconsistencia(
     tipo_accion: str,
     payload: dict,
-    current_user: User = Depends(get_current_superadmin),
+    current_user: User = Depends(require_superadmin),
 ):
     """
     Aplica una accion correctiva a una inconsistencia.
