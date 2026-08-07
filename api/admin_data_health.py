@@ -100,6 +100,26 @@ def to_id(obj) -> Optional[str]:
     return None
 
 
+def prog_obj_ids_list(prog_ids: List[str]) -> list:
+    """
+    R35-FASE-3 FIX (2026-08-07): convierte la lista de IDs string a ObjectId.
+    El campo curso_id en enrollments/payments se guarda como ObjectId en MongoDB.
+    Si comparas con string, MongoDB NO matchea y el check falla silenciosamente.
+
+    Uso:
+        {"curso_id": {"$in": prog_obj_ids_list(programas_ids)}}
+        {"curso_id": {"$nin": prog_obj_ids_list(programas_ids)}}
+    """
+    from bson import ObjectId
+    out = []
+    for p in prog_ids:
+        try:
+            out.append(ObjectId(str(p)))
+        except Exception:
+            continue
+    return out
+
+
 # ============================================================================
 # CHECKS (uno por cada tipo de inconsistencia)
 # ============================================================================
@@ -131,10 +151,25 @@ async def check_docs_huerfanos(programas_ids: List[str]) -> List[dict]:
 
 
 async def check_enrollment_huerfano(programas_ids: List[str]) -> List[dict]:
-    """Check 2: Enrollments sin curso/programa asociado"""
+    """Check 2: Enrollments sin curso/programa asociado
+
+    R35-FASE-3 FIX (2026-08-07): el check usaba [str(p) for p in programas_ids]
+    que son STRINGS, pero el campo curso_id en MongoDB se guarda como ObjectId.
+    MongoDB NO matchea ObjectId con string en $nin, por lo que el check reportaba
+    245 falsos huerfanos cuando en realidad solo 1 era real.
+
+    Fix: usar bson.ObjectId para construir los IDs de la lista $nin.
+    """
+    from bson import ObjectId
     inconsistencias = []
+    prog_obj_ids = []
+    for p in programas_ids:
+        try:
+            prog_obj_ids.append(ObjectId(str(p)))
+        except Exception:
+            continue
     orfanos = await Enrollment.find(
-        {"$or": [{"curso_id": None}, {"curso_id": {"$nin": [str(p) for p in programas_ids]}}]}
+        {"$or": [{"curso_id": None}, {"curso_id": {"$nin": prog_obj_ids}}]}
     ).limit(200).to_list()
     for enr in orfanos:
         inconsistencias.append({
@@ -153,33 +188,61 @@ async def check_enrollment_huerfano(programas_ids: List[str]) -> List[dict]:
 
 
 async def check_student_sin_enrollment(programas_ids: List[str]) -> List[dict]:
-    """Check 3: Estudiantes sin ningun enrollment"""
+    """Check 3: Estudiantes sin ningun enrollment
+
+    R35-FASE-3 FIX (2026-08-07): mismo bug de tipo que check_enrollment_huerfano.
+    curso_id en enrollments es ObjectId, programas_ids eran strings -> MongoDB
+    no matcheaba y el check fallaba. Tambien optimizado: usar aggregation de
+    MongoDB para encontrar estudiantes sin enrollment en 1 sola query en vez de
+    traer todos los enrollments a Python.
+    """
+    from bson import ObjectId
     inconsistencias = []
-    enrollments = await Enrollment.find(
-        {"curso_id": {"$in": [str(p) for p in programas_ids]}}
-    ).limit(500).to_list()
-    student_ids_con_enrollment = set()
-    for e in enrollments:
-        eid = to_id(e.estudiante_id) if e.estudiante_id else None
-        if eid:
-            student_ids_con_enrollment.add(eid)
-    students = await Student.find_all().limit(500).to_list()
-    for s in students:
-        sid = to_id(s)
-        if sid and sid not in student_ids_con_enrollment:
-            nombre = getattr(s, 'nombre', '') or ''
-            apellido = getattr(s, 'apellido_paterno', '') or ''
-            inconsistencias.append({
-                "tipo": "student_sin_enrollment",
-                "severidad": "media",
-                "entidad_tipo": "student",
-                "entidad_id": sid,
-                "estudiante_nombre": f"{nombre} {apellido}".strip() or sid,
-                "programa_codigo": "NINGUNO",
-                "descripcion": f"Estudiante sin enrollment en programas activos",
-                "accion_sugerida": "revisar",
-                "metadata": {"carnet": getattr(s, 'carnet', None)}
-            })
+    prog_obj_ids = []
+    for p in programas_ids:
+        try:
+            prog_obj_ids.append(ObjectId(str(p)))
+        except Exception:
+            continue
+
+    # 1 sola aggregation: estudiantes sin enrollment en programas en ejecucion
+    pipeline = [
+        {
+            "$lookup": {
+                "from": "enrollments",
+                "let": {"sid": "$_id"},
+                "pipeline": [
+                    {
+                        "$match": {
+                            "$expr": {"$eq": ["$estudiante_id", "$$sid"]},
+                            "curso_id": {"$in": prog_obj_ids}
+                        }
+                    },
+                    {"$limit": 1}
+                ],
+                "as": "enr_activo"
+            }
+        },
+        {"$match": {"enr_activo": {"$size": 0}}},
+        {"$limit": 500},
+        {"$project": {"_id": 1, "nombre": 1, "apellido_paterno": 1, "carnet": 1}}
+    ]
+    students_sin_enrollment = await Student.aggregate(pipeline).to_list()
+    for s in students_sin_enrollment:
+        sid = str(s.get("_id"))
+        nombre = s.get("nombre", "") or ""
+        apellido = s.get("apellido_paterno", "") or ""
+        inconsistencias.append({
+            "tipo": "student_sin_enrollment",
+            "severidad": "media",
+            "entidad_tipo": "student",
+            "entidad_id": sid,
+            "estudiante_nombre": f"{nombre} {apellido}".strip() or sid,
+            "programa_codigo": "NINGUNO",
+            "descripcion": f"Estudiante sin enrollment en programas activos",
+            "accion_sugerida": "revisar",
+            "metadata": {"carnet": s.get("carnet")}
+        })
     return inconsistencias
 
 
@@ -187,7 +250,7 @@ async def check_notas_fuera_rango(programas_ids: List[str]) -> List[dict]:
     """Check 4: Modulos con notas fuera de rango"""
     inconsistencias = []
     enrollments = await Enrollment.find(
-        {"curso_id": {"$in": [str(p) for p in programas_ids]}, "modulos": {"$exists": True, "$ne": []}}
+        {"curso_id": {"$in": prog_obj_ids_list(programas_ids)}, "modulos": {"$exists": True, "$ne": []}}
     ).limit(500).to_list()
     for enr in enrollments:
         for m in (enr.modulos or []):
@@ -216,7 +279,7 @@ async def check_becados_mal(programas_ids: List[str]) -> List[dict]:
     discount_ids_beca = [d for d in discount_ids_beca if d]
     if discount_ids_beca:
         enrollments = await Enrollment.find(
-            {"curso_id": {"$in": [str(p) for p in programas_ids]}, "descuento_id": {"$in": discount_ids_beca}}
+            {"curso_id": {"$in": prog_obj_ids_list(programas_ids)}, "descuento_id": {"$in": discount_ids_beca}}
         ).limit(300).to_list()
         for enr in enrollments:
             saldo = getattr(enr, 'saldo_pendiente', 0) or 0
@@ -249,7 +312,13 @@ async def check_historicos_mal(programas_ids: List[str]) -> List[dict]:
             )
         except Exception:
             estado_actual = "desconocido"
-        if estado_actual == "en_ejecucion":
+        # R35-FASE-3 FIX (2026-08-07): el helper calcular_estado_actual() devuelve
+        # 'en_ejecucion' como DEFAULT CONSERVADOR cuando el curso no tiene fechas.
+        # Esto causaba que DIP-DDU-2026/1 (es_historico=true, sin fechas) sea
+        # reportado como mal clasificado cuando en realidad solo no tiene fechas
+        # catalogadas. Solo reportar si el curso tiene fechas validas o un override
+        # que justifique el estado de ejecucion.
+        if estado_actual == "en_ejecucion" and (c.fecha_inicio is not None or getattr(c, 'estado_override', None) is not None):
             inscritos_count = len(c.inscritos) if getattr(c, 'inscritos', None) else 0
             inconsistencias.append({
                 "tipo": "historicos_mal",
@@ -270,7 +339,7 @@ async def check_pasivos_inconsistentes(programas_ids: List[str]) -> List[dict]:
     """Check 7: SUSPENDIDO sin motivo_suspension"""
     inconsistencias = []
     enrollments = await Enrollment.find(
-        {"curso_id": {"$in": [str(p) for p in programas_ids]}, "estado": EstadoInscripcion.SUSPENDIDO}
+        {"curso_id": {"$in": prog_obj_ids_list(programas_ids)}, "estado": EstadoInscripcion.SUSPENDIDO}
     ).limit(300).to_list()
     for enr in enrollments:
         motivo = getattr(enr, 'motivo_suspension', None)
@@ -295,7 +364,7 @@ async def check_pagos_duplicados(programas_ids: List[str]) -> List[dict]:
     inconsistencias = []
     pipeline = [
         {"$match": {
-            "curso_id": {"$in": [str(p) for p in programas_ids]},
+            "curso_id": {"$in": prog_obj_ids_list(programas_ids)},
             "estado_pago": "aprobado"
         }},
         {"$group": {
@@ -355,7 +424,7 @@ async def check_pagos_anulados_activo(programas_ids: List[str]) -> List[dict]:
     """Check 10: Pagos anulados con enrollment activo"""
     inconsistencias = []
     enrollments = await Enrollment.find(
-        {"curso_id": {"$in": [str(p) for p in programas_ids]}, "estado": {"$in": [EstadoInscripcion.ACTIVO.value, EstadoInscripcion.PENDIENTE_PAGO.value, EstadoInscripcion.COMPLETADO.value]}}
+        {"curso_id": {"$in": prog_obj_ids_list(programas_ids)}, "estado": {"$in": [EstadoInscripcion.ACTIVO.value, EstadoInscripcion.PENDIENTE_PAGO.value, EstadoInscripcion.COMPLETADO.value]}}
     ).limit(300).to_list()
     for enr in enrollments:
         eid = to_id(enr)
@@ -414,7 +483,7 @@ async def check_matricula_pagada_pendiente(programas_ids: List[str]) -> List[dic
     """Check 12: Matricula pagada pero enrollment pendiente_pago"""
     inconsistencias = []
     enrollments = await Enrollment.find(
-        {"curso_id": {"$in": [str(p) for p in programas_ids]}, "matricula_pagada": True, "estado": EstadoInscripcion.PENDIENTE_PAGO}
+        {"curso_id": {"$in": prog_obj_ids_list(programas_ids)}, "matricula_pagada": True, "estado": EstadoInscripcion.PENDIENTE_PAGO}
     ).limit(100).to_list()
     for enr in enrollments:
         inconsistencias.append({
