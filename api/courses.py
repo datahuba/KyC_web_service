@@ -616,6 +616,31 @@ async def post_initial_enrollments(
                 enrollment.actualizar_saldo(diferencia)
             elif total_pagos_a_aplicar > 0:
                 enrollment.actualizar_saldo(total_pagos_a_aplicar)
+            # F-FIX-MATRICULA-NUEVO-ESTADO (2026-08-06, Kevin): si el item
+            # marco matricula_pagada=True, tambien hay que sacar al
+            # enrollment del estado PENDIENTE_PAGO si ya no hay deuda.
+            # Antes SOLO se hacia para existing (linea 510-516) y para
+            # pago total (linea 622-626). Esto dejaba a los estudiantes
+            # con matricula_pagada=True pero estado=PENDIENTE_PAGO, lo
+            # que hacia que la UI mostrara "matricula pendiente" aunque
+            # el usuario habia marcado el checkbox.
+            if (
+                enrollment.matricula_pagada
+                and enrollment.estado == EstadoInscripcion.PENDIENTE_PAGO.value
+            ):
+                # Caso 1: la matricula cubre el total (programa solo con matricula,
+                # sin modulos, o matricula = total_a_pagar).
+                costo_mat = enrollment.costo_matricula or 0
+                total_pag = enrollment.total_pagado or 0
+                if costo_mat > 0 and total_pag >= costo_mat - 0.01:
+                    enrollment.estado = EstadoInscripcion.ACTIVO.value
+                # Caso 2: ya pago todo el programa (incluyendo modulos).
+                elif enrollment.esta_completamente_pagado():
+                    enrollment.estado = EstadoInscripcion.ACTIVO.value
+                # Caso 3: matricula_pagada=True + no hay modulos (programa
+                # historico con un solo item "matricula" ya marcado como pagado)
+                elif not enrollment.modulos and costo_mat > 0:
+                    enrollment.estado = EstadoInscripcion.ACTIVO.value
             # F-HISTORICO-EXCEL-ESTADO (2026-08-04): si ya pago todo, sacar
             # del estado PENDIENTE_PAGO. La UI muestra el badge de la
             # matricula con enrollment.estado, no con matricula_pagada.
