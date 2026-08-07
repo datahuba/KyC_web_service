@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from api import students, courses, enrollments, payments, discounts, users, auth, payment_config, classroom, notifications, account_requests, passive_requests, bank_statements, enrollment_requests, dashboard, pre_registrations, admin, certificates, reports, tramite_solicitudes, comunicados  # F-CERTIFICADOS (2026-07-29); F-CUENTAS-POR-COBRAR (2026-07-29); F-TRAMITES-SOLICITUD (2026-07-29); US-003 (2026-08-03): Comunicados
+from api import students, courses, enrollments, payments, discounts, users, auth, payment_config, classroom, notifications, account_requests, passive_requests, bank_statements, enrollment_requests, dashboard, pre_registrations, admin, admin_data_health, certificates, reports, tramite_solicitudes, comunicados  # F-CERTIFICADOS (2026-07-29); F-CUENTAS-POR-COBRAR (2026-07-29); F-TRAMITES-SOLICITUD (2026-07-29); US-003 (2026-08-03): Comunicados; R35-FASE-3 (2026-08-07): Reporte consolidado transversal
 
 api_router = APIRouter()
 
@@ -22,6 +22,8 @@ api_router.include_router(dashboard.router, prefix="/dashboard", tags=["dashboar
 api_router.include_router(pre_registrations.router, prefix="/pre-registrations", tags=["pre-registrations"])
 # F-044 (2026-07-22): visor de errores 500 para admin/superadmin.
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
+# R35-FASE-3 (2026-08-07, Kevin): reporte consolidado de inconsistencias de datos
+api_router.include_router(admin_data_health.router, prefix="/admin", tags=["admin-data-health"])
 # F-CERTIFICADOS (2026-07-29): emisión de Certificados de Notas y No Deudor.
 api_router.include_router(certificates.router, prefix="/certificates", tags=["certificates"])
 # F-TRAMITES-SOLICITUD (2026-07-29): solicitudes de Convalidación, Tutoría,
