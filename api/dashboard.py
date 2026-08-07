@@ -308,14 +308,12 @@ async def _build_dashboard_v2(current_user: User) -> dict:
         return f
 
     def _pag_filter() -> dict:
-        # Para el resumen economico queremos TODOS los pagos aprobados
-        # (los historicos tambien cuentan como ingreso real).
-        # Filtrar por cursos asignados si hay scope, sino por visibles.
+        # Mismo criterio que /dashboard/stats: NO filtrar por historicos
+        # (los pagos de historicos son dinero real, cuentan en revenue).
+        # Solo filtrar por cursos_asignados si hay scope, sino TODOS los pagos.
         f = {"estado_pago": {"$in": [EstadoPago.APROBADO.value, "pagado"]}}
         if current_user.cursos_asignados:
             f["curso_id"] = {"$in": current_user.cursos_asignados}
-        elif curso_ids_visibles:
-            f["curso_id"] = {"$in": list(curso_ids_visibles)}
         return f
 
     def _recent_enr_filter() -> dict:
