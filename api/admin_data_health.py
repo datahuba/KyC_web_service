@@ -50,7 +50,7 @@ def require_superadmin(current_user: User = Depends(get_current_user)) -> User:
         )
     return current_user
 
-router = APIRouter(prefix="/admin", tags=["admin-data-health"])
+router = APIRouter(tags=["admin-data-health"])
 
 # Cache simple de 30s (memoria, suficiente para 1 usuario superadmin)
 _CACHE = {"timestamp": None, "data": None}
