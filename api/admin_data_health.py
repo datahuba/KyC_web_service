@@ -21,7 +21,7 @@ from models.user import UserRole
 from models.enums import EstadoInscripcion, EstadoPago
 from api.dependencies import get_current_user
 from core.timezone_utils import utcnow_naive
-from services.estado_programa_service import calcular_estado_actual
+from models.estado_programa import calcular_estado_actual
 
 router = APIRouter(tags=["admin-data-health"])
 
