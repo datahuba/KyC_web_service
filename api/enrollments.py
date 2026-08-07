@@ -942,7 +942,7 @@ async def get_enrollments_resumen(
     pasivos_congelado = 0
     pasivos_pasivo = 0
     pasivos_abandono = 0
-    completados = 0
+    completados_legacy = 0  # F-DASHBOARD-R10: ya no se usa para "completados" del UI
     cancelados = 0
     pendientes_pago = 0
     retirados = 0  # F-083
@@ -974,9 +974,50 @@ async def get_enrollments_resumen(
                 # motivo None o desconocido -> cuenta como pasivo genérico
                 pasivos_pasivo += count
         elif estado == "completado":
-            completados += count
+            # F-DASHBOARD-R10 (2026-08-06, Kevin): NO contar como "completado"
+            # del UI. R10 explicito: "completado = módulo académico cerrado
+            # (nota + pago), NO programa completo". El estado=completado del
+            # enrollment se setea al pagar TODO, no al terminar académicamente.
+            # Por eso se calcula aparte abajo.
+            completados_legacy += count
         elif estado == "retirado":  # F-083
             retirados += count
+
+    # F-DASHBOARD-R10: contar "completados" reales = TODOS los modulos
+    # con estado_academico='Aprobado' (nota subida Y validada). NO basarse
+    # en enrollment.estado='completado' porque eso se setea al pagar todo,
+    # no al terminar el programa académicamente.
+    # Caso real (2026-08-06, DIPL-IA-2026): Andrea Gutierrez Ruiz tiene
+    # enrollment.estado='completado' pero solo 1 de 5 modulos aprobados
+    # (van por el 2do modulo). Esto inflaba el conteo.
+    pipeline_completados = [
+        {"$match": {**filtro_curso, "estado": {"$nin": ["cancelado", "retirado"]}}},
+        {"$project": {
+            "modulos_aprobados": {
+                "$size": {
+                    "$filter": {
+                        "input": {"$ifNull": ["$modulos", []]},
+                        "as": "m",
+                        "cond": {"$eq": ["$$m.estado_academico", "Aprobado"]}
+                    }
+                }
+            },
+            "total_modulos": {
+                "$size": {"$ifNull": ["$modulos", []]}
+            }
+        }},
+        {"$match": {
+            "$expr": {
+                "$and": [
+                    {"$gt": ["$total_modulos", 0]},
+                    {"$eq": ["$modulos_aprobados", "$total_modulos"]}
+                ]
+            }
+        }},
+        {"$count": "total"}
+    ]
+    completados_result = await Enrollment.aggregate(pipeline_completados).to_list()
+    completados = completados_result[0]["total"] if completados_result else 0
 
     total_pasivos = pasivos_congelado + pasivos_pasivo + pasivos_abandono
 
@@ -990,7 +1031,8 @@ async def get_enrollments_resumen(
             "pasivo": pasivos_pasivo,
             "abandono": pasivos_abandono,
         },
-        "completados": completados,
+        "completados": completados,  # F-DASHBOARD-R10: TODOS los modulos aprobados
+        "completados_legacy": completados_legacy,  # estado enrollment (referencia)
         "retirados": retirados,  # F-083: separado de pasivos
         "cancelados": cancelados,  # NO cuentan como inscritos
         "curso_id": str(curso_id) if curso_id else None,
