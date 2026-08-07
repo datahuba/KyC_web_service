@@ -284,27 +284,48 @@ async def _build_dashboard_v2(current_user: User) -> dict:
     else:
         scope_filter = None
 
-    # F-PERF-DASHBOARD-V2: pre-filtrar para excluir historicos
-    def _enr_filter() -> dict:
+    # F-PERF-DASHBOARD-V2: pre-filtrar para excluir historicos (mismo criterio
+    # que /dashboard/stats). Los historicos no cuentan como inscritos activos.
+    # curso_ids_visibles ya viene de arriba (cursos no historicos Y no cerrados)
+    curso_ids_visibles_filter: Optional[dict] = None
+    if curso_ids_visibles:
+        # Si hay scope (cursos_asignados), intersectar con visibles.
+        # Si no hay scope, usar todos los visibles.
         if scope_filter is not None:
-            return {"curso_id": scope_filter, "estado": {"$ne": "cancelado"}}
-        return {"estado": {"$ne": "cancelado"}}
+            # Intersectar cursos_asignados con curso_ids_visibles
+            if isinstance(scope_filter, dict) and "$in" in scope_filter:
+                intersected = [cid for cid in scope_filter["$in"] if cid in set(curso_ids_visibles)]
+            else:
+                intersected = [c for c in curso_ids_visibles if c == scope_filter]
+            curso_ids_visibles_filter = {"$in": intersected}
+        else:
+            curso_ids_visibles_filter = {"$in": list(curso_ids_visibles)}
+
+    def _enr_filter() -> dict:
+        f = {"estado": {"$ne": "cancelado"}}
+        if curso_ids_visibles_filter is not None:
+            f["curso_id"] = curso_ids_visibles_filter
+        return f
 
     def _pag_filter() -> dict:
         # Para el resumen economico queremos TODOS los pagos aprobados
-        # (los historicos tambien cuentan como ingreso real)
-        if scope_filter is not None:
-            return {"curso_id": scope_filter, "estado_pago": {"$in": [EstadoPago.APROBADO.value, "pagado"]}}
-        return {"estado_pago": {"$in": [EstadoPago.APROBADO.value, "pagado"]}}
+        # (los historicos tambien cuentan como ingreso real).
+        # Filtrar por cursos asignados si hay scope, sino por visibles.
+        f = {"estado_pago": {"$in": [EstadoPago.APROBADO.value, "pagado"]}}
+        if current_user.cursos_asignados:
+            f["curso_id"] = {"$in": current_user.cursos_asignados}
+        elif curso_ids_visibles:
+            f["curso_id"] = {"$in": list(curso_ids_visibles)}
+        return f
 
     def _recent_enr_filter() -> dict:
-        if scope_filter is not None:
-            return {"curso_id": scope_filter}
+        if current_user.cursos_asignados:
+            return {"curso_id": {"$in": current_user.cursos_asignados}}
         return {}
 
     def _recent_pag_filter() -> dict:
-        if scope_filter is not None:
-            return {"curso_id": scope_filter, "estado_pago": {"$in": [EstadoPago.APROBADO.value, "pagado"]}}
+        if current_user.cursos_asignados:
+            return {"curso_id": {"$in": current_user.cursos_asignados}, "estado_pago": {"$in": [EstadoPago.APROBADO.value, "pagado"]}}
         return {"estado_pago": {"$in": [EstadoPago.APROBADO.value, "pagado"]}}
 
     # 6 queries en paralelo
