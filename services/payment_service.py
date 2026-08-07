@@ -1648,11 +1648,18 @@ async def get_matriz_pagos(
         # Cuánto se imputó realmente a matrícula: min(total_pagado, costo_matricula)
         mat_pagado = min(total_ingresos_e, costo_mat)
         mat_pendiente = max(0.0, costo_mat - mat_pagado)
+        # F-FIX-MATRICULA-CALC (2026-08-06, Kevin): si el flag matricula_pagada=True,
+        # la matricula esta pagada (segun el checkbox que marco el usuario al
+        # cargar el Excel). Esto cubre el caso de programas SIN costo de
+        # matricula (costo_mat=0) o programas donde el pago se imputo a
+        # modulos pero no a la matricula.
+        if getattr(e, 'matricula_pagada', False) and e.estado not in estados_excluidos:
+            mat_pendiente = 0.0
         tot_mat_costo += costo_mat
         tot_mat_pagado += mat_pagado
         if e.estado not in estados_excluidos:
             tot_mat_pendiente += mat_pendiente
-            if mat_pagado + 0.01 >= costo_mat:
+            if mat_pagado + 0.01 >= costo_mat or getattr(e, 'matricula_pagada', False):
                 tot_mat_pagaron += 1
 
         # Módulos
@@ -1971,6 +1978,13 @@ async def get_matriz_deudores(
         # Cuánto se imputó realmente a matrícula (cascada greedy)
         mat_pagado = min(total_pagado_e, costo_mat)
         mat_pendiente = max(0.0, costo_mat - mat_pagado)
+        # F-FIX-MATRICULA-CALC (2026-08-06, Kevin): si el flag matricula_pagada=True,
+        # la matricula esta pagada (segun el checkbox que marco el usuario al
+        # cargar el Excel). Esto cubre el caso de programas SIN costo de
+        # matricula (costo_mat=0) o programas donde el pago se imputo a
+        # modulos pero no a la matricula.
+        if getattr(e, 'matricula_pagada', False) and e.estado not in estados_excluidos:
+            mat_pendiente = 0.0
         # Estado: "debe" si hay pendiente, "pagado" si completó (independiente del descuento)
         if e.estado in estados_excluidos:
             mat_estado = "no_le_toca"
