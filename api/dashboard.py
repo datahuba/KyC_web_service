@@ -210,21 +210,15 @@ async def get_dashboard_v2(current_user: User = Depends(require_staff)):
 
     Cache: TTL 30s por (user_id, scope). Cold ~1-2s, hot < 50ms.
     """
-    # Cache check (mismo cache que /stats, key = (user_id, scope))
-    cached = _get_cached_dashboard(current_user)
-    if cached is not None:
-        # Cache de /stats: devolver lo que haya. Si el caller quiere
-        # /v2 pero el cache de /stats tiene la version vieja, igual
-        # vale: cubre la mayoria de los campos. La diferencia entre
-        # stats y v2 es que v2 incluye resumenInscritos, resumenEconomico,
-        # cxcResumen, recentEnrollments, recentPayments, pendingDocumentsCount.
-        # Para estos campos extra, tenemos un cache separado (V2_CACHE).
-        v2_cached = _get_cached_v2(current_user)
-        if v2_cached is not None:
-            return v2_cached
-        # Si solo hay cache de /stats, devolvemos eso (degrada suave)
-        if "courseBreakdown" in cached:
-            return cached
+    # Cache check: SIEMPRE chequear primero el cache de v2 (es el response
+    # consolidado completo). Si hay cache de /stats pero no de v2, NO
+    # devolver el de /stats porque le faltan resumenInscritos, resumenEconomico,
+    # cxcResumen, recentEnrollments, recentPayments, pendingDocumentsCount.
+    # Es preferible reconstruir v2 cold (que es ~4.5s una sola vez) que devolver
+    # un response incompleto.
+    v2_cached = _get_cached_v2(current_user)
+    if v2_cached is not None:
+        return v2_cached
 
     # Cold path: construir todo en una sola pasada
     result = await _build_dashboard_v2(current_user)
