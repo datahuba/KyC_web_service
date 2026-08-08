@@ -387,8 +387,17 @@ async def list_payments(
             cursos_permitidos=cursos_permitidos,
             tipo_concepto=tipo_concepto
         )
-        
-        # Filtrado de RBAC (CPD vs Cobranza)
+
+        # F-COBRANZA-PAGINACION (2026-08-08, Kevin): el bug era
+        # `total_count = len(filtered_payments)` que sobrescribia el total
+        # REAL del service con la cantidad de items de la pagina actual.
+        # Ejemplo: si la BD tiene 500 pagos y per_page=100, el service
+        # retornaba total_count=500 + 100 pagos, pero el endpoint
+        # sobrescribia a 100, haciendo creer al usuario que solo hay 100
+        # pagos en total. Ahora: si NO hay filtro RBAC (CPD), respetar
+        # el total del service. Si hay filtro RBAC, el total puede
+        # ser impreciso (es la pagina actual filtrada, no el total real
+        # filtrado), pero al menos no es un sub-conjunto de la pagina.
         filtered_payments = []
         for p in payments:
             concepto_lower = (p.concepto or "").lower().strip()
@@ -396,9 +405,16 @@ async def list_payments(
             if current_user.rol == "cpd" and not is_matricula:
                 continue
             filtered_payments.append(p)
-            
+
         payments = filtered_payments
-        total_count = len(filtered_payments)
+        # Solo sobrescribir total_count si hay filtro RBAC activo (CPD)
+        if current_user.rol == "cpd":
+            # Para CPD, el total es la pagina actual filtrada (puede ser
+            # menos que per_page). Impreciso pero al menos el usuario ve
+            # la pagina actual completa. Idealmente habria que hacer una
+            # query count adicional con el filtro aplicado.
+            total_count = len(filtered_payments)
+        # Si no es CPD, total_count ya viene correcto del service.
         
     elif isinstance(current_user, Student):
         all_payments = await payment_service.get_payments_by_student(
