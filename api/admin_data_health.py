@@ -209,7 +209,7 @@ async def check_student_sin_enrollment(programas_ids: List[str]) -> List[dict]:
     # Q1: enrollments en programas en ejecucion
     enrollments = await Enrollment.find(
         {"curso_id": {"$in": prog_obj_ids}}
-    ).project(Enrollment.estudiante_id).limit(1000).to_list()
+    ).limit(1000).to_list()
     student_ids_con_enrollment = set()
     for e in enrollments:
         eid = to_id(e.estudiante_id) if e.estudiante_id else None
@@ -632,6 +632,62 @@ async def get_data_health(
     _CACHE["data"] = data
 
     return _apply_filters(data, programa_id, tipo, severidad)
+
+
+@router.get("/data-health/debug")
+async def debug_data_health(
+    current_user: User = Depends(require_superadmin),
+):
+    """
+    R35-FASE-3 DEBUG (2026-08-07): ejecuta cada check individualmente con timing.
+    NO usa cache. Solo para debugging de performance.
+    """
+    import time as _time
+    from bson import ObjectId
+    cursos = await get_programas_en_ejecucion()
+    programas_ids = [str(c.id) for c in cursos if c.id is not None]
+    prog_obj_ids = []
+    for p in programas_ids:
+        try:
+            prog_obj_ids.append(ObjectId(str(p)))
+        except Exception:
+            continue
+
+    checks_map = [
+        ("docs_huerfanos", check_docs_huerfanos),
+        ("enrollment_huerfano", check_enrollment_huerfano),
+        ("student_sin_enrollment", check_student_sin_enrollment),
+        ("notas_fuera_rango", check_notas_fuera_rango),
+        ("becados_mal", check_becados_mal),
+        ("historicos_mal", check_historicos_mal),
+        ("pasivos_inconsistentes", check_pasivos_inconsistentes),
+        ("pagos_duplicados", check_pagos_duplicados),
+        ("descuentos_mal", check_descuentos_mal),
+        ("pagos_anulados_activo", check_pagos_anulados_activo),
+        ("costo_vs_modulos", check_costo_vs_modulos),
+        ("matricula_pagada_pendiente", check_matricula_pagada_pendiente),
+        ("resolucion_faltante", check_resolucion_faltante),
+        ("encargado_inactivo", check_encargado_inactivo),
+    ]
+
+    timings = []
+    for name, fn in checks_map:
+        t0 = _time.time()
+        try:
+            r = await fn(programas_ids)
+            elapsed = (_time.time() - t0) * 1000
+            timings.append({"check": name, "ms": round(elapsed, 1), "count": len(r) if isinstance(r, list) else 0, "error": None})
+        except Exception as e:
+            elapsed = (_time.time() - t0) * 1000
+            timings.append({"check": name, "ms": round(elapsed, 1), "count": 0, "error": str(e)})
+
+    total = sum(t["ms"] for t in timings)
+    return {
+        "programas_evaluados": len(cursos),
+        "checks": timings,
+        "total_serial_ms": round(total, 1),
+        "slowest": max(timings, key=lambda x: x["ms"])["check"],
+    }
 
 
 def _apply_filters(data, programa_id, tipo, severidad):
