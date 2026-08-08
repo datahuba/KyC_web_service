@@ -159,18 +159,77 @@ async def check_enrollment_huerfano(programas_ids: List[str]) -> List[dict]:
     245 falsos huerfanos cuando en realidad solo 1 era real.
 
     Fix: usar bson.ObjectId para construir los IDs de la lista $nin.
+
+    R35-FASE-3 FIX 2 (2026-08-07, Kevin): el check NO filtraba por estado,
+    asi que contaba TODOS los huérfanos incluyendo los que ya habian sido
+    retirados con la accion 'revisar_y_asignar'. Ahora filtra por
+    estado != "retirado" para que el contador baje después de aplicar un fix.
+
+    R35-FASE-3 FIX 3 (2026-08-07, Kevin): tambien excluye los enrollments
+    cuyo curso es historico o programado. Decision Kevin: "esos programas
+    son historicos, esas inscripciones a esos modulos no deberian quedar
+    igual como datos historicos, no sirven para nada mas que ser datos
+    historicos". Antes solo excluiamos cursos en ejecucion.
     """
     from bson import ObjectId
     inconsistencias = []
-    prog_obj_ids = []
+
+    # 1. Programas en ejecucion (excluidos = vigentes)
+    prog_ejecucion_ids = []
     for p in programas_ids:
         try:
-            prog_obj_ids.append(ObjectId(str(p)))
+            prog_ejecucion_ids.append(ObjectId(str(p)))
         except Exception:
             continue
-    orfanos = await Enrollment.find(
-        {"$or": [{"curso_id": None}, {"curso_id": {"$nin": prog_obj_ids}}]}
-    ).limit(200).to_list()
+
+    # 2. Programas historicos (es_historico=True)
+    # Decision Kevin 2026-08-07: estos enrollments NO son inconsistencias,
+    # son datos historicos que se mantienen por valor historico.
+    historicos = await Course.find({"es_historico": True}).to_list()
+    prog_hist_ids = []
+    for c in historicos:
+        cid = c.id
+        if cid:
+            try:
+                prog_hist_ids.append(ObjectId(str(cid)))
+            except Exception:
+                continue
+
+    # 3. Programas programados (estado_calculado == "programado")
+    # Tambien excluidos: son programas que aun no empezaron, sus enrollments
+    # son legitimos pero no son "en ejecucion" todavia.
+    prog_prog_ids = []
+    for c in await Course.find_all().to_list():
+        if c.id is None:
+            continue
+        if getattr(c, 'es_historico', False):
+            continue
+        try:
+            estado = calcular_estado_actual(
+                c.fecha_inicio,
+                c.fecha_fin,
+                getattr(c, 'estado_override', None),
+            )
+        except Exception:
+            continue
+        if estado == "programado":
+            try:
+                prog_prog_ids.append(ObjectId(str(c.id)))
+            except Exception:
+                continue
+
+    # Combinamos todos los IDs validos a excluir
+    all_valid_ids = prog_ejecucion_ids + prog_hist_ids + prog_prog_ids
+
+    # 4. Query final: enrollments con curso_id None o fuera de los IDs validos,
+    #    Y estado != "retirado" (para que el fix baje el contador)
+    orfanos = await Enrollment.find({
+        "$and": [
+            {"$or": [{"curso_id": None}, {"curso_id": {"$nin": all_valid_ids}}]},
+            {"estado": {"$ne": "retirado"}}
+        ]
+    }).limit(200).to_list()
+
     for enr in orfanos:
         inconsistencias.append({
             "tipo": "enrollment_huerfano",
@@ -291,9 +350,22 @@ async def check_becados_mal(programas_ids: List[str]) -> List[dict]:
 
 
 async def check_historicos_mal(programas_ids: List[str]) -> List[dict]:
-    """Check 6: Historicos mal clasificados (es_historico=True pero estado=en_ejecucion)"""
+    """Check 6: Historicos mal clasificados (es_historico=True pero estado=en_ejecucion)
+
+    R35-FASE-3 FIX 2 (2026-08-07, Kevin): el check reportaba DIP-DDU-2026/1
+    como inconsistente porque tiene es_historico=True y estado_override=en_ejecucion.
+    Kevin decidio en la questionnaire que ese programa ESTA bien como historico,
+    no quiere tocar el flag. La inconsistencia se reporta SOLO si el programa
+    todavia esta en fechas (fecha_fin >= hoy o sin fecha_fin), porque ahi si
+    podria ser un error de marcado. Si ya paso la fecha_fin, el programa
+    efectivamente termino y el flag es_historico=True es coherente aunque
+    estado_override diga en_ejecucion (ej: caso de un programa que se dio
+    por terminado administrativamente pero los modulos siguen visibles).
+    """
+    from datetime import datetime, timezone
     inconsistencias = []
     todos = await Course.find({"es_historico": True}).to_list()
+    hoy = datetime.now(timezone.utc).date()
     for c in todos:
         try:
             estado_actual = calcular_estado_actual(
@@ -309,7 +381,19 @@ async def check_historicos_mal(programas_ids: List[str]) -> List[dict]:
         # reportado como mal clasificado cuando en realidad solo no tiene fechas
         # catalogadas. Solo reportar si el curso tiene fechas validas o un override
         # que justifique el estado de ejecucion.
-        if estado_actual == "en_ejecucion" and (c.fecha_inicio is not None or getattr(c, 'estado_override', None) is not None):
+        # R35-FASE-3 FIX 2 (2026-08-07, Kevin): ademas, solo reportar si la
+        # fecha_fin es FUTURA (o None). Si ya paso, el programa realmente
+        # termino y el flag es_historico=True es legitimo.
+        fecha_fin_pasada = (
+            c.fecha_fin is not None
+            and hasattr(c.fecha_fin, 'date')
+            and c.fecha_fin.date() < hoy
+        )
+        if (
+            estado_actual == "en_ejecucion"
+            and (c.fecha_inicio is not None or getattr(c, 'estado_override', None) is not None)
+            and not fecha_fin_pasada
+        ):
             inscritos_count = len(c.inscritos) if getattr(c, 'inscritos', None) else 0
             inconsistencias.append({
                 "tipo": "historicos_mal",
