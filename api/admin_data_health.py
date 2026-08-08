@@ -812,6 +812,27 @@ async def fix_inconsistencia(
     elif tipo_accion in ("subir_resolucion", "reasignar_encargado"):
         raise HTTPException(400, f"Use el endpoint existente para {tipo_accion}")
 
+    elif tipo_accion in ("retirar", "revisar_y_asignar"):
+        # R35-FASE-3 FIX (2026-08-07): "revisar_y_asignar" era la accion sugerida
+        # para enrollment_huerfano pero no estaba implementada. Ahora
+        # "retirar" / "revisar_y_asignar" cambian el enrollment a RETIRADO
+        # con motivo claro. Sirve para los 200 enrollments de programas
+        # historicos/cerrados que no se pueden reasignar.
+        try:
+            eid = PydanticObjectId(entidad_id)
+        except Exception:
+            raise HTTPException(400, "entidad_id invalido")
+        enr = await Enrollment.get(eid)
+        if not enr:
+            raise HTTPException(404, "Enrollment no encontrado")
+        enr.estado = EstadoInscripcion.RETIRADO
+        enr.motivo_retiro = f"R35-FASE-3: enrollment huerfano (curso no existe o no esta en ejecucion). Accion: {tipo_accion}"
+        enr.fecha_retiro = utcnow_naive()
+        enr.retirado_por = "Mavis (R35-FASE-3)"
+        await enr.save()
+        _invalidate_cache()
+        return {"ok": True, "message": f"Enrollment {entidad_id} retirado correctamente"}
+
     else:
         raise HTTPException(400, f"Accion {tipo_accion} no implementada")
 
