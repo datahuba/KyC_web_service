@@ -221,12 +221,15 @@ class CourseUpdate(BaseModel):
     tipo_curso: Optional[TipoCurso] = None
     modalidad: Optional[Modalidad] = None
     
-    costo_total_interno: Optional[float] = Field(None, gt=0)
+    costo_total_interno: Optional[float] = Field(None, ge=0)
     matricula_interno: Optional[float] = Field(None, ge=0)
 
     cargo_adicional_items: Optional[List[CargoAdicionalItemCreate]] = None
-    
-    cantidad_cuotas: Optional[int] = Field(None, ge=1)
+
+    # F-FIX-EDITAR-HISTORICO-422 (2026-08-08, Kevin): permitir 0 para que el
+    # frontend pueda guardar un programa historico con costo 0 y 0 modulos
+    # (son solo archivo, no se venden). Antes era ge=1, daba 422 al guardar.
+    cantidad_cuotas: Optional[int] = Field(None, ge=0)
     modulos: Optional[List[ModuloCreate]] = None
 
     descuento_curso: Optional[float] = Field(None, ge=0, le=100)
