@@ -412,31 +412,45 @@ async def check_descuentos_mal(programas_ids: List[str]) -> List[dict]:
 
 
 async def check_pagos_anulados_activo(programas_ids: List[str]) -> List[dict]:
-    """Check 10: Pagos anulados con enrollment activo"""
+    """Check 10: Pagos anulados con enrollment activo
+
+    R35-FASE-3 FIX (2026-08-07): el codigo original hacia 1 query a Payment
+    POR CADA enrollment (300 queries en serie = 25s!). Optimizado: 2 queries
+    totales (1 enrollment + 1 payment con $in todos los IDs).
+    """
     inconsistencias = []
     enrollments = await Enrollment.find(
         {"curso_id": {"$in": prog_obj_ids_list(programas_ids)}, "estado": {"$in": [EstadoInscripcion.ACTIVO.value, EstadoInscripcion.PENDIENTE_PAGO.value, EstadoInscripcion.COMPLETADO.value]}}
     ).limit(300).to_list()
-    for enr in enrollments:
-        eid = to_id(enr)
-        if not eid:
+    if not enrollments:
+        return inconsistencias
+    enrollment_ids = [to_id(e) for e in enrollments if to_id(e)]
+    enrollments_by_id = {to_id(e): e for e in enrollments if to_id(e)}
+
+    # 1 sola query: todos los pagos anulados/rechazados de estos enrollments
+    from bson import ObjectId
+    enr_obj_ids = [ObjectId(eid) for eid in enrollment_ids if eid]
+    pagos_malos = await Payment.find(
+        {"inscripcion_id": {"$in": enr_obj_ids}, "estado_pago": {"$in": ["anulado", "rechazado"]}}
+    ).limit(1000).to_list()
+
+    for p in pagos_malos:
+        pid = to_id(getattr(p, 'inscripcion_id', None))
+        enr = enrollments_by_id.get(pid)
+        if not enr:
             continue
-        pagos_malos = await Payment.find(
-            {"inscripcion_id": eid, "estado_pago": {"$in": ["anulado", "rechazado"]}}
-        ).limit(10).to_list()
-        for p in pagos_malos:
-            inconsistencias.append({
-                "tipo": "pagos_anulados_activo",
-                "severidad": "alta",
-                "entidad_tipo": "pago",
-                "entidad_id": to_id(p),
-                "estudiante_nombre": getattr(enr, 'estudiante_nombre', None) or "?",
-                "programa_id": to_id(enr.curso_id) if enr.curso_id else None,
-                "programa_codigo": getattr(enr, 'curso_codigo', None) or "?",
-                "descripcion": f"Pago anulado/rechazado (Bs {p.cantidad_pago}) en enrollment {enr.estado}",
-                "accion_sugerida": "revisar_consistencia",
-                "metadata": {"estado_pago": p.estado_pago, "monto": p.cantidad_pago}
-            })
+        inconsistencias.append({
+            "tipo": "pagos_anulados_activo",
+            "severidad": "alta",
+            "entidad_tipo": "pago",
+            "entidad_id": to_id(p),
+            "estudiante_nombre": getattr(enr, 'estudiante_nombre', None) or "?",
+            "programa_id": to_id(enr.curso_id) if enr.curso_id else None,
+            "programa_codigo": getattr(enr, 'curso_codigo', None) or "?",
+            "descripcion": f"Pago anulado/rechazado (Bs {p.cantidad_pago}) en enrollment {enr.estado}",
+            "accion_sugerida": "revisar_consistencia",
+            "metadata": {"estado_pago": p.estado_pago, "monto": p.cantidad_pago}
+        })
     return inconsistencias
 
 
