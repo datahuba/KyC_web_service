@@ -265,6 +265,16 @@ async def check_student_sin_enrollment(programas_ids: List[str]) -> List[dict]:
     no es "sin enrollment" aunque su curso sea historico o programado.
     Decisión Kevin 2026-08-08: "todos están con matrícula pagada todos
     han pagado sus módulos respectivos".
+
+    R35-FASE-3 FIX 3 (2026-08-08, Kevin): ademas de la coleccion enrollments,
+    el modelo Student tiene un campo `lista_cursos_ids` (List[PyObjectId])
+    que mantiene la lista oficial de cursos del estudiante. Si el estudiante
+    tiene al menos 1 curso en `lista_cursos_ids`, NO es inconsistente
+    aunque no aparezca en la coleccion enrollments. Esto cubre casos donde
+    el estudiante fue matriculado pero la coleccion enrollments no esta
+    sincronizada (por bug en una importacion de excel o en el script de
+    pagos). Decision Kevin 2026-08-08: el excel de pagos + el sistema de
+    gestion de pagos SI registran la matricula del estudiante.
     """
     inconsistencias = []
 
@@ -283,6 +293,13 @@ async def check_student_sin_enrollment(programas_ids: List[str]) -> List[dict]:
     for s in students:
         sid = to_id(s)
         if sid and sid not in student_ids_con_enrollment:
+            # R35-FASE-3 FIX 3 (2026-08-08, Kevin): verificar tambien
+            # lista_cursos_ids del Student. Si tiene al menos 1 curso,
+            # NO es inconsistente (fuente de verdad oficial: la lista
+            # se mantiene sincronizada con pagos y matricula).
+            lista_cursos = getattr(s, 'lista_cursos_ids', None) or []
+            if lista_cursos and len(lista_cursos) > 0:
+                continue
             nombre = getattr(s, 'nombre', '') or ''
             apellido = getattr(s, 'apellido_paterno', '') or ''
             inconsistencias.append({
