@@ -255,20 +255,23 @@ async def check_student_sin_enrollment(programas_ids: List[str]) -> List[dict]:
 
     Approach: 2 queries (ObjectId) + diff en Python. Mas rapido y simple que
     $lookup aggregation (~870ms vs ~930ms en benchmarks).
-    """
-    from bson import ObjectId
-    inconsistencias = []
-    prog_obj_ids = []
-    for p in programas_ids:
-        try:
-            prog_obj_ids.append(ObjectId(str(p)))
-        except Exception:
-            continue
 
-    # Q1: enrollments en programas en ejecucion
-    enrollments = await Enrollment.find(
-        {"curso_id": {"$in": prog_obj_ids}}
-    ).limit(1000).to_list()
+    R35-FASE-3 FIX 2 (2026-08-08, Kevin): el check solo buscaba enrollments
+    en programas en ejecucion, pero hay estudiantes con enrollment en
+    programas historicos/programados que SI pagaron matricula y modulos.
+    Esos aparecian como falsos positivos (238 inconsistencias). Ahora el
+    check busca enrollments en CUALQUIER curso (sin importar el estado del
+    curso), porque un estudiante con al menos un enrollment registrado
+    no es "sin enrollment" aunque su curso sea historico o programado.
+    Decisión Kevin 2026-08-08: "todos están con matrícula pagada todos
+    han pagado sus módulos respectivos".
+    """
+    inconsistencias = []
+
+    # Q1: TODOS los enrollments (sin filtrar por curso_id)
+    # Si el estudiante tiene al menos 1 enrollment en cualquier curso,
+    # NO es "sin enrollment" (puede estar en programa historico/programado).
+    enrollments = await Enrollment.find_all().limit(5000).to_list()
     student_ids_con_enrollment = set()
     for e in enrollments:
         eid = to_id(e.estudiante_id) if e.estudiante_id else None
