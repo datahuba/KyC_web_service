@@ -253,13 +253,25 @@ async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dic
 
         p_dict.update({
             "nombre_estudiante": nombre_estudiante,
-            "fecha": to_bolivia_time(_get(payment, "fecha_subida")),
+            "fecha": to_bolivia_time(_get(payment, "fecha_subida")) or "",
             "moneda": "Bs",
             "monto": _get(payment, "cantidad_pago"),
             "estado": _set_estado_value(_get(payment, "estado_pago")),
             "total_cuotas": total_cuotas,
-            "created_at": to_bolivia_time(_get(payment, "created_at")),
-            "updated_at": to_bolivia_time(_get(payment, "updated_at")),
+            # F-PERF-PAGOS-NO-FILTRO-FIX (2026-08-08, Kevin): BUG FIX
+            # ANTES: created_at/updated_at se sobrescribian con
+            # to_bolivia_time() (string formateado). Con Beanie.find eso
+            # funcionaba porque Pydantic parseaba "2026-08-08 12:34:56" como
+            # datetime. PERO los pagos ANTIGUOS (sin created_at/updated_at
+            # en el documento Mongo) hacian to_bolivia_time(None)="", y
+            # Pydantic NO parsea "" como datetime → 500 ResponseValidationError.
+            # Con motor + projection esto se manifesto: Beanie ponia defaults
+            # automaticos, motor retorna SOLO lo que esta en Mongo.
+            # FIX: NO formatear created_at/updated_at. Dejarlos como datetime
+            # (o None si no existen). El frontend puede formatearlos con
+            # formatDate() igual que hacia con "fecha".
+            "created_at": _get(payment, "created_at"),
+            "updated_at": _get(payment, "updated_at"),
             # F-PERF-PAGOS-NO-FILTRO (2026-08-08, Kevin): _calcular_en_ventana_reversion
             # ahora acepta tanto Beanie Payment como dicts de motor, asi que lo
             # llamamos siempre. Antes retornaba False para dicts, lo que hacia
