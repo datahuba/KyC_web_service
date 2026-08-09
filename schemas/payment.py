@@ -168,8 +168,13 @@ class PaymentResponse(BaseModel):
     # R35-FASE2-RECONCILIATION (2026-08-05): expone origen en la respuesta API
     origen: Optional[str] = None
 
-    created_at: datetime
-    updated_at: datetime
+    # F-PERF-PAGOS-NO-FILTRO-FIX2 (2026-08-08, Kevin): ANTES eran `datetime` (no
+    # Optional). Pydantic rechazaba None, lo que lanzaba 500 para pagos antiguos
+    # sin created_at/updated_at en el documento Mongo. Con motor + projection,
+    # los pagos sin esos campos retornan None, NO un datetime con default.
+    # Fix: cambiar a Optional[datetime] = None para que sea compatible.
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
     en_ventana_reversion: bool = False  # ISSUE-P-REVERSION
     
