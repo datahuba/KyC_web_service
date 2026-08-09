@@ -126,8 +126,26 @@ async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dic
     student_ids = list({_get(p, "estudiante_id") for p in payments if _get(p, "estudiante_id")})
     enrollment_ids = list({_get(p, "inscripcion_id") for p in payments if _get(p, "inscripcion_id")})
 
-    students_task = Student.find({"_id": {"$in": [str(s) for s in student_ids]}}).to_list()
-    enrollments_task = Enrollment.find({"_id": {"$in": [str(e) for e in enrollment_ids]}}).to_list()
+    # F-PERF-ENRICH-FIX (2026-08-08, Kevin):
+    # 1) BUG FIX: antes usaba [str(s) for s in student_ids] que NO encuentra nada
+    #    en Mongo (los _id son ObjectId, no strings). Eso causaba que
+    #    nombre_estudiante siempre fuera "Sin nombre" en la respuesta.
+    # 2) PROYECCION: solo traer los campos necesarios (nombre, carnet_identidad,
+    #    registro, cantidad_cuotas) en vez de TODOS los campos del documento.
+    #    Para 10 pagos, eso es ~10x menos datos a transferir.
+    # 3) Dejar ObjectId directo (sin conversion a str) que es mas rapido.
+    from beanie import PydanticObjectId
+    student_ids_oid = [s if isinstance(s, PydanticObjectId) else PydanticObjectId(s) for s in student_ids if s]
+    enrollment_ids_oid = [e if isinstance(e, PydanticObjectId) else PydanticObjectId(e) for e in enrollment_ids if e]
+
+    students_task = Student.find(
+        {"_id": {"$in": student_ids_oid}},
+        projection={"nombre": 1, "apellidos": 1, "carnet_identidad": 1, "registro": 1, "email": 1}
+    ).to_list()
+    enrollments_task = Enrollment.find(
+        {"_id": {"$in": enrollment_ids_oid}},
+        projection={"cantidad_cuotas": 1, "curso_id": 1}
+    ).to_list()
 
     students, enrollments = await asyncio.gather(students_task, enrollments_task)
 

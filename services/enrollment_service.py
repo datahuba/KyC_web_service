@@ -13,6 +13,28 @@ Permisos:
 
 from typing import List, Optional
 from datetime import datetime
+
+
+def _recalcular_estado_modulo(mod) -> None:
+    """
+    F-FIX-ESTADO-MODULOS-POST-DESCUENTO (2026-08-08, Kevin): cuando se cambia
+    el costo de un modulo (mod.costo), hay que recalcular su estado
+    financiero. Antes quedaba en "Parcial" aunque monto_pagado cubriera
+    el nuevo costo con descuento (caso de becados).
+
+    Reglas:
+    - monto_pagado == 0 -> Pendiente
+    - 0 < monto_pagado < costo - 0.01 -> Parcial
+    - monto_pagado >= costo - 0.01 -> Pagado
+    """
+    costo = float(mod.costo or 0.0)
+    pagado = float(mod.monto_pagado or 0.0)
+    if pagado <= 0.005:
+        mod.estado = "Pendiente"
+    elif abs(pagado - costo) < 0.01 or pagado >= costo - 0.01:
+        mod.estado = "Pagado"
+    else:
+        mod.estado = "Parcial"
 from models.enrollment import Enrollment, ModuloEstado, CargoAdicionalItemSnapshot
 from models.student import Student
 from models.course import Course
@@ -442,6 +464,11 @@ async def update_enrollment_descuento(
             else:
                 mod.costo = round(proporcion * colegiatura_final, 2)
                 total_asignado += mod.costo
+            # F-FIX-ESTADO-MODULOS-POST-DESCUENTO (2026-08-08, Kevin): recalcular
+            # estado del modulo despues de cambiar su costo. Sin esto, los
+            # becados quedan en "Parcial" aunque monto_pagado cubra el nuevo
+            # costo con descuento.
+            _recalcular_estado_modulo(mod)
 
             if nota_minima_snapshot is not None:
                 if es_ultimo:
@@ -955,6 +982,9 @@ async def _recalcular_total_enrollment(enrollment: Enrollment, course: Course) -
                     proporcion = 1.0 / len(enrollment.modulos)
                 mod.costo = round(proporcion * colegiatura_final, 2)
                 total_asignado += mod.costo
+            # F-FIX-ESTADO-MODULOS-POST-DESCUENTO (2026-08-08, Kevin): recalcular
+            # estado del modulo despues de cambiar su costo.
+            _recalcular_estado_modulo(mod)
 
     # F-FIX-DESCUENTO-TOTAL-PAGAR: total_a_pagar se calcula desde la
     # SUMA de los costos actuales de los modulos (que ya tienen el descuento
