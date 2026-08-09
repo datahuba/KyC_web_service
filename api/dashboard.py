@@ -63,11 +63,19 @@ async def get_dashboard_stats(current_user: User = Depends(require_staff)):
     F-PERF-DASHBOARD-CACHE (2026-08-05, Kevin): cache in-memory con TTL
     de 30s por (user_id, scope). El primer request tarda ~1-3s; los
     siguientes dentro de los 30s tardan < 50ms (cache hit).
+
+    F-PERF-DASHBOARD-PRECOMPUTE (2026-08-08, Kevin): cuando hay cache miss
+    (cold), trackeamos al user para que el background job pre-compute el
+    dashboard. Asi la proxima vez que el user (u otros del mismo scope)
+    pidan el dashboard, el cache ya esta caliente.
     """
     # F-PERF-DASHBOARD-CACHE: servir desde cache si existe y no expiro
     cached = _get_cached_dashboard(current_user)
     if cached is not None:
         return cached
+    # F-PERF-DASHBOARD-PRECOMPUTE: track cold miss para pre-computar despues
+    from core.dashboard_precomputer import track_dashboard_user
+    await track_dashboard_user(str(current_user.id))
     # Base query filters based on user's assigned courses if they are segmented
     course_query = {}
     if current_user.cursos_asignados:
@@ -227,6 +235,9 @@ async def get_dashboard_v2(current_user: User = Depends(require_staff)):
     v2_cached = _get_cached_v2(current_user)
     if v2_cached is not None:
         return v2_cached
+    # F-PERF-DASHBOARD-PRECOMPUTE: track cold miss para pre-computar despues
+    from core.dashboard_precomputer import track_dashboard_user
+    await track_dashboard_user(str(current_user.id))
 
     # Cold path: construir todo en una sola pasada
     result = await _build_dashboard_v2(current_user)

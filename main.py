@@ -272,6 +272,12 @@ async def start_db():
     else:
         logger.warning("[job-congelado] DESACTIVADO por JOB_CONGELADO_ACTIVO=False")
 
+    # F-PERF-DASHBOARD-PRECOMPUTE (2026-08-08, Kevin): pre-computa el dashboard
+    # cada 4 min para usuarios activos. Elimina el cold (1-13s) en la mayoria
+    # de los casos. El job vive en core/dashboard_precomputer.py.
+    from core.dashboard_precomputer import start_precomputer
+    start_precomputer()
+
 @app.get("/")
 async def root():
     return {"message": "Welcome to KyC Payment System API"}

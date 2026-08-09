@@ -91,6 +91,17 @@ class Settings(BaseSettings):
     CACHE_TTL_ENROLLMENTS_SECONDS: int = Field(default=30, env="CACHE_TTL_ENROLLMENTS_SECONDS")
     CACHE_MAX_ENTRIES: int = Field(default=1000, env="CACHE_MAX_ENTRIES")
 
+    # F-PERF-DASHBOARD-PRECOMPUTE (2026-08-08, Kevin): background job que
+    # pre-computa el dashboard cada X segundos para usuarios activos. Esto
+    # elimina el cold del dashboard (1-13s) en la mayoria de los casos
+    # porque el cache ya esta caliente cuando el user hace request.
+    # - DASHBOARD_PRECOMPUTE_INTERVAL_SECONDS: cada cuanto se ejecuta
+    #   el job. Default 240s (4 min) < TTL 300s (5 min) para garantizar
+    #   que el cache siempre tenga data fresca cuando el user lo pida.
+    # - DASHBOARD_PRECOMPUTE_ENABLED: kill switch. False desactiva el job.
+    DASHBOARD_PRECOMPUTE_ENABLED: bool = Field(default=True, env="DASHBOARD_PRECOMPUTE_ENABLED")
+    DASHBOARD_PRECOMPUTE_INTERVAL_SECONDS: int = Field(default=240, env="DASHBOARD_PRECOMPUTE_INTERVAL_SECONDS")
+
     model_config = {
         "env_file": ".env",
         "case_sensitive": True
