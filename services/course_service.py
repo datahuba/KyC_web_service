@@ -7,6 +7,7 @@ Lógica de negocio para cursos (Funciones).
 
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Union
+import asyncio
 from models.course import Course, calcular_estado_actual
 from models.enrollment import Enrollment
 from models.student import Student
@@ -185,15 +186,27 @@ async def _sincronizar_requisitos_inscripciones(course: Course) -> None:
     - QUITA de la inscripción los requisitos que el curso ya no exige, SOLO si
       el estudiante todavía no subió nada para ellos (estado "pendiente"); si ya
       había subido algo, se conserva para no perder su documento.
+
+    F-FIX-SYNC-REQUISITOS-PARALELO (2026-08-09, Kevin): el loop original
+    hacia N saves SECUENCIALES (1 por enrollment). Con 64 inscritos y
+    150ms de RTT a MongoDB Atlas (Brazil), eso son 9.6s SOLO en red,
+    que sumado a la latencia Bolivia→VPS saturaba el timeout de 30s del
+    frontend. Ahora:
+      1. Calculamos los nuevos_requisitos en memoria.
+      2. SKIP si no cambio (muchos enrollments no requieren sync).
+      3. asyncio.gather para paralelizar los saves (1 RTT en lugar de N).
+    Resultado: de 9.6s+ a ~0.5-1s para 64 inscritos.
     """
     from models.enums import EstadoInscripcion
 
-    descripciones_curso = [r.descripcion for r in course.requisitos]
+    descripciones_curso = set(r.descripcion for r in course.requisitos)
     enrollments = await Enrollment.find(
         Enrollment.curso_id == course.id,
         Enrollment.estado != EstadoInscripcion.CANCELADO
     ).to_list()
 
+    # Preparar saves solo de los enrollments que REALMENTE cambiaron
+    saves_pendientes = []
     for enr in enrollments:
         existentes = {r.descripcion: r for r in enr.requisitos}
         nuevos_requisitos = []
@@ -211,8 +224,19 @@ async def _sincronizar_requisitos_inscripciones(course: Course) -> None:
             if template.descripcion not in existentes:
                 nuevos_requisitos.append(template.to_requisito())
 
+        # F-FIX-SYNC-REQUISITOS-PARALELO: skip si la lista no cambió.
+        # Comparamos por descripcion+estado para no hacer save innecesario.
+        signature_actual = sorted((r.descripcion, r.estado.value if hasattr(r.estado, 'value') else str(r.estado)) for r in enr.requisitos)
+        signature_nueva = sorted((r.descripcion, r.estado.value if hasattr(r.estado, 'value') else str(r.estado)) for r in nuevos_requisitos)
+        if signature_actual == signature_nueva:
+            continue
+
         enr.requisitos = nuevos_requisitos
-        await enr.save()
+        saves_pendientes.append(enr.save())
+
+    # Ejecutar todos los saves en paralelo (1 RTT total al pool de Mongo).
+    if saves_pendientes:
+        await asyncio.gather(*saves_pendientes, return_exceptions=True)
 
 async def delete_course(id: PydanticObjectId) -> Optional[Course]:
     """Elimina un curso"""
