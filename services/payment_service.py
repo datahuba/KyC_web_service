@@ -955,12 +955,23 @@ async def get_all_payments(
     if estudiante_id:
         query_dict["estudiante_id"] = estudiante_id
 
-    if curso_id:
-        enrollments = await Enrollment.find(Enrollment.curso_id == curso_id).to_list()
-        enrollment_ids = [e.id for e in enrollments]
-        query_dict["inscripcion_id"] = {"$in": enrollment_ids}
-
-    if cursos_permitidos is not None:
+    # F-PERF-PAGOS-CURSO-FILTRO (2026-08-08, Kevin): antes hacia 2 round-trips:
+    # 1) Enrollment.find(curso_id) para sacar los enrollment_ids (2.5s)
+    # 2) Payment.find(inscripcion_id IN [...]) para traer los pagos
+    # Ahora: filtrar directo por payments.curso_id (0.06s, 40x mas rapido).
+    # Tambien incluye pagos huerfanos (pagos con curso_id correcto pero
+    # inscripcion_id apuntando a un enrollment borrado), que es lo que el
+    # usuario quiere ver (todos los pagos del curso).
+    if curso_id and cursos_permitidos is not None:
+        if ObjectId(curso_id) in [ObjectId(c) for c in cursos_permitidos]:
+            query_dict["curso_id"] = curso_id
+        else:
+            # El curso_id no esta en los cursos_permitidos del usuario (RBAC).
+            # Devolver lista vacia.
+            query_dict["_id"] = None
+    elif curso_id:
+        query_dict["curso_id"] = curso_id
+    elif cursos_permitidos is not None:
         query_dict["curso_id"] = {"$in": cursos_permitidos}
         
     if tipo_concepto:
