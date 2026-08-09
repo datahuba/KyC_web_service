@@ -77,6 +77,20 @@ class Settings(BaseSettings):
     SENTRY_TRACES_SAMPLE_RATE: float = Field(default=0.1, env="SENTRY_TRACES_SAMPLE_RATE")
     SENTRY_ENVIRONMENT: str = Field(default="production", env="SENTRY_ENVIRONMENT")
 
+    # F-CACHE-SHARED (2026-08-08, Kevin): cache en memoria para lookups
+    # frecuentes de students y enrollments. El cuello de los endpoints de
+    # pagos NO era el query de payments sino los N+1 lookups de students +
+    # enrollments que enrich hace en cada request. Con este cache, los
+    # mismos IDs solo se buscan 1 vez cada TTL segundos (compartido entre
+    # todos los requests concurrentes del proceso).
+    # TTL: 30-60s es seguro porque los datos no son criticos en tiempo real
+    # (nombre del estudiante, cantidad de cuotas). Un cambio de nombre
+    # tarda hasta 60s en verse, aceptable para una lista de pagos.
+    CACHE_ENABLED: bool = Field(default=True, env="CACHE_ENABLED")
+    CACHE_TTL_STUDENTS_SECONDS: int = Field(default=60, env="CACHE_TTL_STUDENTS_SECONDS")
+    CACHE_TTL_ENROLLMENTS_SECONDS: int = Field(default=30, env="CACHE_TTL_ENROLLMENTS_SECONDS")
+    CACHE_MAX_ENTRIES: int = Field(default=1000, env="CACHE_MAX_ENTRIES")
+
     model_config = {
         "env_file": ".env",
         "case_sensitive": True

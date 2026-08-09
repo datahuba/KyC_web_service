@@ -193,24 +193,41 @@ async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dic
     #    Para 10 pagos, eso es ~10x menos datos a transferir.
     # 3) Usar get_motor_collection() + .find() de motor directo porque
     #    Beanie.find() no acepta projection= como keyword argument.
-    from beanie import PydanticObjectId
-    student_ids_oid = [s if isinstance(s, PydanticObjectId) else PydanticObjectId(s) for s in student_ids if s]
-    enrollment_ids_oid = [e if isinstance(e, PydanticObjectId) else PydanticObjectId(e) for e in enrollment_ids if e]
+    # 4) F-CACHE-SHARED: usar el cache compartido para evitar 2 round-trips
+    #    a Mongo en cada request. Si los IDs ya estan en cache (caso tipico:
+    #    el mismo usuario refresca la lista de pagos cada 30s), retorna
+    #    instantaneamente sin tocar Mongo.
 
-    students_task = Student.get_motor_collection().find(
-        {"_id": {"$in": student_ids_oid}},
-        {"nombre": 1, "apellidos": 1, "carnet_identidad": 1, "registro": 1, "email": 1}
-    ).to_list(length=500)
-    enrollments_task = Enrollment.get_motor_collection().find(
-        {"_id": {"$in": enrollment_ids_oid}},
-        {"cantidad_cuotas": 1, "curso_id": 1}
-    ).to_list(length=500)
+    # Cache bulk lookup. El cache retorna {id_str: doc} con _id preservado.
+    # El cache hace 1 query a Mongo SOLO para los IDs que no estan en cache.
+    from core.cache import get_students_bulk_cached, get_enrollments_bulk_cached
 
-    students_raw, enrollments_raw = await asyncio.gather(students_task, enrollments_task)
+    students_map_raw, enrollments_map_raw = await asyncio.gather(
+        get_students_bulk_cached(
+            student_ids,
+            projection={"nombre": 1, "apellidos": 1, "carnet_identidad": 1, "registro": 1, "email": 1}
+        ),
+        get_enrollments_bulk_cached(
+            enrollment_ids,
+            projection={"cantidad_cuotas": 1, "curso_id": 1}
+        )
+    )
 
-    # Los docs vienen de motor (no Beanie), pero los mapeamos por _id (ObjectId)
-    students_map = {s["_id"]: s for s in students_raw}
-    enrollments_map = {e["_id"]: e for e in enrollments_raw}
+    # El cache retorna dicts con key=string(id). El lookup que viene abajo
+    # usa el ID original (ObjectId). Necesitamos reindexar por el ObjectId
+    # real para que `students_map.get(estudiante_id)` funcione cuando
+    # estudiante_id es bson.ObjectId del payment.
+    students_map = {}
+    for k, v in students_map_raw.items():
+        oid = v.get("_id")
+        if oid is not None:
+            students_map[oid] = v
+
+    enrollments_map = {}
+    for k, v in enrollments_map_raw.items():
+        oid = v.get("_id")
+        if oid is not None:
+            enrollments_map[oid] = v
 
     enriched_list = []
     for payment in payments:

@@ -301,7 +301,78 @@ async def enrich_enrollment_dates(enrollment: Enrollment) -> dict:
 
 
 async def get_enrollment(id: PydanticObjectId) -> Optional[Enrollment]:
-    return await Enrollment.get(id)
+    """
+    F-CACHE-SHARED (2026-08-08, Kevin): ahora usa el cache compartido
+    en memoria (TTL 30s) para evitar round-trip a Mongo en cada llamada.
+
+    Importante: el cache retorna un dict (de motor), NO un objeto Beanie.
+    El codigo que llama a esta funcion debe estar preparado para recibir
+    cualquiera de los dos. Beanie Enrollment tiene atributos (.id, .curso_id, etc.)
+    que el dict no tiene directamente (usa keys ['_id'], ['curso_id']).
+
+    Si necesitas acceso a campos especificos, usa .get('campo') con fallback
+    o _to_beanie() para convertir el dict a objeto Beanie.
+
+    Para mantener compatibilidad maxima, esta funcion:
+    1. Si el cache esta deshabilitado, hace Enrollment.get(id) normal
+    2. Si el cache retorna un dict, lo convierte a Enrollment con Pydantic
+       (perdida de performance minima, ~5ms por conversion)
+    3. Si no esta en cache, lo busca y guarda en cache
+    """
+    from core.cache import get_enrollment_cached, cache_enabled
+    from models.enrollment import Enrollment as _Enrollment
+
+    if not cache_enabled():
+        return await Enrollment.get(id)
+
+    cached_dict = await get_enrollment_cached(id)
+    if cached_dict is None:
+        return None
+
+    # Convertir dict a Enrollment (Beanie) para mantener compatibilidad con
+    # todos los callers que esperan un objeto Beanie (no dict).
+    try:
+        return _Enrollment(**{k: v for k, v in cached_dict.items() if k != "_found"})
+    except Exception:
+        # Si falla la conversion (schema cambio, campo nuevo requerido),
+        # caer al Enrollment.get(id) directo para no romper.
+        return await Enrollment.get(id)
+    """
+    F-CACHE-SHARED (2026-08-08, Kevin): ahora usa el cache compartido
+    en memoria (TTL 30s) para evitar round-trip a Mongo en cada llamada.
+
+    Importante: el cache retorna un dict (de motor), NO un objeto Beanie.
+    El codigo que llama a esta funcion debe estar preparado para recibir
+    cualquiera de los dos. Beanie Enrollment tiene atributos (.id, .curso_id, etc.)
+    que el dict no tiene directamente (usa keys ['_id'], ['curso_id']).
+
+    Si necesitas acceso a campos especificos, usa .get('campo') con fallback
+    o _to_beanie() para convertir el dict a objeto Beanie.
+
+    Para mantener compatibilidad maxima, esta funcion:
+    1. Si el cache esta deshabilitado, hace Enrollment.get(id) normal
+    2. Si el cache retorna un dict, lo convierte a Enrollment con Pydantic
+       (perdida de performance minima, ~5ms por conversion)
+    3. Si no esta en cache, lo busca y guarda en cache
+    """
+    if not _cache_enabled():
+        return await Enrollment.get(id)
+
+    from core.cache import get_enrollment_cached
+    from models.enrollment import Enrollment as _Enrollment
+
+    cached_dict = await get_enrollment_cached(id)
+    if cached_dict is None:
+        return None
+
+    # Convertir dict a Enrollment (Beanie) para mantener compatibilidad con
+    # todos los callers que esperan un objeto Beanie (no dict).
+    try:
+        return _Enrollment(**{k: v for k, v in cached_dict.items() if k != "_found"})
+    except Exception:
+        # Si falla la conversion (schema cambio, campo nuevo requerido),
+        # caer al Enrollment.get(id) directo para no romper.
+        return await Enrollment.get(id)
 
 
 async def get_enrollments_by_student(student_id: PydanticObjectId) -> List[Enrollment]:
