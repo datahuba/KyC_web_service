@@ -12,8 +12,6 @@ from .config import settings
 # Importar todos los modelos para registrarlos en Beanie
 from models.user import User
 from models.student import Student
-# R36 (2026-08-08, Kevin): identidad centralizada para multi-perfil
-from models.account import Account
 from models.course import Course
 from models.enrollment import Enrollment
 from models.payment import Payment
@@ -192,10 +190,6 @@ async def init_db():
     await init_beanie(
         database=db,
         document_models=[
-            # R36 (2026-08-08, Kevin): multi-perfil. Account es la identidad
-            # centralizada, Student y User se vinculan via account_id.
-            # Debe ir ANTES de User/Student porque Beanie los referencia.
-            Account,
             User,
             Student,
             Notification,

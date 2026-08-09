@@ -76,13 +76,6 @@ class Student(MongoBaseModel):
     
     registro: str = Field(...,description="Número de registro único del estudiante (usado como username)")
     password: str = Field(...,description="Contraseña hasheada con bcrypt (NUNCA almacenar en texto plano)")
-    # R36 (2026-08-08, Kevin): multi-perfil. Vincula este Student a una
-    # identidad centralizada (Account). Permite que una persona sea
-    # estudiante Y docente con el mismo username+password. None = legacy.
-    account_id: Optional[PyObjectId] = Field(
-        None,
-        description="FK al Account (identidad unificada). None = estudiante legacy sin multi-perfil."
-    )
     nombre: Optional[str] = Field(None,min_length=1,max_length=200,description="Nombre completo del estudiante")
     email: Optional[EmailStr] = Field(None,description="Correo electrónico (validado automáticamente por Pydantic)")
     carnet: Optional[str] = Field(None,description="Carnet de identidad (solo los números, sin complemento)")

@@ -24,16 +24,6 @@ class User(MongoBaseModel):
     username: str = Field(..., min_length=3, description="Nombre de usuario único")
     email: EmailStr = Field(..., description="Correo electrónico único")
     password: str = Field(..., description="Contraseña hasheada")
-
-    # R36 (2026-08-08, Kevin): multi-perfil. Vincula este User a una identidad
-    # centralizada (Account). Si un User Y un Student comparten el mismo
-    # account_id, pueden usar el mismo username+password para entrar a
-    # ambas areas. Si account_id es None, el User usa su propio username
-    # (compatibilidad con el sistema actual).
-    account_id: Optional[PyObjectId] = Field(
-        None,
-        description="FK al Account (identidad unificada). None = usuario legacy sin multi-perfil."
-    )
     
     rol: UserRole = Field(default=UserRole.ADMIN, description="Rol para permisos")
     activo: bool = Field(default=True, description="Si el usuario puede acceder al sistema")
