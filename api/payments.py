@@ -400,7 +400,15 @@ async def list_payments(
         # filtrado), pero al menos no es un sub-conjunto de la pagina.
         filtered_payments = []
         for p in payments:
-            concepto_lower = (p.concepto or "").lower().strip()
+            # F-PERF-PAGOS-NO-FILTRO (2026-08-08, Kevin): p puede ser dict de motor
+            # (cuando get_all_payments usa motor directo) o Beanie Payment
+            # (cuando se llama desde /pendientes/list u otro endpoint que
+            # todavía usa Beanie). Acceso polimorfico para ambos.
+            if isinstance(p, dict):
+                concepto = p.get("concepto") or ""
+            else:
+                concepto = getattr(p, "concepto", "") or ""
+            concepto_lower = concepto.lower().strip()
             is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
             if current_user.rol == "cpd" and not is_matricula:
                 continue
@@ -1854,7 +1862,14 @@ async def export_payments_excel(
         # la lógica de list_payments.
         filtered = []
         for p in payments:
-            concepto_lower = (p.concepto or "").lower().strip()
+            # F-PERF-PAGOS-NO-FILTRO (2026-08-08, Kevin): p puede ser dict de motor
+            # (post-optimizacion) o Beanie Payment (pre-optimizacion). Acceso
+            # polimorfico.
+            if isinstance(p, dict):
+                concepto = p.get("concepto") or ""
+            else:
+                concepto = getattr(p, "concepto", "") or ""
+            concepto_lower = concepto.lower().strip()
             is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
             if current_user.rol == "cpd" and not is_matricula:
                 continue
@@ -1873,9 +1888,15 @@ async def export_payments_excel(
 
     # Enriquecer con estudiante + curso para el Excel
     enriched = await payment_service.enrich_payments_with_details_bulk(payments)
-    student_ids = list({p.estudiante_id for p in payments if p.estudiante_id})
-    enrollment_ids = list({p.inscripcion_id for p in payments if p.inscripcion_id})
-    curso_ids = list({p.curso_id for p in payments if p.curso_id})
+    # F-PERF-PAGOS-NO-FILTRO (2026-08-08, Kevin): payments puede ser dicts de
+    # motor (post-optimizacion) o Beanie Payment. Acceso polimorfico.
+    def _pid(p, key):
+        if isinstance(p, dict):
+            return p.get(key)
+        return getattr(p, key, None)
+    student_ids = list({_pid(p, "estudiante_id") for p in payments if _pid(p, "estudiante_id")})
+    enrollment_ids = list({_pid(p, "inscripcion_id") for p in payments if _pid(p, "inscripcion_id")})
+    curso_ids = list({_pid(p, "curso_id") for p in payments if _pid(p, "curso_id")})
 
     students_task = Student.find({"_id": {"$in": [str(s) for s in student_ids]}}).to_list()
     enrollments_task = Enrollment.find({"_id": {"$in": [str(e) for e in enrollment_ids]}}).to_list()
