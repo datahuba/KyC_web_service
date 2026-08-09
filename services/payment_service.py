@@ -133,24 +133,26 @@ async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dic
     # 2) PROYECCION: solo traer los campos necesarios (nombre, carnet_identidad,
     #    registro, cantidad_cuotas) en vez de TODOS los campos del documento.
     #    Para 10 pagos, eso es ~10x menos datos a transferir.
-    # 3) Dejar ObjectId directo (sin conversion a str) que es mas rapido.
+    # 3) Usar get_motor_collection() + .find() de motor directo porque
+    #    Beanie.find() no acepta projection= como keyword argument.
     from beanie import PydanticObjectId
     student_ids_oid = [s if isinstance(s, PydanticObjectId) else PydanticObjectId(s) for s in student_ids if s]
     enrollment_ids_oid = [e if isinstance(e, PydanticObjectId) else PydanticObjectId(e) for e in enrollment_ids if e]
 
-    students_task = Student.find(
+    students_task = Student.get_motor_collection().find(
         {"_id": {"$in": student_ids_oid}},
-        projection={"nombre": 1, "apellidos": 1, "carnet_identidad": 1, "registro": 1, "email": 1}
-    ).to_list()
-    enrollments_task = Enrollment.find(
+        {"nombre": 1, "apellidos": 1, "carnet_identidad": 1, "registro": 1, "email": 1}
+    ).to_list(length=500)
+    enrollments_task = Enrollment.get_motor_collection().find(
         {"_id": {"$in": enrollment_ids_oid}},
-        projection={"cantidad_cuotas": 1, "curso_id": 1}
-    ).to_list()
+        {"cantidad_cuotas": 1, "curso_id": 1}
+    ).to_list(length=500)
 
-    students, enrollments = await asyncio.gather(students_task, enrollments_task)
+    students_raw, enrollments_raw = await asyncio.gather(students_task, enrollments_task)
 
-    students_map = {s.id: s for s in students}
-    enrollments_map = {e.id: e for e in enrollments}
+    # Los docs vienen de motor (no Beanie), pero los mapeamos por _id (ObjectId)
+    students_map = {s["_id"]: s for s in students_raw}
+    enrollments_map = {e["_id"]: e for e in enrollments_raw}
 
     enriched_list = []
     for payment in payments:
@@ -172,16 +174,19 @@ async def enrich_payments_with_details_bulk(payments: List[Payment]) -> List[dic
         inscripcion_id = _get(payment, "inscripcion_id")
 
         student = students_map.get(estudiante_id)
-        nombre_estudiante = student.nombre if student and student.nombre else "Sin nombre"
+        # F-PERF-ENRICH-FIX (2026-08-08, Kevin): student y enrollment ahora son
+        # dicts de motor (no objetos Beanie), porque usamos get_motor_collection()
+        # para poder aplicar proyeccion. Acceso por key en vez de attr.
+        nombre_estudiante = (student.get("nombre") if student and student.get("nombre") else None) or "Sin nombre"
         # F-COBRANZA-036 (2026-07-22): incluir C.I. y registro del estudiante.
         # Pedido Lic. Sandra Zabala: "Adicionar la columna con los datos de los
         # C.I. de los estudiantes" en el reporte de caja. C.I. = carnet_identidad.
         # Si no tiene C.I., caemos al registro universitario.
-        carnet_identidad = (student.carnet_identidad if student and getattr(student, "carnet_identidad", None) else None) or \
-                           (student.registro if student and getattr(student, "registro", None) else None) or ""
+        carnet_identidad = (student.get("carnet_identidad") if student and student.get("carnet_identidad") else None) or \
+                           (student.get("registro") if student and student.get("registro") else None) or ""
 
         enrollment = enrollments_map.get(inscripcion_id)
-        total_cuotas = enrollment.cantidad_cuotas if enrollment else 0
+        total_cuotas = enrollment.get("cantidad_cuotas", 0) if enrollment else 0
 
         p_dict.update({
             "nombre_estudiante": nombre_estudiante,
