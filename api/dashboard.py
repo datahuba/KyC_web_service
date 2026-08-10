@@ -313,27 +313,32 @@ async def _build_dashboard_v2(current_user: User) -> dict:
     else:
         scope_filter = None
 
-    # F-PERF-DASHBOARD-V2: pre-filtrar para excluir historicos (mismo criterio
-    # que /dashboard/stats). Los historicos no cuentan como inscritos activos.
-    # curso_ids_visibles ya viene de arriba (cursos no historicos Y no cerrados)
-    curso_ids_visibles_filter: Optional[dict] = None
-    if curso_ids_visibles:
-        # Si hay scope (cursos_asignados), intersectar con visibles.
-        # Si no hay scope, usar todos los visibles.
-        if scope_filter is not None:
-            # Intersectar cursos_asignados con curso_ids_visibles
-            if isinstance(scope_filter, dict) and "$in" in scope_filter:
-                intersected = [cid for cid in scope_filter["$in"] if cid in set(curso_ids_visibles)]
-            else:
-                intersected = [c for c in curso_ids_visibles if c == scope_filter]
-            curso_ids_visibles_filter = {"$in": intersected}
-        else:
-            curso_ids_visibles_filter = {"$in": list(curso_ids_visibles)}
+    # F-PERF-DASHBOARD-HISTORICOS-CONSISTENTE (2026-08-10, Kevin): antes
+    # el filtro de enrollments excluia los cursos historicos y cerrados
+    # (curso_ids_visibles_filter), pero el filtro de pagos los INCLUIA
+    # (porque su dinero es real y cuenta en revenue). Eso causaba
+    # inconsistencia: total_ingresos incluia los pagos de historicos
+    # pero total_inscritos / por_cobrar los exclufa, dando numeros
+    # que no cuadraban.
+    #
+    # Ahora el criterio es UNICO: el resumen economico incluye TODO
+    # (historicos + activos) de forma consistente, y el desglose por
+    # programa (courseBreakdown) sigue ocultando los historicos. Asi,
+    # si un programa historico tuvo Bs 84,672 cobrados, tambien cuenta
+    # sus 62 inscritos y su por_cobrar.
+    #
+    # F-PERF-DASHBOARD-V2: para que el resumen siga siendo rapido,
+    # el filtro de enrollments es por cursos_asignados (scope) o todos
+    # (sin scope). NO excluimos por historico/cerrado.
+    enr_filter_curso: Optional[dict] = None
+    if scope_filter is not None:
+        enr_filter_curso = scope_filter  # ya es dict {"$in": [...]}
+    # Si no hay scope, no filtramos por curso_id: trae TODOS los enrollments
 
     def _enr_filter() -> dict:
         f = {"estado": {"$ne": "cancelado"}}
-        if curso_ids_visibles_filter is not None:
-            f["curso_id"] = curso_ids_visibles_filter
+        if enr_filter_curso is not None:
+            f["curso_id"] = enr_filter_curso
         return f
 
     def _pag_filter() -> dict:
@@ -735,10 +740,24 @@ def _build_resumen_economico_from_memory(
             continue
         if getattr(e, "excluir_por_cobrar", False):
             continue
+        # F-DASHBOARD-POR-COBRAR-REAL (2026-08-10, Kevin): antes este calculo
+        # usaba SOLO los modulos del enrollment. Pero muchos enrollments
+        # historicos (DIPL-INVCI-2026/1, DIPL-DDU-2026/1) tienen modulos=[]
+        # porque se cargaron sin desglose por modulo. En ese caso, el
+        # calculo daba 0 de costo, lo que subestimaba el por_cobrar.
+        #
+        # Ahora usamos la mejor fuente disponible:
+        # 1. Si hay modulos, sumar costo/monto_pagado de los modulos
+        # 2. Si no hay modulos, usar total_a_pagar / total_pagado del enrollment
         modulos = getattr(e, "modulos", None) or []
-        costo_modulos = sum(float(m.costo or 0.0) for m in modulos)
-        pagos_modulos = sum(float(m.monto_pagado or 0.0) for m in modulos)
-        saldo = max(0, costo_modulos - pagos_modulos)
+        if modulos:
+            costo_total = sum(float(m.costo or 0.0) for m in modulos)
+            pagos_total = sum(float(m.monto_pagado or 0.0) for m in modulos)
+        else:
+            # Fallback: usar los campos del enrollment
+            costo_total = float(getattr(e, "total_a_pagar", 0) or 0)
+            pagos_total = float(getattr(e, "total_pagado", 0) or 0)
+        saldo = max(0, costo_total - pagos_total)
         por_cobrar += saldo
         if saldo > 0.01:
             cobros_pendientes += 1
@@ -785,10 +804,16 @@ def _build_cxc_resumen_from_memory(
         total_estimado += float(getattr(e, "total_a_pagar", 0) or 0)
         if e.estado in estados_excluidos:
             continue
+        # F-DASHBOARD-POR-COBRAR-REAL: usar modulos si existen, sino campos
+        # del enrollment (mismo fix que _build_resumen_economico_from_memory)
         modulos = getattr(e, "modulos", None) or []
-        costo_modulos = sum(float(m.costo or 0.0) for m in modulos)
-        pagos_modulos = sum(float(m.monto_pagado or 0.0) for m in modulos)
-        por_cobrar += max(0, costo_modulos - pagos_modulos)
+        if modulos:
+            costo_total = sum(float(m.costo or 0.0) for m in modulos)
+            pagos_total = sum(float(m.monto_pagado or 0.0) for m in modulos)
+        else:
+            costo_total = float(getattr(e, "total_a_pagar", 0) or 0)
+            pagos_total = float(getattr(e, "total_pagado", 0) or 0)
+        por_cobrar += max(0, costo_total - pagos_total)
 
     return {
         "total_real_cobrado": round(ingreso_total, 2),

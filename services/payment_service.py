@@ -1504,24 +1504,30 @@ async def get_resumen_economico(
         match_pagos["curso_id"] = {"$in": cursos_permitidos}
         match_enroll["curso_id"] = {"$in": cursos_permitidos}
 
-    # F-CXC-EXCLUIR-HISTORICOS (2026-08-04, Kevin): los cursos/programas
-    # historicos NO cuentan para Por Cobrar. Esos ya terminaron, son
-    # de carga retroactiva/auditoria. Solo cuentan los en_ejecucion y
-    # los programados. PERO los ingresos (pagos) SÍ cuentan porque
-    # ya se cobraron (es dinero real). Solo excluimos los ENROLLMENTS
-    # de historicos para que no se sumen a "por_cobrar".
-    cursos = await Course.find({}).to_list()
-    curso_historico_ids = {c.id for c in cursos if getattr(c, "es_historico", False)}
-    if curso_historico_ids:
-        if "curso_id" in match_enroll:
-            # Merge con el filtro de cursos_permitidos si existe
-            match_enroll["curso_id"]["$nin"] = list(curso_historico_ids)
-        else:
-            match_enroll["curso_id"] = {"$nin": list(curso_historico_ids)}
+    # F-CXC-EXCLUIR-HISTORICOS (2026-08-04, Kevin): originalmente los historicos
+    # se exclufan aqui. PERO eso causaba inconsistencia: los ingresos (de
+    # /payments) SÍ contaban los pagos de historicos (porque su dinero es
+    # real), pero total_inscritos y por_cobrar NO los contaban.
+    #
+    # F-DASHBOARD-HISTORICOS-CONSISTENTE (2026-08-10, Kevin): el resumen
+    # economico ahora incluye historicos de forma CONSISTENTE. El total
+    # de inscritos coincide con el de ingresos.
+    #
+    # El desglose por programa (courseBreakdown) sigue ocultando los
+    # historicos, eso lo decide _build_course_breakdown.
+    pass  # No excluimos historicos aqui (movido al comentario explicativo)
 
     pagos_task = Payment.find(match_pagos).to_list()
     enrollments_task = Enrollment.find(match_enroll).to_list()
     pagos, enrollments = await asyncio.gather(pagos_task, enrollments_task)
+
+    # F-DASHBOARD-HISTORICOS-CONSISTENTE (2026-08-10, Kevin): los enrollments
+    # de historicos NO se filtran aqui. Si los excluimos, el "total_inscritos"
+    # y "por_cobrar" del resumen no cuadran con el "total_ingresos" (que SI
+    # incluye los pagos de historicos, que son dinero real). El resumen
+    # economico ahora incluye TODO (historicos + activos) de forma
+    # consistente, y el desglose por programa (courseBreakdown) sigue
+    # ocultando los historicos.
 
     ingreso_matricula = 0.0
     ingreso_colegiatura = 0.0
@@ -1616,8 +1622,19 @@ async def get_resumen_economico(
         if getattr(e, 'excluir_por_cobrar', False):
             continue
         # FÓRMULA DE SANDRA: NO incluye matrícula, solo módulos.
-        costo_modulos = sum(m.costo or 0.0 for m in (e.modulos or []))
-        pagos_modulos = sum(m.monto_pagado or 0.0 for m in (e.modulos or []))
+        # F-DASHBOARD-POR-COBRAR-REAL (2026-08-10, Kevin): si el enrollment
+        # no tiene modulos (caso de historicos cargados sin desglose), usar
+        # los campos total_a_pagar / total_pagado del enrollment como
+        # fallback. Sin esto, los historicos sin modulos daban por_cobrar=0
+        # y el resumen no cuadraba.
+        modulos = e.modulos or []
+        if modulos:
+            costo_modulos = sum(m.costo or 0.0 for m in modulos)
+            pagos_modulos = sum(m.monto_pagado or 0.0 for m in modulos)
+        else:
+            # Fallback: usar campos del enrollment
+            costo_modulos = float(e.total_a_pagar or 0) - float(getattr(e, "costo_matricula", 0) or 0)
+            pagos_modulos = float(e.total_pagado or 0) - float(getattr(e, "pago_matricula", 0) or 0)
         saldo = max(0, costo_modulos - pagos_modulos)  # cap a 0 (no negativo)
         por_cobrar += saldo
         if saldo > 0.01:
