@@ -23,7 +23,18 @@ class ModuloCreate(BaseModel):
     nombre: str
     costo: float
     # ISSUE R: PERMITIR QUE EL BACKEND RECIBA Y VALIDE EL DOCENTE_ID
+    # F-FIX-CREAR-PROGRAMA-422 (2026-08-09, Kevin): aceptar "" como None
+    # para que el frontend pueda enviar el campo vacio sin causar 422.
+    # Tambien aceptar string que no es un ObjectId valido: si falla la
+    # conversion, lo dejamos como None (no se asigna docente).
     docente_id: Optional[PyObjectId] = Field(None, description="ID del docente asignado al módulo")
+
+    @field_validator('docente_id', mode='before')
+    @classmethod
+    def _empty_docente_to_none(cls, v):
+        if v is None or v == '' or v == 'null' or v == 'undefined':
+            return None
+        return v
 
 
 class CargoAdicionalItemCreate(BaseModel):
@@ -95,6 +106,16 @@ class CourseCreate(BaseModel):
         default=None,
         description="F-CREAR-PROGRAMA-EN-EJECUCION: override del estado calculado. None=calcular por fechas. 'programado'|'en_ejecucion'|'cerrado'=forzar."
     )
+
+    @field_validator('fecha_inicio', 'fecha_fin', mode='before')
+    @classmethod
+    def _empty_date_to_none(cls, v):
+        # F-FIX-CREAR-PROGRAMA-422 (2026-08-09, Kevin): aceptar "" como None
+        # para que el frontend pueda enviar fechas vacias (ej. en programas
+        # historicos donde las fechas son opcionales).
+        if v is None or v == '' or v == 'null' or v == 'undefined':
+            return None
+        return v
 
     # Resolucion de respaldo (opcional para todos los programas)
     resolucion_pdf_url: Optional[str] = Field(
@@ -241,7 +262,17 @@ class CourseUpdate(BaseModel):
     fecha_inicio: Optional[datetime] = None
     fecha_fin: Optional[datetime] = None
     activo: Optional[bool] = None
-    
+
+    # F-FIX-CREAR-PROGRAMA-422 (2026-08-09, Kevin): aceptar "" como None
+    # para que el frontend pueda editar programas historicos sin fecha
+    # sin causar 422.
+    @field_validator('fecha_inicio', 'fecha_fin', mode='before')
+    @classmethod
+    def _empty_date_to_none(cls, v):
+        if v is None or v == '' or v == 'null' or v == 'undefined':
+            return None
+        return v
+
     requisitos: Optional[List[RequisitoTemplateCreate]] = None
 
     es_historico: Optional[bool] = None
