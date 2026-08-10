@@ -580,11 +580,16 @@ async def post_initial_enrollments(
                 and 0 <= item.modulo_inicial_index < len(enrollment.modulos)
             ):
                 # El estudiante arranca a partir de este modulo; los anteriores
-                # se marcan como pagados (asumimos que ya los curso)
+                # se marcan como pagados (asumimos que ya los curso).
+                # F-FIX-MODULO-INICIAL-ESTADO (2026-08-09, Kevin): tambien
+                # actualizar el estado del modulo a "Pagado" (antes solo se
+                # seteaba monto_pagado=costo pero el estado quedaba
+                # "Pendiente", mostrando inconsistencia en la UI).
                 for idx in range(item.modulo_inicial_index):
-                    enrollment.modulos[idx].monto_pagado = (
-                        enrollment.modulos[idx].costo or 0.0
-                    )
+                    mod = enrollment.modulos[idx]
+                    mod.monto_pagado = mod.costo or 0.0
+                    if (mod.costo or 0) > 0 and mod.monto_pagado >= (mod.costo or 0) - 0.01:
+                        mod.estado = "Pagado"
             # F-HISTORICO-AUTOSERVICIO-EXCEL (2026-08-04): aplicar pagos por
             # modulo del Excel del CPD. Dict {modulo_index_str: monto_pagado}.
             total_pagos_a_aplicar = 0.0
@@ -608,14 +613,20 @@ async def post_initial_enrollments(
                             mod.estado = "Parcial"
                         total_pagos_a_aplicar += monto_aplicar
             # F-HISTORICO-EXCEL-TOTAL-PAGADO (2026-08-04): recalcular total.
+            # F-FIX-MODULO-INICIAL-TOTAL-PAGADO (2026-08-09, Kevin): tambien
+            # recalcular cuando se uso modulo_inicial_index (sin pagos_modulos
+            # explicitos pero los modulos anteriores quedaron como pagados).
             total_pagado_de_modulos = sum(
                 (m.monto_pagado or 0.0) for m in (enrollment.modulos or [])
             )
             if total_pagado_de_modulos > enrollment.total_pagado:
                 diferencia = total_pagado_de_modulos - enrollment.total_pagado
                 enrollment.actualizar_saldo(diferencia)
-            elif total_pagos_a_aplicar > 0:
-                enrollment.actualizar_saldo(total_pagos_a_aplicar)
+            elif total_pagos_a_aplicar > 0 or item.modulo_inicial_index is not None:
+                if total_pagado_de_modulos > (enrollment.total_pagado or 0):
+                    enrollment.actualizar_saldo(
+                        total_pagado_de_modulos - (enrollment.total_pagado or 0)
+                    )
             # F-FIX-MATRICULA-NUEVO-ESTADO (2026-08-06, Kevin): si el item
             # marco matricula_pagada=True, tambien hay que sacar al
             # enrollment del estado PENDIENTE_PAGO si ya no hay deuda.
