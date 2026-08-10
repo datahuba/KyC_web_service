@@ -24,15 +24,28 @@ import math
 async def read_students(
     page: int = Query(1, ge=1, description="Número de página"),
     per_page: int = Query(10, ge=1, le=5000, description="Elementos por página"),
-    q: Optional[str] = Query(None, description="Buscar por nombre, email, carnet o registro"),
+    q: Optional[str] = Query(None, description="Buscar por nombre, email, carnet o registro (alias: search, nombre, carnet, registro)"),
+    # F-FIX-FILTROS-STUDENTS (2026-08-10, Kevin): aceptar varios nombres de
+    # parametro de query para compatibilidad con distintos clientes.
+    # `carnet` y `registro` son los nombres naturales en el dominio (CI del
+    # estudiante), `search` es comun en APIs REST, `nombre` es el campo
+    # del modelo. Si vienen varios, se concatenan con OR (logica de busqueda).
+    carnet: Optional[str] = Query(None, description="Filtrar por carnet de identidad (alias de q)"),
+    registro: Optional[str] = Query(None, description="Filtrar por registro académico (alias de q)"),
+    nombre: Optional[str] = Query(None, description="Filtrar por nombre (alias de q)"),
+    search: Optional[str] = Query(None, description="Búsqueda libre (alias de q)"),
     activo: Optional[bool] = Query(None, description="Filtrar por estado activo/inactivo"),
     estado_titulo: Optional[str] = Query(None, description="Filtrar por estado del título"),
     curso_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por curso inscrito"),
     current_user: User = Depends(require_staff) # <-- TODOS LOS ADMINISTRATIVOS (MAE, COBRANZA, CPD) PUEDEN LEER LA TABLA
 ) -> Any:
     """Listar estudiantes con paginación y filtros avanzados"""
+    # Combinar todos los alias en un solo query. Si vienen varios, el
+    # primero que este presente gana (compatibilidad hacia atras).
+    query_term = q or carnet or registro or nombre or search
+
     students, total_count = await student_service.get_students(
-        page=page, per_page=per_page, q=q, activo=activo, estado_titulo=estado_titulo, curso_id=curso_id
+        page=page, per_page=per_page, q=query_term, activo=activo, estado_titulo=estado_titulo, curso_id=curso_id
     )
 
     total_pages = math.ceil(total_count / per_page) if total_count > 0 else 0
@@ -535,12 +548,34 @@ async def verificar_documento_estudiante(
     if not student: raise HTTPException(404, "Estudiante no encontrado")
     
     if tipo == "cv":
+        # F-FIX-VERIFICAR-DOC-EXISTE (2026-08-10, Kevin): exigir que el archivo
+        # exista antes de marcar como verificado. Antes un encargado podia
+        # 'verificar' CV/carnet/afiliacion que el estudiante NUNCA subio,
+        # comprometiendo la integridad de los datos.
+        if not student.cv_url:
+            raise HTTPException(
+                status_code=400,
+                detail="No se puede verificar el CV: el estudiante no ha subido el archivo. "
+                       "Pídele que primero suba su CV (POST /students/{id}/documentos/cv) y luego vuelve a verificar."
+            )
         student.cv_estado = "verificado"
         student.cv_motivo_rechazo = None
     elif tipo == "carnet":
+        if not student.carnet_url:
+            raise HTTPException(
+                status_code=400,
+                detail="No se puede verificar el Carnet: el estudiante no ha subido el archivo. "
+                       "Pídele que primero suba su Carnet (POST /students/{id}/documentos/carnet) y luego vuelve a verificar."
+            )
         student.carnet_estado = "verificado"
         student.carnet_motivo_rechazo = None
     elif tipo == "afiliacion":
+        if not student.afiliacion_url:
+            raise HTTPException(
+                status_code=400,
+                detail="No se puede verificar la Afiliación: el estudiante no ha subido el archivo. "
+                       "Pídele que primero suba su Afiliación (POST /students/{id}/documentos/afiliacion) y luego vuelve a verificar."
+            )
         student.afiliacion_estado = "verificado"
         student.afiliacion_motivo_rechazo = None
         

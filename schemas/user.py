@@ -13,7 +13,7 @@ Schemas incluidos:
 
 from datetime import datetime
 from typing import Optional, List
-from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator
+from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator, AliasChoices
 from models.enums import UserRole, SubtipoCoordinador
 from models.base import PyObjectId
 
@@ -27,7 +27,7 @@ _ROLES_REQUIEREN_NOMBRE_FUNCIONAL = {UserRole.ENCARGADO_CURSO, UserRole.COORDINA
 class UserCreate(BaseModel):
     """
     Schema para crear un nuevo usuario
-    
+
     Uso: POST /users/
     """
     username: str = Field(..., min_length=3, description="Nombre de usuario único")
@@ -37,7 +37,14 @@ class UserCreate(BaseModel):
     # confirmada por el usuario para docentes/personal nuevo). Si no hay carnet
     # ni password, se rechaza explícitamente (ver validador abajo).
     password: Optional[str] = Field(None, min_length=5, description="Contraseña (será hasheada). Opcional si se provee 'carnet': se autogenera como 'Uagrm.<CI>'.")
-    rol: UserRole = Field(default=UserRole.ADMIN, description="Rol de usuario")
+    # F-FIX-USERS-ROLE-OBLIGATORIO (2026-08-10, Kevin): 'rol' es OBLIGATORIO.
+    # Antes tenía default=ADMIN, lo cual causaba escalada silenciosa de
+    # privilegios: si el cliente enviaba 'role' (inglés) o cualquier typo,
+    # Pydantic lo ignoraba silenciosamente y el user se creaba como ADMIN
+    # por default. Ahora 'rol' debe especificarse explícitamente.
+    # Acepta tanto 'rol' (español, nombre interno) como 'role' (inglés, alias)
+    # para compatibilidad con clientes que usan el nombre inglés.
+    rol: UserRole = Field(..., description="Rol de usuario (obligatorio)", validation_alias=AliasChoices('rol', 'role'))
 
     # GAP-1 (audio 2026-07-08): CI del personal, usado para la contraseña por defecto.
     carnet: Optional[str] = Field(None, max_length=20, description="Carnet de Identidad (CI). Si se provee y no hay password, la contraseña inicial será 'Uagrm.<CI>'.")
@@ -90,7 +97,12 @@ class UserCreate(BaseModel):
             raise ValueError("Un encargado de curso puede tener máximo 5 programas asignados")
         return self
 
+    # F-FIX-USERS-ROLE-OBLIGATORIO (2026-08-10, Kevin): usar populate_by_name
+    # para aceptar tanto 'rol' (español, nombre interno) como 'role' (inglés,
+    # alias). Antes, los clientes que enviaban 'role' lo hacían silenciosamente
+    # ignorado, y el default=ADMIN hacía que se creara como admin.
     model_config = {
+        "populate_by_name": True,
         "json_schema_extra": {
             "example": {
                 "username": "admin.finanzas",

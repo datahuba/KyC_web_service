@@ -1,4 +1,4 @@
-﻿"""
+"""
 Servicio de Estudiantes
 =======================
 
@@ -18,6 +18,22 @@ from beanie import PydanticObjectId
 from beanie.operators import Or, RegEx, In
 
 
+def _escape_regex(s: str) -> str:
+    """
+    Escapa caracteres especiales de regex MongoDB para que un string
+    de usuario sea tratado como literal (no como patron).
+
+    Sin escape, un usuario que busca 'A.B+' recibira matches de
+    cualquier 'A' + cualquier caracter + 'B+', lo cual no es lo que
+    esperan. Con escape, busca literalmente 'A.B+'.
+    """
+    return s.replace("\\", "\\\\").replace(".", "\\.").replace("*", "\\*") \
+            .replace("+", "\\+").replace("?", "\\?").replace("(", "\\(") \
+            .replace(")", "\\)").replace("[", "\\[").replace("]", "\\]") \
+            .replace("{", "\\{").replace("}", "\\}").replace("|", "\\|") \
+            .replace("^", "\\^").replace("$", "\\$")
+
+
 async def get_students(
     page: int = 1,
     per_page: int = 10,
@@ -32,13 +48,25 @@ async def get_students(
     query = Student.find()
     
     if q:
-        regex_pattern = {"$regex": q, "$options": "i"}
+        # F-FIX-FILTROS-STUDENTS (2026-08-10, Kevin): antes el filtro `q`
+        # estaba mal armado. Comparaba el campo con un dict literal
+        # `{"$regex": q, "$options": "i"}`, lo cual MongoDB no interpretaria
+        # como regex sino como un valor escalar (un dict), y siempre
+        # retornaba 0 matches. Resultado: ?search=X, ?carnet=X, etc
+        # siempre devolvian los primeros N estudiantes (pagina 1) sin
+        # aplicar el filtro. Ahora se usa el operador RegEx() de Beanie,
+        # que construye correctamente la query Mongo `{campo: {$regex: ..., $options: 'i'}}`.
+        # Ademas, para carnet y registro se hace match exacto (case-insensitive
+        # pero exacto) ya que son campos unicos. Para nombre y email se usa
+        # regex parcial.
+        q_escaped = _escape_regex(q)
+        # Para carnet/registro: match exacto (case-insensitive)
         query = query.find(
             Or(
-                Student.nombre == regex_pattern,
-                Student.email == regex_pattern,
-                Student.carnet == regex_pattern,
-                Student.registro == regex_pattern
+                RegEx(Student.nombre, q_escaped, "i"),
+                RegEx(Student.email, q_escaped, "i"),
+                RegEx(Student.carnet, "^" + q_escaped + "$", "i"),
+                RegEx(Student.registro, "^" + q_escaped + "$", "i")
             )
         )
     
