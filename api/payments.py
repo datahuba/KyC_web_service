@@ -367,10 +367,17 @@ async def list_payments(
     
     if isinstance(current_user, User):
         # AUDITORÍA (CRÍTICO #1): sin este guard, cualquier rol autenticado
-        # (docente, encargado_curso, coordinador) caía en ningún filtro y veía
-        # TODOS los pagos/comprobantes del sistema. Solo el personal financiero
-        # y de gestión académica tiene algún tipo de acceso a esta vista.
-        if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
+        # (docente) caía en ningún filtro y veía TODOS los pagos/comprobantes
+        # del sistema. Solo el personal financiero, de gestión académica, y
+        # los que necesitan ver pagos de SUS cursos asignados tiene acceso.
+        # F-FIX-RBAC-PAGOS-ENCARGADO (2026-08-10, Kevin): encargado_curso y
+        # coordinador pueden ver pagos de SUS cursos asignados (Sandra necesitaba
+        # ver si los estudiantes de DIPL-IA-2026 pagaron, y el sistema la
+        # bloqueaba con 403 'No autorizado para ver pagos').
+        if current_user.rol not in [
+            "superadmin", "admin", "mae", "cpd", "cobranza",
+            "encargado_curso", "coordinador"
+        ]:
             raise HTTPException(status_code=403, detail="No autorizado para ver pagos")
 
         # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve pagos de esos cursos.
