@@ -666,11 +666,18 @@ async def get_my_enrollments(
     FIX-ERRORES-500: lista las inscripciones del estudiante autenticado.
     Importante: este endpoint debe declararse ANTES de /{id} para que
     no se matchee con id="me" (que rompe PydanticObjectId).
+
+    F-FIX-ENROLLMENTS-ME-JOIN (2026-08-10, Kevin): ahora joinea
+    estudiante_nombre, curso_nombre, etc. para que el estudiante vea
+    los nombres en su dashboard (no IDs).
     """
     enrollments = await Enrollment.find(
         Enrollment.estudiante_id == current_user.id
     ).sort("-created_at").to_list()
-    return enrollments
+    # F-FIX-ENROLLMENTS-ME-JOIN: joinear nombres (1 query batch por
+    # coleccion, no N+1).
+    enriched = await enrollment_service.enrich_enrollments_batch(enrollments)
+    return enriched
 
 
 @router.get(
