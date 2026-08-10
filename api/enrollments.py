@@ -313,21 +313,36 @@ async def list_enrollments(
         if estado:
             all_enrollments = [e for e in all_enrollments if e.estado == estado]
         total_count = len(all_enrollments)
+        total_pages = math.ceil(total_count / per_page) if total_count > 0 else 0
+        has_next = page < total_pages
+        has_prev = page > 1
         start = (page - 1) * per_page
         end = start + per_page
         enrollments = all_enrollments[start:end]
+        # F-FIX-DESCONOCIDO-ENROLLMENTS (2026-08-09, Kevin): enriquecer
+        # tambien para estudiantes (sus propias inscripciones) para que
+        # vean el nombre del curso (no "Desconocido").
+        enriched_enrollments = await enrollment_service.enrich_enrollments_batch(enrollments)
+        return {
+            "data": enriched_enrollments,
+            "meta": PaginationMeta(
+                page=page, limit=per_page, totalItems=total_count,
+                totalPages=total_pages, hasNextPage=has_next, hasPrevPage=has_prev
+            )
+        }
     else:
         raise HTTPException(status_code=403, detail="No autorizado")
 
     total_pages = math.ceil(total_count / per_page) if total_count > 0 else 0
     has_next = page < total_pages
     has_prev = page > 1
-    
-    enriched_enrollments = []
-    for enrollment in enrollments:
-        enriched = await enrollment_service.enrich_enrollment_dates(enrollment)
-        enriched_enrollments.append(enriched)
-    
+
+    # F-FIX-DESCONOCIDO-ENROLLMENTS (2026-08-09, Kevin): usar batch lookup
+    # (2 queries: students + courses con In) en vez de N queries individuales.
+    # Esto ademas joinea el nombre del estudiante/curso en el response,
+    # arreglando el bug "Desconocido" del frontend.
+    enriched_enrollments = await enrollment_service.enrich_enrollments_batch(enrollments)
+
     return {
         "data": enriched_enrollments,
         "meta": PaginationMeta(

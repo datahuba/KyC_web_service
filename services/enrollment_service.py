@@ -265,6 +265,16 @@ async def create_enrollment(
 
 
 async def enrich_enrollment_dates(enrollment: Enrollment) -> dict:
+    """
+    F-FIX-DESCONOCIDO-ENROLLMENTS (2026-08-09, Kevin): ahora joinea el nombre
+    del estudiante y del curso ademas de las fechas. El bug era que el
+    frontend mostraba "Desconocido" para IDs de estudiantes fuera de los
+    primeros 100. Ahora el endpoint /enrollments/ devuelve los nombres
+    directamente, sin necesidad de joinear en el cliente.
+
+    Para listas grandes, usar `enrich_enrollments_batch()` que hace lookup
+    con In() (1 query por coleccion) en vez de N queries individuales.
+    """
     from core.timezone_utils import utcnow_naive, to_bolivia_time
     enrollment_dict = enrollment.model_dump()
     enrollment_dict["fecha_inscripcion"] = to_bolivia_time(enrollment.fecha_inscripcion)
@@ -297,7 +307,158 @@ async def enrich_enrollment_dates(enrollment: Enrollment) -> dict:
     enrollment_dict["descuento_efectivo"] = descuento_efectivo
     enrollment_dict["descuento_efectivo_origen"] = origen
     enrollment_dict["advertencia_descuento"] = advertencia
+
+    # F-FIX-DESCONOCIDO-ENROLLMENTS: joinear nombre del estudiante
+    # y del curso para que el frontend NO muestre "Desconocido".
+    if enrollment.estudiante_id:
+        try:
+            from core.cache import get_students_bulk_cached
+            students_map = await get_students_bulk_cached([enrollment.estudiante_id])
+            student = students_map.get(enrollment.estudiante_id)
+            if student:
+                # student puede ser dict (de motor) o Beanie Student
+                nombre = student.get("nombre") if isinstance(student, dict) else getattr(student, "nombre", None)
+                registro = student.get("registro") if isinstance(student, dict) else getattr(student, "registro", None)
+                ci = student.get("carnet_identidad") if isinstance(student, dict) else getattr(student, "carnet_identidad", None)
+                enrollment_dict["estudiante_nombre"] = nombre
+                enrollment_dict["estudiante_registro"] = registro
+                enrollment_dict["estudiante_ci"] = ci
+            else:
+                enrollment_dict["estudiante_nombre"] = None
+                enrollment_dict["estudiante_registro"] = None
+                enrollment_dict["estudiante_ci"] = None
+        except Exception:
+            enrollment_dict["estudiante_nombre"] = None
+            enrollment_dict["estudiante_registro"] = None
+            enrollment_dict["estudiante_ci"] = None
+    else:
+        enrollment_dict["estudiante_nombre"] = None
+        enrollment_dict["estudiante_registro"] = None
+        enrollment_dict["estudiante_ci"] = None
+
+    # Joinear nombre del curso
+    if enrollment.curso_id:
+        try:
+            course = await Course.get(enrollment.curso_id)
+            if course:
+                enrollment_dict["curso_nombre"] = course.nombre_programa
+                enrollment_dict["curso_codigo"] = course.codigo
+            else:
+                enrollment_dict["curso_nombre"] = None
+                enrollment_dict["curso_codigo"] = None
+        except Exception:
+            enrollment_dict["curso_nombre"] = None
+            enrollment_dict["curso_codigo"] = None
+    else:
+        enrollment_dict["curso_nombre"] = None
+        enrollment_dict["curso_codigo"] = None
+
     return enrollment_dict
+
+
+async def enrich_enrollments_batch(enrollments: List[Enrollment]) -> List[dict]:
+    """
+    F-FIX-DESCONOCIDO-ENROLLMENTS (2026-08-09, Kevin): versión optimizada para
+    listas. Hace 2 queries batch (students + courses con In) en vez de N
+    queries individuales de enrich_enrollment_dates.
+
+    Uso: en /api/v1/enrollments/ (lista) y en cualquier endpoint que devuelva
+    multiples enrollments. Misma estructura de response que enrich_enrollment_dates.
+    """
+    if not enrollments:
+        return []
+
+    from core.timezone_utils import to_bolivia_time
+    from core.cache import get_students_bulk_cached
+
+    # Recolectar IDs unicos
+    estudiante_ids = list({e.estudiante_id for e in enrollments if e.estudiante_id})
+    curso_ids = list({e.curso_id for e in enrollments if e.curso_id})
+
+    # 1 query batch a students (con cache de F-CACHE-SHARED)
+    students_map = {}
+    if estudiante_ids:
+        try:
+            students_map = await get_students_bulk_cached(estudiante_ids)
+        except Exception:
+            students_map = {}
+
+    # 1 query batch a courses
+    courses_map: dict = {}
+    if curso_ids:
+        try:
+            courses_list = await Course.find(In(Course.id, curso_ids)).to_list()
+            for c in courses_list:
+                # Map por str(id) y por id (ObjectId) para cubrir cualquier lookup
+                key = str(c.id)
+                courses_map[key] = c
+                courses_map[c.id] = c
+        except Exception:
+            pass
+
+    enriched = []
+    for e in enrollments:
+        d = e.model_dump()
+        d["fecha_inscripcion"] = to_bolivia_time(e.fecha_inscripcion)
+        d["created_at"] = to_bolivia_time(e.created_at)
+        d["updated_at"] = to_bolivia_time(e.updated_at)
+
+        # descuento MAX (mismo que enrich_enrollment_dates)
+        desc_curso = float(e.descuento_curso_aplicado or 0)
+        desc_personal = float(e.descuento_personalizado or 0) if e.descuento_personalizado is not None else 0.0
+        descuento_efectivo = max(desc_curso, desc_personal)
+        if descuento_efectivo > 0 and desc_personal > 0 and desc_curso >= desc_personal:
+            origen = "curso"
+            advertencia = (
+                f"El descuento personal seleccionado ({desc_personal:.0f}%) es menor al "
+                f"descuento del curso ({desc_curso:.0f}%). Se aplicó el descuento de mayor "
+                f"porcentaje: el del curso ({desc_curso:.0f}%)."
+            )
+        elif descuento_efectivo > 0 and desc_personal > desc_curso:
+            origen = "personal"
+            advertencia = None
+        elif descuento_efectivo > 0 and desc_curso > 0:
+            origen = "curso"
+            advertencia = None
+        else:
+            origen = "ninguno"
+            advertencia = None
+        d["descuento_efectivo"] = descuento_efectivo
+        d["descuento_efectivo_origen"] = origen
+        d["advertencia_descuento"] = advertencia
+
+        # Joinear estudiante
+        if e.estudiante_id:
+            student = students_map.get(e.estudiante_id) or students_map.get(str(e.estudiante_id))
+            if student:
+                d["estudiante_nombre"] = student.get("nombre") if isinstance(student, dict) else getattr(student, "nombre", None)
+                d["estudiante_registro"] = student.get("registro") if isinstance(student, dict) else getattr(student, "registro", None)
+                d["estudiante_ci"] = student.get("carnet_identidad") if isinstance(student, dict) else getattr(student, "carnet_identidad", None)
+            else:
+                d["estudiante_nombre"] = None
+                d["estudiante_registro"] = None
+                d["estudiante_ci"] = None
+        else:
+            d["estudiante_nombre"] = None
+            d["estudiante_registro"] = None
+            d["estudiante_ci"] = None
+
+        # Joinear curso
+        if e.curso_id:
+            course = courses_map.get(e.curso_id) or courses_map.get(str(e.curso_id))
+            if course:
+                d["curso_nombre"] = course.nombre_programa if not isinstance(course, dict) else course.get("nombre_programa")
+                d["curso_codigo"] = course.codigo if not isinstance(course, dict) else course.get("codigo")
+            else:
+                d["curso_nombre"] = None
+                d["curso_codigo"] = None
+        else:
+            d["curso_nombre"] = None
+            d["curso_codigo"] = None
+
+        enriched.append(d)
+
+    return enriched
 
 
 async def get_enrollment(id: PydanticObjectId) -> Optional[Enrollment]:
