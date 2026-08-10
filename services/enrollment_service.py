@@ -319,7 +319,7 @@ async def enrich_enrollment_dates(enrollment: Enrollment) -> dict:
                 # student puede ser dict (de motor) o Beanie Student
                 nombre = student.get("nombre") if isinstance(student, dict) else getattr(student, "nombre", None)
                 registro = student.get("registro") if isinstance(student, dict) else getattr(student, "registro", None)
-                ci = student.get("carnet_identidad") if isinstance(student, dict) else getattr(student, "carnet_identidad", None)
+                ci = student.get("carnet") if isinstance(student, dict) else getattr(student, "carnet", None)
                 enrollment_dict["estudiante_nombre"] = nombre
                 enrollment_dict["estudiante_registro"] = registro
                 enrollment_dict["estudiante_ci"] = ci
@@ -433,7 +433,7 @@ async def enrich_enrollments_batch(enrollments: List[Enrollment]) -> List[dict]:
             if student:
                 d["estudiante_nombre"] = student.get("nombre") if isinstance(student, dict) else getattr(student, "nombre", None)
                 d["estudiante_registro"] = student.get("registro") if isinstance(student, dict) else getattr(student, "registro", None)
-                d["estudiante_ci"] = student.get("carnet_identidad") if isinstance(student, dict) else getattr(student, "carnet_identidad", None)
+                d["estudiante_ci"] = student.get("carnet") if isinstance(student, dict) else getattr(student, "carnet", None)
             else:
                 d["estudiante_nombre"] = None
                 d["estudiante_registro"] = None
