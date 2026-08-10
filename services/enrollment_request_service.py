@@ -29,18 +29,19 @@ async def create_enrollment_request(
     data: EnrollmentRequestCreate,
     current_student: Student
 ) -> EnrollmentRequest:
-    # F-FIX-SOLICITAR-INSCRIPCION-DOCS (2026-08-10, Kevin): permitir
-    # que el estudiante solicite inscripcion SIN tener los documentos
-    # validados. Antes (ISSUE-Q-INSCRIPCION-DOCS) se exigia que CV, Carnet,
-    # Afiliacion y Titulo estuvieran validados ANTES de crear la solicitud,
-    # lo cual bloqueaba a cualquier estudiante nuevo: no podia ni siquiera
-    # pedir interes en un programa. Ahora la solicitud se crea normalmente
-    # y los docs se piden/validan DESPUES (en la aprobacion por CPD).
-    # El CPD vera la solicitud y, si la aprueba, exigira los docs al
-    # estudiante para crear la inscripcion efectiva.
-    #
-    # (Si Kevin quiere restaurar la validacion previa, ver el comentario
-    # de ISSUE-Q-INSCRIPCION-DOCS en git log.)
+    # ISSUE-Q-INSCRIPCION-DOCS: Requisitos Documentales Previos
+    missing_docs = []
+    if current_student.cv_estado != "verificado":
+        missing_docs.append("CV")
+    if current_student.carnet_estado != "verificado":
+        missing_docs.append("Carnet de Identidad")
+    if current_student.afiliacion_estado != "verificado":
+        missing_docs.append("Formulario de Inscripción (Afiliación)")
+    if not current_student.titulo or current_student.titulo.get("estado") != "verificado":
+        missing_docs.append("Título Profesional")
+    
+    if missing_docs:
+        raise ValueError(f"No puedes solicitar inscripción. Faltan documentos obligatorios o no están validados: {', '.join(missing_docs)}.")
 
     course = await Course.get(data.curso_id)
     if not course:
