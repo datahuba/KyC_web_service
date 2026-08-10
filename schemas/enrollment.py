@@ -120,6 +120,17 @@ class EnrollmentResponse(BaseModel):
     descuento_efectivo_origen: Optional[str] = None  # 'curso' | 'personal' | 'ninguno'
     advertencia_descuento: Optional[str] = None  # mensaje si personal < curso
 
+    # F-FIX-DESCONOCIDO-ENROLLMENTS (2026-08-09, Kevin): campos joineados
+    # del estudiante y del curso para que el frontend NO muestre
+    # "Desconocido" en /enrollments/ (bug del cliente que cargaba solo
+    # los primeros 100 estudiantes en un map local). El backend los joinea
+    # con una query batch de students (In) y otra de courses.
+    estudiante_nombre: Optional[str] = None
+    estudiante_registro: Optional[str] = None
+    estudiante_ci: Optional[str] = None
+    curso_nombre: Optional[str] = None
+    curso_codigo: Optional[str] = None
+
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True,
