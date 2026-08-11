@@ -104,6 +104,15 @@ class PreRegistrationSubmit(BaseModel):
     domicilio: Optional[str] = Field(None, max_length=300)
     mensaje: Optional[str] = Field(None, max_length=500, description="Mensaje o consulta opcional del visitante")
 
+    # F-2026-08-11-CAMPOS-EC: campos opcionales del Diplomado Gestión
+    # Tributaria y demás programas de educación continua (planilla de Lisa).
+    # Si el visitante NO se inscribe a un diplomado EC, los deja vacíos.
+    registro_universitario: Optional[str] = Field(None, max_length=30, description="Registro universitario UAGRM (de la ficha del estudiante, NO es el username).")
+    avance_academico_codigo: Optional[int] = Field(None, ge=0, description="Código de avance académico (planilla de Lisa).")
+    formulario_descuento_numero: Optional[int] = Field(None, ge=0, description="Número del formulario de descuento (planilla de Lisa).")
+    carrera_codigo: Optional[str] = Field(None, max_length=20, description="Código de carrera (de la planilla de Lisa).")
+    descuento_porcentaje: Optional[float] = Field(None, ge=0, le=1, description="Descuento pre-aprobado (0.0-1.0). Aplica SOLO a módulos.")
+
     @field_validator("carnet")
     @classmethod
     def carnet_valido(cls, v: str) -> str:

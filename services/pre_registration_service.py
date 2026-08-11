@@ -247,6 +247,13 @@ async def submit_public_form(slug: str, data: PreRegistrationSubmit) -> PreRegis
         "sexo": data.sexo,
         "domicilio": (data.domicilio or "").strip() or None,
         "mensaje": (data.mensaje or "").strip() or None,
+        # F-2026-08-11-CAMPOS-EC: campos educación continua (planilla de Lisa).
+        # Se persisten en el data dict y se copian al Student al aprobar.
+        "registro_universitario": (data.registro_universitario or "").strip() or None,
+        "avance_academico_codigo": data.avance_academico_codigo,
+        "formulario_descuento_numero": data.formulario_descuento_numero,
+        "carrera_codigo": (data.carrera_codigo or "").strip() or None,
+        "descuento_porcentaje": data.descuento_porcentaje,
     }
 
     sub = PreRegistration(
@@ -396,6 +403,14 @@ async def approve_submission(submission_id: PydanticObjectId, admin_username: st
         sexo=data.get("sexo"),
         activo=True,
         lista_cursos_ids=[],
+        # F-2026-08-11-CAMPOS-EC: campos específicos educación continua
+        # (planilla de Lisa). Se persisten desde el data dict del form
+        # si el estudiante los lleno al pre-registrarse.
+        registro_universitario=(data.get("registro_universitario") or None),
+        avance_academico_codigo=data.get("avance_academico_codigo") or None,
+        formulario_descuento_numero=data.get("formulario_descuento_numero") or None,
+        carrera_codigo=(data.get("carrera_codigo") or None),
+        descuento_porcentaje=data.get("descuento_porcentaje") or None,
     )
     await student.insert()
 

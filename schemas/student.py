@@ -100,6 +100,14 @@ class StudentCreate(BaseModel):
     tipo_sangre: Optional[TipoSangre] = None
     titulo_bachiller: Optional[str] = None
 
+    # F-2026-08-11-CAMPOS-EC: campos específicos del Diplomado Gestión
+    # Tributaria y demás programas de educación continua (planilla de Lisa).
+    registro_universitario: Optional[str] = Field(None, max_length=30)
+    avance_academico_codigo: Optional[int] = Field(None, ge=0)
+    formulario_descuento_numero: Optional[int] = Field(None, ge=0)
+    carrera_codigo: Optional[str] = Field(None, max_length=20)
+    descuento_porcentaje: Optional[float] = Field(None, ge=0, le=1)
+
     @field_validator('sexo', 'estado_civil', 'tipo_sangre', mode='before')
     @classmethod
     def _empty_enum_a_none(cls, v):
@@ -216,7 +224,14 @@ class StudentResponse(BaseModel):
     
     # OBJETO ANIDADO DEL TÍTULO PROFESIONAL
     titulo: Optional[dict] = None
-    
+
+    # F-2026-08-11-CAMPOS-EC: campos específicos educación continua
+    registro_universitario: Optional[str] = None
+    avance_academico_codigo: Optional[int] = None
+    formulario_descuento_numero: Optional[int] = None
+    carrera_codigo: Optional[str] = None
+    descuento_porcentaje: Optional[float] = None
+
     # Estado y Metadata
     activo: bool
     lista_cursos_ids: List[PyObjectId] = []
@@ -333,6 +348,13 @@ class StudentUpdateAdmin(BaseModel):
     periodo: Optional[str] = None
     tipo_sangre: Optional[TipoSangre] = None
     titulo_bachiller: Optional[str] = None
+
+    # F-2026-08-11-CAMPOS-EC
+    registro_universitario: Optional[str] = Field(None, max_length=30)
+    avance_academico_codigo: Optional[int] = Field(None, ge=0)
+    formulario_descuento_numero: Optional[int] = Field(None, ge=0)
+    carrera_codigo: Optional[str] = Field(None, max_length=20)
+    descuento_porcentaje: Optional[float] = Field(None, ge=0, le=1)
 
     @field_validator('sexo', 'estado_civil', 'tipo_sangre', mode='before')
     @classmethod

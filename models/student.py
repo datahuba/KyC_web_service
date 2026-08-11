@@ -142,8 +142,56 @@ class Student(MongoBaseModel):
     
     # INFORMACIÓN ACADÉMICA DEL TÍTULO PROFESIONAL
     titulo: Optional[dict] = Field(
-        default=None, 
+        default=None,
         description="Información completa del título profesional: {titulo, numero_titulo, año_expedicion, universidad, estado, url, motivo_rechazo}"
+    )
+
+    # ========================================================================
+    # F-2026-08-11-CAMPOS-EC: Datos específicos del Diplomado Gestión Tributaria
+    # y demás programas de EDUCACIÓN CONTINUA (reunión UAGRM 2026-08-11).
+    # Todos opcionales porque no aplican a estudiantes profesionales (maestría,
+    # doctorado) que usan otros campos.
+    #
+    # Reunion Kevin 2026-08-11: Lisa/encargada diplomados UAGRM maneja planillas
+    # Excel con estos datos y los necesita persistidos al aprobar el form de
+    # preinscripción. Se reusan campos del modelo cuando existen (departamento,
+    # carrera, modalidad_ingreso) para no duplicar.
+    # ========================================================================
+
+    # Número de REGISTRO UNIVERSITARIO (de la UAGRM, distinto del `registro`
+    # que es el username de login). Ej: "220000123" del kardex UAGRM.
+    registro_universitario: Optional[str] = Field(
+        None, max_length=30,
+        description="Registro universitario UAGRM (de la ficha del estudiante, NO es el username de login).",
+    )
+
+    # Código de AVANCE ACADÉMICO (campo numérico del Excel de Lisa). Indica
+    # cuántos créditos/módulos ha completado el estudiante a nivel UAGRM.
+    avance_academico_codigo: Optional[int] = Field(
+        None, ge=0,
+        description="Código de avance académico del estudiante (nivel UAGRM, planilla de Lisa).",
+    )
+
+    # Número de FORMULARIO DE DESCUENTO (campo del Excel de Lisa). El
+    # estudiante trajo este formulario físico firmado por el director.
+    formulario_descuento_numero: Optional[int] = Field(
+        None, ge=0,
+        description="Número del formulario de descuento (planilla de Lisa). Indica que el estudiante trae descuento pre-aprobado.",
+    )
+
+    # Código de CARRERA (del Excel, ej: "CONT-001"). Distinto de `carrera`
+    # que es el nombre libre de la carrera. Sirve para vincular con sistemas
+    # externos UAGRM.
+    carrera_codigo: Optional[str] = Field(
+        None, max_length=20,
+        description="Código de carrera (de la planilla de Lisa). Distinto del campo `carrera` que es el nombre libre.",
+    )
+
+    # Descuento pre-aprobado del Excel EC (formato 0.0-1.0, ej: 0.5 = 50%).
+    # Aplica SOLO a módulos, NUNCA a matrícula (regla F-074-FIX-4 Kevin 2026-07-23).
+    descuento_porcentaje: Optional[float] = Field(
+        None, ge=0, le=1,
+        description="Descuento pre-aprobado del Excel EC (0.0-1.0). Aplica SOLO a módulos, NO a matrícula.",
     )
     
     class Settings:
