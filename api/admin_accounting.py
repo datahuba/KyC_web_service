@@ -131,8 +131,8 @@ MODULOS_DIPL_INVCI_2026_1 = [
 
 
 async def _buscar_estudiante_por_carnet(carnet: str) -> Optional[Student]:
-    """Busca estudiante por carnet_identidad o registro."""
-    s = await Student.find_one({"carnet_identidad": carnet})
+    """Busca estudiante por carnet o registro (en ese orden)."""
+    s = await Student.find_one({"carnet": carnet})
     if s:
         return s
     s = await Student.find_one({"registro": carnet})
@@ -174,7 +174,7 @@ async def _aplicar_ajuste_diff(
 
     if diff <= 0:
         return AjusteResultado(
-            estudiante_carnet=str(estudiante.carnet_identidad or estudiante.registro or ""),
+            estudiante_carnet=str(estudiante.carnet or estudiante.registro or ""),
             estudiante_nombre=estudiante.nombre or "",
             curso_codigo=curso.codigo,
             tipo="diff",
@@ -189,7 +189,7 @@ async def _aplicar_ajuste_diff(
     ajustes_previos = await _contar_pagos_ajuste_excel(inscripcion_id)
     if ajustes_previos > 0:
         return AjusteResultado(
-            estudiante_carnet=str(estudiante.carnet_identidad or estudiante.registro or ""),
+            estudiante_carnet=str(estudiante.carnet or estudiante.registro or ""),
             estudiante_nombre=estudiante.nombre or "",
             curso_codigo=curso.codigo,
             tipo="diff",
@@ -256,7 +256,7 @@ async def _aplicar_ajuste_diff(
     despues_saldo = max(0.0, round((enrollment.total_a_pagar or 0.0) - despues_total, 2)) if not dry_run else enrollment.saldo_pendiente
 
     return AjusteResultado(
-        estudiante_carnet=str(estudiante.carnet_identidad or estudiante.registro or ""),
+        estudiante_carnet=str(estudiante.carnet or estudiante.registro or ""),
         estudiante_nombre=estudiante.nombre or "",
         curso_codigo=curso.codigo,
         tipo="diff",
@@ -338,7 +338,7 @@ async def _aplicar_ajuste_completo(
                 await pago.insert()
 
     return AjusteResultado(
-        estudiante_carnet=str(estudiante.carnet_identidad or estudiante.registro or ""),
+        estudiante_carnet=str(estudiante.carnet or estudiante.registro or ""),
         estudiante_nombre=estudiante.nombre or "",
         curso_codigo=curso.codigo,
         tipo="completo",
@@ -360,7 +360,7 @@ async def _aplicar_crear_enrollment(
     dry_run: bool,
 ) -> AjusteResultado:
     """Caso: estudiante sin enrollment. Crear enrollment + modulos + pagos."""
-    carnet = str(estudiante.carnet_identidad or estudiante.registro or "")
+    carnet = str(estudiante.carnet or estudiante.registro or "")
 
     if not dry_run:
         # 1) Crear enrollment con los 6 modulos Pagado
