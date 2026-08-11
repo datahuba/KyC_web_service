@@ -564,10 +564,30 @@ def _build_course_breakdown_from_memory(
     curso_ids = [c.id for c in cursos_visibles]
     curso_ids_set = set(str(cid) for cid in curso_ids)
 
-    # Agrupar enrollments activos por curso
+    # Agrupar enrollments del curso por curso.
+    # F-DASHBOARD-COURSE-BREAKDOWN-PENDIENTE-PAGO (2026-08-10, Kevin): antes
+    # SOLO se contaban los enrollments con estado EXACTO 'activo'. Pero eso
+    # excluia los 'pendiente_pago' (estudiantes inscritos pero sin pago inicial),
+    # lo que causaba una discrepancia con la vista Matriz (Gestion de Pagos)
+    # que SI los incluye.
+    # Ejemplo: MAE-GPETDOJ-2026 con 82 becados 50%:
+    #   - 64 'activo' + 18 'pendiente_pago' = 82
+    #   - Vista Matriz mostraba Bs 836,400 (sumaba todos los no-excluidos)
+    #   - courseBreakdown mostraba Bs 652,800 (solo 'activo')
+    #   - Diferencia: 18 x Bs 10,200 = Bs 183,600
+    # Ahora: incluir 'pendiente_pago' ademas de 'activo' (excluir solo
+    # suspendidos/completados/cancelados/retirados, igual que vista Matriz).
+    # Esto alinea con la formula de Por Cobrar = (costo - pagos) de TODOS los
+    # inscritos que aun pueden pagar.
     enr_by_curso: dict[str, list[Enrollment]] = {}
+    estados_excluidos_curso = {
+        EstadoInscripcion.SUSPENDIDO.value,
+        EstadoInscripcion.COMPLETADO.value,
+        EstadoInscripcion.CANCELADO.value,
+        EstadoInscripcion.RETIRADO.value,
+    }
     for e in enrollments:
-        if e.estado != EstadoInscripcion.ACTIVO.value:
+        if e.estado in estados_excluidos_curso:
             continue
         cid = str(e.curso_id)
         if cid not in curso_ids_set:
