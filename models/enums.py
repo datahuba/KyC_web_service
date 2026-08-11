@@ -236,4 +236,11 @@ class EstadoTramite(str, Enum):
     APROBADA = "aprobada"            # aprobada por el staff
     RECHAZADA = "rechazada"          # rechazada por el staff
     CANCELADA = "cancelada"          # cancelada por el estudiante
+
+
+# F-2026-08-11-LIMITE-10: reunión educación continua UAGRM (2026-08-11).
+# Kevin pidió subir el límite de 5 → 10 programas en ejecución por encargado.
+# Antes 5, ahora 10. Profesionales siguen en 5 (no los afecta porque ese
+# límite solo aplica a ENCARGADO_CURSO y COORDINADOR).
+MAX_PROGRAMAS_POR_ENCARGADO = 10
     

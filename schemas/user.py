@@ -14,7 +14,7 @@ Schemas incluidos:
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator, AliasChoices
-from models.enums import UserRole, SubtipoCoordinador
+from models.enums import UserRole, SubtipoCoordinador, MAX_PROGRAMAS_POR_ENCARGADO
 from models.base import PyObjectId
 
 # Roles que requieren nombre_funcional obligatorio (ISSUE-R-ROLES + ISSUE-R-PERFIL-GENERICO)
@@ -93,8 +93,9 @@ class UserCreate(BaseModel):
 
     @model_validator(mode="after")
     def validar_limite_programas(self):
-        if self.rol == UserRole.ENCARGADO_CURSO and self.cursos_asignados and len(self.cursos_asignados) > 5:
-            raise ValueError("Un encargado de curso puede tener máximo 5 programas asignados")
+        # F-2026-08-11-LIMITE-10: antes 5, ahora 10 (reunión EC 2026-08-11).
+        if self.rol == UserRole.ENCARGADO_CURSO and self.cursos_asignados and len(self.cursos_asignados) > MAX_PROGRAMAS_POR_ENCARGADO:
+            raise ValueError(f"Un encargado de curso puede tener máximo {MAX_PROGRAMAS_POR_ENCARGADO} programas asignados")
         return self
 
     # F-FIX-USERS-ROLE-OBLIGATORIO (2026-08-10, Kevin): usar populate_by_name
@@ -197,12 +198,11 @@ class UserUpdate(BaseModel):
 
     @model_validator(mode="after")
     def validar_limite_programas(self):
-        # Para UserUpdate, 'rol' puede ser None si no se envió en el PATCH, 
+        # F-2026-08-11-LIMITE-10: antes 5, ahora 10 (reunión EC 2026-08-11).
+        # Para UserUpdate, 'rol' puede ser None si no se envió en el PATCH,
         # pero asumimos que la validación completa en update_user en backend también pasará si es necesario.
-        # Aquí validamos si el rol se está enviando como ENCARGADO_CURSO explícitamente en el PATCH, 
-        # o si hay cursos_asignados > 5 (el servicio de actualización validará contra el rol existente de ser necesario).
-        if self.rol == UserRole.ENCARGADO_CURSO and self.cursos_asignados and len(self.cursos_asignados) > 5:
-            raise ValueError("Un encargado de curso puede tener máximo 5 programas asignados")
+        if self.rol == UserRole.ENCARGADO_CURSO and self.cursos_asignados and len(self.cursos_asignados) > MAX_PROGRAMAS_POR_ENCARGADO:
+            raise ValueError(f"Un encargado de curso puede tener máximo {MAX_PROGRAMAS_POR_ENCARGADO} programas asignados")
         return self
 
     model_config = {

@@ -9,7 +9,7 @@ from typing import List, Optional
 from beanie import PydanticObjectId
 from models.user import User
 from schemas.user import UserCreate, UserUpdate
-from models.enums import UserRole
+from models.enums import UserRole, MAX_PROGRAMAS_POR_ENCARGADO
 from beanie.operators import Or
 
 async def get_users(page: int = 1, per_page: int = 10) -> tuple[List[User], int]:
@@ -138,7 +138,8 @@ async def assign_course_to_users(course_id: PydanticObjectId, encargados_ids: Li
     """
     Asigna un curso a una lista de usuarios (Encargados de Curso/Coordinadores),
     y lo remueve de aquellos que ya no estén en la lista.
-    Valida el límite máximo de 5 cursos.
+    Valida el límite máximo de programas por encargado (F-2026-08-11-LIMITE-10:
+    antes 5, ahora 10).
     """
     # Buscar a todos los encargados que actualmente tienen el curso
     current_encargados = await User.find(
@@ -170,8 +171,12 @@ async def assign_course_to_users(course_id: PydanticObjectId, encargados_ids: Li
             u.cursos_asignados = []
             
         if course_id not in u.cursos_asignados:
-            if len(u.cursos_asignados) >= 5:
-                raise ValueError(f"El usuario {u.username} ya tiene el máximo de 5 programas asignados.")
+            # F-2026-08-11-LIMITE-10: límite subido de 5 a 10.
+            if len(u.cursos_asignados) >= MAX_PROGRAMAS_POR_ENCARGADO:
+                raise ValueError(
+                    f"El usuario {u.username} ya tiene el máximo de "
+                    f"{MAX_PROGRAMAS_POR_ENCARGADO} programas asignados."
+                )
             u.cursos_asignados.append(course_id)
             await u.save()
 
