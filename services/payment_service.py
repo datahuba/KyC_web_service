@@ -1738,12 +1738,17 @@ async def get_matriz_pagos(
         else:
             match_enroll["curso_id"] = curso_id
 
-    # F-CXC-EXCLUIR-HISTORICOS (2026-08-04, Kevin): los cursos historicos
-    # NO aparecen en la matriz (ya terminaron, son de auditoria).
-    curso_historico_ids = {
-        c.id for c in (await Course.find({}).to_list())
-        if getattr(c, "es_historico", False)
-    }
+    # F-MATRIZ-MOSTRAR-HISTORICOS (2026-08-11, Kevin): antes los cursos
+    # historicos (DIPL-INVCI-2026/1, DIPL-DDU-2026/1, etc.) se filtraban de
+    # la vista Matriz, lo que causaba que al seleccionarlos la vista se veia
+    # VACIA (0 estudiantes) aunque los enrollments existieran. Eso impedia
+    # verificar visualmente el cuadre con la planilla Excel oficial.
+    # Ahora: NO filtrar historicos. El usuario quiere ver TODOS los cursos
+    # en la matriz, incluidos los cerrados/historicos, para poder auditar
+    # el cuadre contable. La exclusion de historicos se mantiene SOLO en
+    # el dashboard (courseBreakdown) que es para cobranza activa.
+    # Ver F-DASHBOARD-CXC-EXCLUIR-HISTORICOS si se quiere ver donde se
+    # sigue filtrando historicos para fines de cobranza.
 
     enrollments_task = Enrollment.find(match_enroll).to_list()
     # F-CXC-FILTRO-PROGRAMA: si hay curso_id especifico, NO traer todos los
@@ -1753,10 +1758,6 @@ async def get_matriz_pagos(
     else:
         courses_task = Course.find({}).to_list()
     enrollments, courses = await asyncio.gather(enrollments_task, courses_task)
-
-    # Filtrar enrollments y cursos historicos
-    enrollments = [e for e in enrollments if e.curso_id not in curso_historico_ids]
-    courses = [c for c in courses if c.id not in curso_historico_ids]
 
     courses_map = {c.id: c for c in courses}
     courses_list: list = [
