@@ -345,20 +345,53 @@ async def _aplicar_ajuste(
             enrollment.modulos = [ModuloEstado(**m) for m in MODULOS_CANONICOS]
             modulos_actualizados = 6
         else:  # diff
-            # Subir los modulos Parcial a Pagado, y verificar que M6 siga Pagado
+            # F-FIX-IMPUTAR-MODULOS (2026-08-11, Kevin): antes, cuando
+            # monto_objetivo < 1470 (casos especiales: Adolfo 245, Anabel
+            # 490, Celia 735, etc.), el codigo subia modulos[].monto_pagado
+            # a m.costo (252 cada uno) Y luego sobreescribia
+            # enrollment.total_pagado a monto_objetivo. Resultado:
+            # modulos suman 1,470 (Pagado) pero total_pagado dice 245.
+            # Inconsistencia visible en la vista Matriz.
+            #
+            # Fix: si monto_objetivo < 1470, imputar monto_objetivo a los
+            # modulos en orden (M1 primero, hasta agotar) y dejar el resto
+            # en 0/Pendiente. Asi suma(monto_pagado modulos) == total_pagado.
             modulos_actualizados = 0
-            for m in enrollment.modulos:
-                if m.estado == "Parcial" and abs(m.monto_pagado - m.costo) < 0.01:
-                    m.estado = "Pagado"
-                    modulos_actualizados += 1
-                elif m.estado == "Parcial" and m.monto_pagado < m.costo:
-                    m.monto_pagado = m.costo
-                    m.estado = "Pagado"
-                    modulos_actualizados += 1
-                elif m.estado == "Pendiente":
-                    m.monto_pagado = m.costo
-                    m.estado = "Pagado"
-                    modulos_actualizados += 1
+            costo_total = sum(m.costo or 0 for m in enrollment.modulos)
+            if monto_objetivo < costo_total - 0.01:
+                # Caso especial (pago parcial / beca): imputar en orden
+                restante = float(monto_objetivo)
+                for m in enrollment.modulos:
+                    if restante <= 0:
+                        m.monto_pagado = 0.0
+                        m.estado = "Pendiente"
+                        modulos_actualizados += 1
+                    elif restante >= (m.costo or 0):
+                        m.monto_pagado = m.costo
+                        m.estado = "Pagado"
+                        restante -= m.costo
+                        modulos_actualizados += 1
+                    else:
+                        # Pago parcial en el ultimo modulo que cubre
+                        m.monto_pagado = round(restante, 2)
+                        m.estado = "Parcial"
+                        restante = 0.0
+                        modulos_actualizados += 1
+            else:
+                # Caso normal (monto_objetivo >= costo_total): subir modulos
+                # Parcial/Pendiente a Pagado
+                for m in enrollment.modulos:
+                    if m.estado == "Parcial" and abs(m.monto_pagado - m.costo) < 0.01:
+                        m.estado = "Pagado"
+                        modulos_actualizados += 1
+                    elif m.estado == "Parcial" and m.monto_pagado < m.costo:
+                        m.monto_pagado = m.costo
+                        m.estado = "Pagado"
+                        modulos_actualizados += 1
+                    elif m.estado == "Pendiente":
+                        m.monto_pagado = m.costo
+                        m.estado = "Pagado"
+                        modulos_actualizados += 1
 
         # PASO 3: Actualizar totales del enrollment
         enrollment.total_pagado = monto_objetivo
