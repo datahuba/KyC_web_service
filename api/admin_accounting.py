@@ -168,11 +168,15 @@ async def _buscar_enrollment(estudiante_id: ObjectId, curso_id: ObjectId) -> Opt
 
 async def _borrar_pagos_ajuste(inscripcion_id: ObjectId) -> int:
     """Borra TODOS los pagos con la marca 'Ajuste por cuadre con Excel' para este enrollment.
-    Retorna la cantidad de pagos borrados. Usado para garantizar idempotencia."""
-    from beanie.operators import RegEx
+    Retorna la cantidad de pagos borrados. Usado para garantizar idempotencia.
+
+    F-AJUSTE-PAGOS-EXCEL-FIX-REGEX: en v2 el borrado retorno 0 porque la query
+    Beanie con RegEx() no matcheaba. Usamos el dict literal con $regex que
+    SI funciona (mismo patron usado en api/admin.py:112).
+    """
     existing = await Payment.find({
         "inscripcion_id": inscripcion_id,
-        "concepto": RegEx(PAGO_MARCA, "i"),
+        "concepto": {"$regex": PAGO_MARCA, "$options": "i"},
     }).to_list()
     if not existing:
         return 0
@@ -227,12 +231,15 @@ async def _aplicar_ajuste(
 
     if tipo == "crear_enrollment":
         if enrollment:
+            # Ya existe enrollment. NO es un error: si el caller queria solo
+            # crear, le decimos que ya existe. Pero tambien podemos aceptar
+            # el caso como "completo" implicitamente.
             return AjusteResultado(
                 estudiante_carnet=carnet_str,
                 estudiante_nombre=nombre,
                 curso_codigo=curso.codigo,
                 tipo=tipo, exito=False, dry_run=dry_run,
-                error=f"Ya existe enrollment ({enrollment.id}). Use tipo 'completo'.",
+                error=f"Ya existe enrollment ({enrollment.id}). Use tipo 'completo' o 'diff' para ajustar.",
                 nota=nota,
             )
         if not dry_run:
@@ -443,10 +450,8 @@ async def ajustar_pagos_excel(
                 fallidos += 1
                 continue
 
-            # 3) Buscar enrollment (puede no existir para crear_enrollment)
-            enrollment = None
-            if ajuste.tipo != "crear_enrollment":
-                enrollment = await _buscar_enrollment(estudiante.id, curso.id)
+            # 3) Buscar enrollment (siempre, para evitar duplicados en crear_enrollment)
+            enrollment = await _buscar_enrollment(estudiante.id, curso.id)
 
             # 4) Validar tipo
             if ajuste.tipo not in ("diff", "completo", "crear_enrollment"):
