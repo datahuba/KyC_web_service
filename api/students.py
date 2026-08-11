@@ -311,13 +311,21 @@ async def accept_terms(
 @router.put(
     "/{id}",
     response_model=StudentResponse,
-    summary="Actualizar Estudiante (Admin)"
+    summary="Actualizar Estudiante (Encargado/CPD/Admin)"
 )
 async def update_student_admin(
     *,
     id: PydanticObjectId,
     student_in: StudentUpdateAdmin,
-    current_user: User = Depends(require_cpd) # <-- SOLO EL CPD ACTUALIZA DATOS ACADÉMICOS
+    # F-FIX-STUDENT-EDIT-PERMISSIONS (2026-08-11, Kevin): antes era `require_cpd`
+    # que solo permitía CPD/ADMIN/SUPERADMIN. Pero Lisa/encargado_curso y
+    # coordinadores necesitaban editar datos personales (cumpleaños, celular,
+    # domicilio, etc.) de sus estudiantes asignados. Como NO existía un
+    # endpoint con permisos más amplios, recibían 403 al intentar guardar.
+    # Fix: usar `require_encargado_curso` que ya permite los 5 roles:
+    # ENCARGADO_CURSO, COORDINADOR, CPD, ADMIN, SUPERADMIN.
+    # Ver tests/test_student_update_permissions.py para cobertura.
+    current_user: User = Depends(require_encargado_curso)
 ) -> Any:
     student = await student_service.get_student(id=id)
     if not student:
