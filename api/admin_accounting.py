@@ -369,8 +369,8 @@ async def _aplicar_ajuste(
         enrollment.matricula_pagada = True
         await enrollment.save()
 
-        # PASO 4: Crear los 6 pagos canonicos
-        pagos_creados = await _crear_pagos_canonicos(enrollment.id, estudiante.id, curso.id, nota)
+        # PASO 4: Crear los pagos canonicos (o 1 pago consolidado si monto < 1470)
+        pagos_creados = await _crear_pagos_canonicos(enrollment.id, estudiante.id, curso.id, nota, monto_objetivo)
 
         return AjusteResultado(
             estudiante_carnet=carnet_str,
