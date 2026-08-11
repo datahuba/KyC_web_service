@@ -909,6 +909,12 @@ async def create_payment(
                 f"Ejecutar fix-prorrateo-masivo-v2.py --apply para corregir."
             )
 
+            # Caso original (F-082): Medardo (cobranza) reportó que un pago
+            # aprobado quedaba con saldo desincronizado y no aparecía en Por
+            # Cobrar, confundiendo el cuadre con la planilla Excel. Caso
+            # adicional: Jerry Fletcher (admin) detectó otro prorrateo
+            # fallido. Ambos quedaron como antecedente para esta notification.
+
             # F-082 (2026-07-28): notificar al equipo económico via in-app
             # notification. Si la notification falla, no bloqueamos el flujo
             # (el log WARNING ya queda).
@@ -1673,9 +1679,11 @@ async def get_matriz_pagos(
     Gestión de Pagos (replica el Excel de Sandra).
 
     Reglas:
-    - Excluye enrollments SUSPENDIDO/COMPLETADO/CANCELADO de las columnas
-      monetarias (igual que F-073, regla de Kevin/Sandra: "Por Cobrar" no
-      incluye congelados/pasivos).
+    - F-083: Excluye enrollments SUSPENDIDO/COMPLETADO/CANCELADO/RETIRADO
+      de las columnas monetarias (igual que F-073, regla de Kevin/Sandra:
+      "Por Cobrar" no incluye congelados/pasivos/retirados). Los RETIRADOS
+      que pagaron antes de retirarse siguen contando en `total_ingresos`
+      (ya recaudado) pero NO en `por_cobrar` (porque ya no se les cobra).
     - `total_ingresos` = suma de pagos APROBADOS del enrollment (cualquier
       estado de enrollment, refleja lo realmente recaudado).
     - `por_cobrar` = saldo_pendiente del enrollment (excluye suspendidos).

@@ -270,16 +270,19 @@ class TestF070PageRoute:
         )
 
     def test_sidebar_tiene_link_grade_validation(self):
-        sidebar_file = (
+        # El Sidebar.svelte importa la nav list desde lib/navigation/sidebarItems.ts
+        # (no tiene los hrefs hardcoded). Verificamos que el link este en el
+        # archivo de configuracion de navegacion que el Sidebar consume.
+        nav_file = (
             Path(__file__).parent.parent.parent
-            / "kyc-client/src/lib/components/layout/Sidebar.svelte"
+            / "kyc-client/src/lib/navigation/sidebarItems.ts"
         )
-        content = read(sidebar_file)
+        content = read(nav_file)
         assert "/app/admin/grade-validation" in content, (
-            "F-070: El Sidebar debe tener el link /app/admin/grade-validation."
+            "F-070: sidebarItems.ts debe tener el link /app/admin/grade-validation."
         )
         assert "Validación de Notas" in content, (
-            "F-070: El Sidebar debe mostrar 'Validación de Notas' como texto."
+            "F-070: sidebarItems.ts debe mostrar 'Validación de Notas' como texto."
         )
         # debe estar restringido a cpd/admin/superadmin
         match = re.search(
