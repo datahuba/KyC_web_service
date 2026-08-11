@@ -190,10 +190,42 @@ async def _crear_pagos_canonicos(
     estudiante_id: ObjectId,
     curso_id: ObjectId,
     nota: str,
+    monto_objetivo: Optional[float] = None,
 ) -> int:
-    """Crea los 6 pagos canonicos (5x252 + 1x210 = 1470). Retorna cantidad creada."""
+    """Crea los pagos para cuadrar con el Excel.
+
+    F-AJUSTE-PAGOS-EXCEL-FIX-MONTO-VARIABLE (2026-08-10, Kevin): antes esta
+    funcion SIEMPRE creaba los 6 pagos canonicos (5x252 + 1x210 = 1470),
+    ignorando el monto_objetivo del request. Eso causaba que estudiantes con
+    Excel=245 o 735 recibieran pagos por 1470 en el sistema.
+
+    Ahora:
+    - Si monto_objetivo >= 1470: crea los 6 pagos canonicos (uno por modulo)
+    - Si monto_objetivo < 1470: crea UN SOLO pago consolidado por monto_objetivo
+      (caso de estudiantes becados o con pago parcial segun Excel)
+    """
     now = utcnow_naive()
     timestamp_suffix = int(now.timestamp())
+    if monto_objetivo is not None and monto_objetivo < sum(p["monto"] for p in PAGOS_CANONICOS_DIPL_INVCI):
+        # Pago consolidado por monto_objetivo (caso pago parcial / beca)
+        pago = Payment(
+            inscripcion_id=inscripcion_id,
+            estudiante_id=estudiante_id,
+            curso_id=curso_id,
+            concepto=f"{PAGO_MARCA} - Pago parcial",
+            detalle=f"Cuadre con planilla Excel oficial 2026-08-10. Monto total: Bs {monto_objetivo}. {nota or ''}".strip(),
+            metodo_pago="Ajuste Contable",
+            numero_transaccion=f"AJUSTE-EXCEL-PARCIAL-{timestamp_suffix}",
+            cantidad_pago=monto_objetivo,
+            estado_pago=EstadoPago.APROBADO,
+            fecha_subida=now,
+            fecha_verificacion=now,
+            verificado_por="admin_accounting_ajuste_excel",
+            comprobante_url=None,
+        )
+        await pago.insert()
+        return 1
+    # Camino normal: 6 pagos canonicos (5x252 + 1x210 = 1470)
     for i, p in enumerate(PAGOS_CANONICOS_DIPL_INVCI, 1):
         pago = Payment(
             inscripcion_id=inscripcion_id,
@@ -262,7 +294,7 @@ async def _aplicar_ajuste(
                 fecha_inscripcion=now,
             )
             await enrollment.insert()
-            pagos_creados = await _crear_pagos_canonicos(enrollment.id, estudiante.id, curso.id, nota)
+            pagos_creados = await _crear_pagos_canonicos(enrollment.id, estudiante.id, curso.id, nota, monto_objetivo)
             return AjusteResultado(
                 estudiante_carnet=carnet_str,
                 estudiante_nombre=nombre,
