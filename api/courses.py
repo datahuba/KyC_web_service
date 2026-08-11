@@ -810,21 +810,51 @@ async def put_resolucion(
 async def create_course(
     *,
     course_in: CourseCreate,
-    current_user: User = Depends(require_cpd) # F-HISTORICO-AUTOSERVICIO (2026-08-04): Kevin decidio SOLO CPD y SUPERADMIN pueden crear. Inline check abajo porque require_cpd tambien permite ADMIN.
+    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-AUTOSERVICIO: encargado_curso/coord/CPD/ADMIN/SUPERADMIN pueden intentar. Inline check abajo: solo CPD/SUPERADMIN pueden crear programas NUEVOS o EN EJECUCION; encargado/coord solo HISTORICOS.
 ) -> Any:
     """Crear nuevo curso.
 
-    F-HISTORICO-AUTOSERVICIO (2026-08-04): Kevin decidio que SOLO CPD y SUPERADMIN
-    pueden crear programas. El dep `require_cpd` permite CPD, ADMIN y SUPERADMIN,
-    asi que hacemos un check inline adicional para BLOQUEAR a ADMIN.
-    Encargado_curso, coordinador, cobranza, docente, estudiante → 403.
+    F-2026-08-11-EC-AUTOSERVICIO (Kevin, reunion educacion continua): encargado
+    de educacion continua puede crear programas HISTORICOS para dejar registro
+    de cohortes pasadas. NO puede crear programas nuevos ni en ejecucion
+    (esos siguen siendo CPD o SUPERADMIN).
+
+    Reglas:
+    - CPD, ADMIN, SUPERADMIN: pueden crear cualquier tipo (nuevo, en ejecucion, historico)
+    - ENCARGADO_CURSO, COORDINADOR: SOLO pueden crear programas donde la
+      fecha_fin YA PASO (es decir, 'historicos'/'cerrados' por fecha).
+      Si intentan crear un curso nuevo/en_ejecucion, se rechaza con 403.
+    - Cobranza, docente, estudiante: 403.
     """
-    # F-HISTORICO-AUTOSERVICIO: check inline para SOLO CPD y SUPERADMIN (no ADMIN)
-    if current_user.rol not in (UserRole.CPD, UserRole.SUPERADMIN):
-        raise HTTPException(
-            status_code=403,
-            detail="Solo CPD o superadmin pueden crear programas.",
-        )
+    from core.timezone_utils import utcnow_naive
+    from datetime import datetime as _dt
+
+    if current_user.rol not in (UserRole.CPD, UserRole.ADMIN, UserRole.SUPERADMIN):
+        # ENCARGADO_CURSO o COORDINADOR: solo historicos (fecha_fin < hoy)
+        fecha_fin = getattr(course_in, "fecha_fin", None)
+        if fecha_fin is None:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Como encargado/coordinador, solo puedes crear programas historicos. "
+                    "El programa debe tener fecha_fin (ya finalizo)."
+                ),
+            )
+        # fecha_fin puede ser date o datetime; normalizar a datetime UTC-naive
+        if isinstance(fecha_fin, _dt):
+            fin_dt = fecha_fin
+        else:
+            fin_dt = _dt.combine(fecha_fin, _dt.min.time())
+        now_naive = utcnow_naive()
+        if fin_dt >= now_naive:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Como encargado/coordinador, solo puedes crear programas historicos "
+                    "(fecha_fin ya paso). Para crear programas nuevos o en ejecucion, "
+                    "consulta con CPD o superadmin."
+                ),
+            )
     try:
         course = await course_service.create_course(course_in=course_in)
         # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): popular

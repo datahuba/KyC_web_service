@@ -44,7 +44,7 @@ from schemas.pre_registration import (
 )
 from schemas.common import PaginatedResponse, PaginationMeta
 from services import pre_registration_service
-from api.dependencies import require_superadmin, require_cpd
+from api.dependencies import require_superadmin, require_cpd, require_encargado_curso
 
 router = APIRouter()
 
@@ -137,11 +137,11 @@ async def get_form(
     "/forms",
     response_model=PreRegistrationFormResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Crear Formulario (solo super admin)"
+    summary="Crear Formulario (encargado EC / super admin)"
 )
 async def create_form(
     data: PreRegistrationFormCreate,
-    current_user: User = Depends(require_superadmin)
+    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-AUTOSERVICIO: encargado_curso y coordinador (educacion continua) pueden crear formularios.
 ) -> Any:
     try:
         form = await pre_registration_service.create_form(data, current_user.username)
@@ -153,12 +153,12 @@ async def create_form(
 @router.patch(
     "/forms/{form_id}",
     response_model=PreRegistrationFormResponse,
-    summary="Editar Formulario (solo super admin)"
+    summary="Editar Formulario (encargado EC / super admin)"
 )
 async def update_form(
     form_id: PydanticObjectId,
     data: PreRegistrationFormUpdate,
-    current_user: User = Depends(require_superadmin)
+    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-AUTOSERVICIO
 ) -> Any:
     try:
         form = await pre_registration_service.update_form(form_id, data)
@@ -170,11 +170,11 @@ async def update_form(
 @router.post(
     "/forms/{form_id}/close",
     response_model=PreRegistrationFormResponse,
-    summary="Cerrar Formulario manualmente (solo super admin)"
+    summary="Cerrar Formulario manualmente (encargado EC / super admin)"
 )
 async def close_form(
     form_id: PydanticObjectId,
-    current_user: User = Depends(require_superadmin)
+    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-AUTOSERVICIO
 ) -> Any:
     from schemas.pre_registration import PreRegistrationFormUpdate
     try:
@@ -187,11 +187,11 @@ async def close_form(
 @router.post(
     "/forms/{form_id}/reopen",
     response_model=PreRegistrationFormResponse,
-    summary="Reabrir Formulario (solo super admin)"
+    summary="Reabrir Formulario (encargado EC / super admin)"
 )
 async def reopen_form(
     form_id: PydanticObjectId,
-    current_user: User = Depends(require_superadmin)
+    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-AUTOSERVICIO
 ) -> Any:
     from schemas.pre_registration import PreRegistrationFormUpdate
     try:
@@ -205,11 +205,11 @@ async def reopen_form(
     "/forms/{form_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
-    summary="Eliminar Formulario (solo super admin)"
+    summary="Eliminar Formulario (encargado EC / super admin)"
 )
 async def delete_form(
     form_id: PydanticObjectId,
-    current_user: User = Depends(require_superadmin)
+    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-AUTOSERVICIO
 ):
     try:
         await pre_registration_service.delete_form(form_id)
