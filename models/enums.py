@@ -243,4 +243,15 @@ class EstadoTramite(str, Enum):
 # Antes 5, ahora 10. Profesionales siguen en 5 (no los afecta porque ese
 # límite solo aplica a ENCARGADO_CURSO y COORDINADOR).
 MAX_PROGRAMAS_POR_ENCARGADO = 10
+
+
+# F-2026-08-11-ASISTENCIA: estados de asistencia de un estudiante en una sesion.
+# "tarde" cuenta como 0.5 presente para el calculo del % asistencia.
+# "justificado" NO cuenta como presente NI como ausente (es neutro, ej:
+#   el estudiante tuvo cita medica y trajo justificativo).
+class EstadoAsistencia(str, Enum):
+    PRESENTE = "presente"
+    AUSENTE = "ausente"
+    TARDE = "tarde"
+    JUSTIFICADO = "justificado"
     

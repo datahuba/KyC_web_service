@@ -39,6 +39,7 @@ from .title import Title
 from .user import User
 from .requisito import Requisito, RequisitoTemplate  # Nuevo
 from .error_log import ErrorLog  # F-044 (2026-07-22)
+from .asistencia import Sesion, AsistenciaRegistro  # F-2026-08-11-ASISTENCIA
 
 __all__ = [
     # Base
@@ -65,6 +66,8 @@ __all__ = [
     "Title",
     "User",
     "ErrorLog",  # F-044
+    "Sesion",  # F-2026-08-11-ASISTENCIA
+    "AsistenciaRegistro",  # F-2026-08-11-ASISTENCIA
 
     # Embedded Models
     "Requisito",          # Nuevo

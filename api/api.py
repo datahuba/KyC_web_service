@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from api import students, courses, enrollments, payments, discounts, users, auth, payment_config, classroom, notifications, account_requests, passive_requests, bank_statements, enrollment_requests, dashboard, pre_registrations, admin, admin_data_health, admin_accounting, certificates, reports, tramite_solicitudes, comunicados  # F-CERTIFICADOS (2026-07-29); F-CUENTAS-POR-COBRAR (2026-07-29); F-TRAMITES-SOLICITUD (2026-07-29); US-003 (2026-08-03): Comunicados; R35-FASE-3 (2026-08-07): Reporte consolidado transversal; F-AJUSTE-PAGOS-EXCEL (2026-08-10)
+from api import students, courses, enrollments, payments, discounts, users, auth, payment_config, classroom, notifications, account_requests, passive_requests, bank_statements, enrollment_requests, dashboard, pre_registrations, admin, admin_data_health, admin_accounting, certificates, reports, tramite_solicitudes, comunicados, asistencia  # F-2026-08-11-ASISTENCIA: registro de asistencia por sesion/clase
 
 api_router = APIRouter()
 
@@ -36,3 +36,6 @@ api_router.include_router(reports.router, prefix="/reports", tags=["reports"])
 # US-003 (2026-08-03): Comunicados. Anuncios oficiales del personal a estudiantes
 # con pop-up al primer login. Audiencia: solo estudiantes.
 api_router.include_router(comunicados.router, prefix="/comunicados", tags=["comunicados"])
+# F-2026-08-11-ASISTENCIA (2026-08-11): registro de asistencia por sesion/clase
+# para educacion continua. Regla del 80% asistencia aplicada al cerrar modulo.
+api_router.include_router(asistencia.router, prefix="/asistencia", tags=["asistencia"])

@@ -44,6 +44,9 @@ from models.tramite_solicitud import TramiteSolicitud
 # (superadmin/encargado/cobranzas) hacia los estudiantes, con pop-up al login
 # y tracking de "visto" por estudiante.
 from models.comunicado import Comunicado, ComunicadoVisto
+# F-2026-08-11-ASISTENCIA: registro de asistencia por sesion/clase
+# (educacion continua, regla del 80% asistencia).
+from models.asistencia import Sesion, AsistenciaRegistro
 
 
 async def _sanitize_legacy_database(db):
@@ -222,6 +225,10 @@ async def init_db():
             # US-003 (2026-08-03): Comunicados
             Comunicado,
             ComunicadoVisto,
+            # F-2026-08-11-ASISTENCIA (2026-08-11): registro de asistencia
+            # por sesion/clase (educacion continua, regla del 80%).
+            Sesion,
+            AsistenciaRegistro,
         ]
     )
     print(f"[OK] Conectado a MongoDB ({settings.DATABASE_NAME}) y Beanie inicializado con Connection Pool optimizado.")
