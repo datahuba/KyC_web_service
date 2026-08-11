@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from api import students, courses, enrollments, payments, discounts, users, auth, payment_config, classroom, notifications, account_requests, passive_requests, bank_statements, enrollment_requests, dashboard, pre_registrations, admin, admin_data_health, certificates, reports, tramite_solicitudes, comunicados  # F-CERTIFICADOS (2026-07-29); F-CUENTAS-POR-COBRAR (2026-07-29); F-TRAMITES-SOLICITUD (2026-07-29); US-003 (2026-08-03): Comunicados; R35-FASE-3 (2026-08-07): Reporte consolidado transversal
+from api import students, courses, enrollments, payments, discounts, users, auth, payment_config, classroom, notifications, account_requests, passive_requests, bank_statements, enrollment_requests, dashboard, pre_registrations, admin, admin_data_health, admin_accounting, certificates, reports, tramite_solicitudes, comunicados  # F-CERTIFICADOS (2026-07-29); F-CUENTAS-POR-COBRAR (2026-07-29); F-TRAMITES-SOLICITUD (2026-07-29); US-003 (2026-08-03): Comunicados; R35-FASE-3 (2026-08-07): Reporte consolidado transversal; F-AJUSTE-PAGOS-EXCEL (2026-08-10)
 
 api_router = APIRouter()
 
@@ -24,6 +24,8 @@ api_router.include_router(pre_registrations.router, prefix="/pre-registrations",
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
 # R35-FASE-3 (2026-08-07, Kevin): reporte consolidado de inconsistencias de datos
 api_router.include_router(admin_data_health.router, prefix="/admin", tags=["admin-data-health"])
+# F-AJUSTE-PAGOS-EXCEL (2026-08-10, Kevin): cuadrar pagos con planilla Excel oficial.
+api_router.include_router(admin_accounting.router, prefix="/admin/accounting", tags=["admin-accounting"])
 # F-CERTIFICADOS (2026-07-29): emisión de Certificados de Notas y No Deudor.
 api_router.include_router(certificates.router, prefix="/certificates", tags=["certificates"])
 # F-TRAMITES-SOLICITUD (2026-07-29): solicitudes de Convalidación, Tutoría,
