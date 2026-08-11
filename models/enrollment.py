@@ -100,6 +100,16 @@ class ModuloEstado(BaseModel):
         description="'sin_borrador' | 'pendiente_validacion' | 'validada'"
     )
 
+    # F-2026-08-11-MODULOS-EC: porcentaje de asistencia del estudiante al
+    # módulo (0-100). El docente lo llena al cerrar el módulo. Si es < 80%,
+    # el sistema fuerza estado_academico='Reprobado' independientemente de
+    # la nota (regla de aprobación mínima por asistencia, reunión educación
+    # continua UAGRM 2026-08-11). None = aún no registrado.
+    asistencia_porcentaje: Optional[float] = Field(
+        default=None, ge=0, le=100,
+        description="Porcentaje de asistencia del estudiante al módulo (0-100). Si < 80%, el sistema fuerza Reprobado al cerrar el módulo. None = aún no registrado."
+    )
+
 
 # ========================================================================
 # SUB-MODELO: SNAPSHOT DE UN ÍTEM DE CARGO ADICIONAL (ISSUE-P-CARGO-MULTIITEM)

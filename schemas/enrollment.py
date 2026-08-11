@@ -24,6 +24,8 @@ class ModuloEstadoSchema(BaseModel):
     # ISSUE-Q-NOTA-BORRADOR
     nota_borrador: Optional[float] = None
     estado_validacion_nota: Optional[str] = "sin_borrador"
+    # F-2026-08-11-MODULOS-EC: porcentaje de asistencia (0-100)
+    asistencia_porcentaje: Optional[float] = None
 
 class ModuloNotaUpdate(BaseModel):
     """Schema para actualizar la calificación de un submódulo (docente -> borrador; CPD/Admin -> oficial directa)"""

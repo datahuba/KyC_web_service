@@ -20,7 +20,7 @@ from typing import List, Any, Optional, Union
 from datetime import datetime
 from pydantic import BaseModel, Field
 from core.timezone_utils import utcnow_naive
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Path
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Path, Body
 from models.enrollment import Enrollment
 from models.student import Student
 from models.course import Course
@@ -670,6 +670,12 @@ async def get_my_enrollments(
     F-FIX-ENROLLMENTS-ME-JOIN (2026-08-10, Kevin): ahora joinea
     estudiante_nombre, curso_nombre, etc. para que el estudiante vea
     los nombres en su dashboard (no IDs).
+
+    F-2026-08-11-MODULOS-EC: si el estudiante tiene saldo_pendiente > 0 en
+    alguna inscripcion, sus notas (nota, nota_borrador) y estado_academico
+    se devuelven como null. Solo cuando pague todo (saldo_pendiente == 0)
+    podra ver las notas. Regla de la reunion educacion continua UAGRM
+    2026-08-11: "estudiante no ve nota hasta pagar".
     """
     enrollments = await Enrollment.find(
         Enrollment.estudiante_id == current_user.id
@@ -677,6 +683,28 @@ async def get_my_enrollments(
     # F-FIX-ENROLLMENTS-ME-JOIN: joinear nombres (1 query batch por
     # coleccion, no N+1).
     enriched = await enrollment_service.enrich_enrollments_batch(enrollments)
+
+    # F-2026-08-11-MODULOS-EC: filtrar notas si hay deuda pendiente.
+    # NO mutamos el objeto de la DB, solo el snapshot que se serializa.
+    # Si saldo_pendiente > 0: ocultar nota, nota_borrador, estado_academico
+    # (forzar a "Cursando") y nota_final del enrollment.
+    for enr in enriched:
+        saldo = (enr.get("saldo_pendiente") or 0) if isinstance(enr, dict) else 0
+        if saldo > 0:
+            modulos = enr.get("modulos") if isinstance(enr, dict) else None
+            if modulos:
+                for m in modulos:
+                    if not isinstance(m, dict):
+                        continue
+                    if m.get("nota") is not None:
+                        m["nota"] = None
+                    if m.get("nota_borrador") is not None:
+                        m["nota_borrador"] = None
+                    if m.get("estado_academico") not in (None, "Cursando"):
+                        m["estado_academico"] = "Cursando"
+            if isinstance(enr, dict) and enr.get("nota_final") is not None:
+                enr["nota_final"] = None
+
     return enriched
 
 
@@ -1960,12 +1988,25 @@ async def finalizar_modulo_endpoint(
     *,
     id: PydanticObjectId,
     index: int = Path(..., ge=0, description="Índice del módulo (0, 1, 2...)"),
+    asistencia_porcentaje: Optional[float] = Body(
+        None, ge=0, le=100,
+        description=(
+            "F-2026-08-11-MODULOS-EC: porcentaje de asistencia del estudiante "
+            "al módulo (0-100). Opcional. Si < 80, el sistema fuerza "
+            "estado_academico='Reprobado' (regla de aprobación mínima por "
+            "asistencia, educación continua UAGRM 2026-08-11)."
+        ),
+    ),
     current_user: User = Depends(require_staff),
 ) -> Any:
     """
     F-MODULOS-MODAL (2026-07-31): marca un módulo como finalizado/cerrado.
     Requisito: el módulo debe estar iniciado (iniciado_en != null).
     Idempotente: si ya estaba finalizado, no-op.
+
+    F-2026-08-11-MODULOS-EC: si se pasa asistencia_porcentaje, se persiste en
+    el modulo. Si asistencia < 80%, se fuerza estado_academico='Reprobado'
+    independientemente de la nota.
     """
     enrollment = await Enrollment.get(id)
     if not enrollment:
@@ -1998,7 +2039,15 @@ async def finalizar_modulo_endpoint(
 
     if modulo.finalizado_en is None:
         modulo.finalizado_en = utcnow_naive()
-        await enrollment.save()
+    # F-2026-08-11-MODULOS-EC: persistir asistencia_porcentaje y aplicar
+    # regla del 80% (forzar Reprobado si < 80). Se aplica aunque el módulo
+    # ya estuviera finalizado, para soportar correcciones.
+    if asistencia_porcentaje is not None:
+        modulo.asistencia_porcentaje = asistencia_porcentaje
+        if asistencia_porcentaje < 80:
+            modulo.estado_academico = "Reprobado"
+
+    await enrollment.save()
 
     return await enrollment_service.enrich_enrollment_dates(enrollment)
 
