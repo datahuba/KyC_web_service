@@ -1,37 +1,38 @@
 """
-F-AJUSTE-PAGOS-EXCEL (2026-08-10, Kevin)
-=========================================
+F-AJUSTE-PAGOS-EXCEL (2026-08-10, Kevin) - v2
+=============================================
 
 Endpoint para cuadrar los pagos del sistema con la planilla Excel oficial
 de la UAGRM, considerada la fuente de verdad al 2026-08-10.
 
-CONTEXTO:
-- En la auditoría ITER 2 (2026-08-10) descubrimos que los pagos del curso
-  DIPL-INVCI-2026/1 (Investigación Científica) están desfasados:
-  * 50 estudiantes tienen sistema=1435 pero Excel=1470 (diferencia 35)
-  * 3 estudiantes (Yolanda, Virginia, Zelma, Yovana) fueron restaurados
-    con _id nuevos y ahora tienen total_pagado=0 cuando deberían tener 1470
-  * Sandra Villafani (1112227) perdió sus 5 pagos originales durante una
-    prueba con /payments/by-staff
-  * Victor Hugo Verastegui (3067892) no tiene enrollment en el sistema
+VERSION 2 (F-AJUSTE-PAGOS-EXCEL-FIX-IDEMPOTENCIA):
+- Antes: para tipo=diff creaba 1 pago de 35; para tipo=completo creaba 6 pagos
+  pero sin borrar los previos. Resultado: ejecuciones multiples generaban
+  duplicados (4 restaurados terminaron con 18 pagos = 3 sets de 6).
+- Ahora: SIEMPRE borra los pagos "Ajuste por cuadre con Excel" previos
+  antes de crear nuevos. Idempotente: ejecutar 2 veces da el mismo resultado.
+- Para tipo=diff: crea 6 pagos (5 modulos a 252 + 1 modulo a 210 = 1470).
+  Razon: el Excel dice que el estudiante pagó 1470 total. Independientemente
+  de que los modulos ya estuvieran ajustados a 252, los pagos en la coleccion
+  payments deben sumar 1470 (5 pagos de 245 o 6 pagos de 252+210 son
+  equivalentes a nivel de planilla Excel).
 
-SOLUCIÓN:
-- Endpoint que ajusta la base de datos directamente via Beanie/Motor,
-  evitando el auto-recálculo de modulos que rompe el endpoint
-  /payments/by-staff cuando se usa para ajustes retroactivos.
-- Modos:
-  * dry_run=true: solo muestra qué se haría, sin aplicar cambios
-  * dry_run=false: aplica los cambios (UPDATE directo en enrollment +
-    INSERT directo en payments collection)
-- Tipos de ajuste por estudiante:
-  * "diff": crear 1 pago por el diff, subir modulos[].monto_pagado
-  * "completo": restaurar modulos Pagado + crear 6 pagos de los costos
-  * "crear_enrollment": crear enrollment + 6 modulos Pagado + 6 pagos
-- Idempotente: si se ejecuta 2 veces, no duplica pagos (verifica antes).
+ESTRUCTURA CANON DE MODULOS DEL CURSO DIPL-INVCI-2026/1:
+- 5 modulos a 252 + 1 modulo a 210 = 1470
+- Total: 1470 Bs (cuadra con Excel)
 
-PROTECCIÓN:
+POR QUE NO USAR /payments/by-staff:
+- El endpoint /payments/by-staff recalcula los modulos desde cero cada vez.
+- Cuando hay pagos históricos sin asociacion a `pagos_modulos`, el recálculo
+  los borra silenciosamente. Verificado en ITER 2 (2026-08-10) con el caso
+  de Sandra Villafani (5 pagos de 287 Bs perdidos) y Monica Vargas (5 pagos
+  de 245 Bs borrados por la prueba inicial).
+- Este endpoint hace UPDATE directo sin pasar por el recálculo.
+
+PROTECCION:
 - Solo superadmin puede ejecutarlo
 - Requiere header X-Confirmar-Ajuste=yes para evitar accidentes
+- Idempotente: borra los pagos Ajuste previos antes de crear nuevos
 
 USO:
     POST /api/v1/admin/accounting/ajustar-pagos-excel
@@ -69,6 +70,9 @@ logger = logging.getLogger("kyc.admin_accounting")
 # Cabecera obligatoria para ejecutar (anti-click-accidental)
 CONFIRM_HEADER = "X-Confirmar-Ajuste"
 
+# Marca para identificar los pagos creados por este endpoint
+PAGO_MARCA = "Ajuste por cuadre con Excel"
+
 
 def require_superadmin(current_user: User = Depends(get_current_user)) -> User:
     if not isinstance(current_user, User):
@@ -80,10 +84,10 @@ def require_superadmin(current_user: User = Depends(get_current_user)) -> User:
 
 class AjusteItem(BaseModel):
     estudiante_carnet: str = Field(..., description="Carnet de identidad del estudiante")
-    curso_codigo: str = Field(..., description="Código del curso (ej: DIPL-INVCI-2026/1)")
+    curso_codigo: str = Field(..., description="Codigo del curso (ej: DIPL-INVCI-2026/1)")
     tipo: str = Field(..., description="'diff' | 'completo' | 'crear_enrollment'")
-    monto_objetivo: float = Field(..., description="Monto total esperado según Excel")
-    nota: Optional[str] = Field(None, description="Nota explicativa del ajuste (auditoría)")
+    monto_objetivo: float = Field(..., description="Monto total esperado segun Excel")
+    nota: Optional[str] = Field(None, description="Nota explicativa del ajuste (auditoria)")
 
 
 class AjusteRequest(BaseModel):
@@ -101,6 +105,7 @@ class AjusteResultado(BaseModel):
     antes: Dict[str, Any] = Field(default_factory=dict)
     despues: Dict[str, Any] = Field(default_factory=dict)
     pagos_creados: int = 0
+    pagos_borrados: int = 0
     modulos_actualizados: int = 0
     error: Optional[str] = None
     nota: Optional[str] = None
@@ -114,19 +119,30 @@ class AjusteResponse(BaseModel):
     exitosos: int
     fallidos: int
     pagos_creados_total: int
+    pagos_borrados_total: int
     modulos_actualizados_total: int
     resultados: List[AjusteResultado]
 
 
-# Estructura canon de modulos del curso DIPL-INVCI-2026/1 (fija al 2026-08-10)
+# Estructura canon de los 6 pagos del curso DIPL-INVCI-2026/1
 # 5 modulos a 252 + 1 modulo a 210 = 1470
-MODULOS_DIPL_INVCI_2026_1 = [
-    {"nombre": "Módulo 1", "costo": 252.0, "monto_pagado": 252.0, "estado": "Pagado", "estado_operacional": "Ejecutado"},
-    {"nombre": "Módulo 2", "costo": 252.0, "monto_pagado": 252.0, "estado": "Pagado", "estado_operacional": "Ejecutado"},
-    {"nombre": "Módulo 3", "costo": 252.0, "monto_pagado": 252.0, "estado": "Pagado", "estado_operacional": "Ejecutado"},
-    {"nombre": "Módulo 4", "costo": 252.0, "monto_pagado": 252.0, "estado": "Pagado", "estado_operacional": "Ejecutado"},
-    {"nombre": "Módulo 5", "costo": 252.0, "monto_pagado": 252.0, "estado": "Pagado", "estado_operacional": "Ejecutado"},
-    {"nombre": "Módulo 6", "costo": 210.0, "monto_pagado": 210.0, "estado": "Pagado", "estado_operacional": "Ejecutado"},
+PAGOS_CANONICOS_DIPL_INVCI = [
+    {"numero": 1, "concepto_modulo": "Modulo 1", "monto": 252.0},
+    {"numero": 2, "concepto_modulo": "Modulo 2", "monto": 252.0},
+    {"numero": 3, "concepto_modulo": "Modulo 3", "monto": 252.0},
+    {"numero": 4, "concepto_modulo": "Modulo 4", "monto": 252.0},
+    {"numero": 5, "concepto_modulo": "Modulo 5", "monto": 252.0},
+    {"numero": 6, "concepto_modulo": "Modulo 6", "monto": 210.0},
+]
+
+# Estructura canon de modulos del enrollment
+MODULOS_CANONICOS = [
+    {"nombre": "Modulo 1", "costo": 252.0, "monto_pagado": 252.0, "estado": "Pagado", "estado_operacional": "Ejecutado", "estado_academico": "Cursando"},
+    {"nombre": "Modulo 2", "costo": 252.0, "monto_pagado": 252.0, "estado": "Pagado", "estado_operacional": "Ejecutado", "estado_academico": "Cursando"},
+    {"nombre": "Modulo 3", "costo": 252.0, "monto_pagado": 252.0, "estado": "Pagado", "estado_operacional": "Ejecutado", "estado_academico": "Cursando"},
+    {"nombre": "Modulo 4", "costo": 252.0, "monto_pagado": 252.0, "estado": "Pagado", "estado_operacional": "Ejecutado", "estado_academico": "Cursando"},
+    {"nombre": "Modulo 5", "costo": 252.0, "monto_pagado": 252.0, "estado": "Pagado", "estado_operacional": "Ejecutado", "estado_academico": "Cursando"},
+    {"nombre": "Modulo 6", "costo": 210.0, "monto_pagado": 210.0, "estado": "Pagado", "estado_operacional": "Ejecutado", "estado_academico": "Cursando"},
 ]
 
 
@@ -150,73 +166,40 @@ async def _buscar_enrollment(estudiante_id: ObjectId, curso_id: ObjectId) -> Opt
     })
 
 
-async def _contar_pagos_ajuste_excel(inscripcion_id: ObjectId) -> int:
-    """Cuenta pagos que ya tienen el motivo 'Ajuste por cuadre con Excel' para no duplicar."""
+async def _borrar_pagos_ajuste(inscripcion_id: ObjectId) -> int:
+    """Borra TODOS los pagos con la marca 'Ajuste por cuadre con Excel' para este enrollment.
+    Retorna la cantidad de pagos borrados. Usado para garantizar idempotencia."""
     from beanie.operators import RegEx
-    return await Payment.find({
+    existing = await Payment.find({
         "inscripcion_id": inscripcion_id,
-        "concepto": RegEx("Ajuste por cuadre con Excel", "i"),
-    }).count()
+        "concepto": RegEx(PAGO_MARCA, "i"),
+    }).to_list()
+    if not existing:
+        return 0
+    for p in existing:
+        await p.delete()
+    return len(existing)
 
 
-async def _aplicar_ajuste_diff(
-    estudiante: Student,
-    curso: Course,
-    enrollment: Enrollment,
-    monto_objetivo: float,
+async def _crear_pagos_canonicos(
+    inscripcion_id: ObjectId,
+    estudiante_id: ObjectId,
+    curso_id: ObjectId,
     nota: str,
-    dry_run: bool,
-) -> AjusteResultado:
-    """Caso: estudiante con modulos Parcial. Crear 1 pago por el diff y subir modulos."""
-    inscripcion_id = enrollment.id
-    antes_total = enrollment.total_pagado or 0.0
-    diff = round(monto_objetivo - antes_total, 2)
-
-    if diff <= 0:
-        return AjusteResultado(
-            estudiante_carnet=str(estudiante.carnet or estudiante.registro or ""),
-            estudiante_nombre=estudiante.nombre or "",
-            curso_codigo=curso.codigo,
-            tipo="diff",
-            exito=True,
-            dry_run=dry_run,
-            antes={"total_pagado": antes_total, "saldo_pendiente": enrollment.saldo_pendiente},
-            despues={"total_pagado": antes_total, "saldo_pendiente": enrollment.saldo_pendiente},
-            nota=f"Sin cambios: total_pagado={antes_total} ya alcanza monto_objetivo={monto_objetivo}",
-        )
-
-    # Verificar idempotencia: si ya existe un pago de Ajuste con este monto para este inscripcion, skip
-    ajustes_previos = await _contar_pagos_ajuste_excel(inscripcion_id)
-    if ajustes_previos > 0:
-        return AjusteResultado(
-            estudiante_carnet=str(estudiante.carnet or estudiante.registro or ""),
-            estudiante_nombre=estudiante.nombre or "",
-            curso_codigo=curso.codigo,
-            tipo="diff",
-            exito=True,
-            dry_run=dry_run,
-            antes={"total_pagado": antes_total, "saldo_pendiente": enrollment.saldo_pendiente},
-            despues={"total_pagado": antes_total, "saldo_pendiente": enrollment.saldo_pendiente},
-            nota=f"Ya existe {ajustes_previos} pago(s) 'Ajuste por cuadre con Excel' previo. Idempotente: skip.",
-        )
-
-    antes_modulos = [
-        {"nombre": m.nombre, "costo": m.costo, "monto_pagado": m.monto_pagado, "estado": m.estado}
-        for m in enrollment.modulos
-    ]
-
-    if not dry_run:
-        # 1) Crear el pago (directo a la colección via Beanie)
-        now = utcnow_naive()
+) -> int:
+    """Crea los 6 pagos canonicos (5x252 + 1x210 = 1470). Retorna cantidad creada."""
+    now = utcnow_naive()
+    timestamp_suffix = int(now.timestamp())
+    for i, p in enumerate(PAGOS_CANONICOS_DIPL_INVCI, 1):
         pago = Payment(
             inscripcion_id=inscripcion_id,
-            estudiante_id=estudiante.id,
-            curso_id=curso.id,
-            concepto=f"Ajuste por cuadre con Excel - {curso.codigo}",
-            detalle=f"Diferencia aplicada al enrollment {inscripcion_id}. {nota or ''}".strip(),
+            estudiante_id=estudiante_id,
+            curso_id=curso_id,
+            concepto=f"{PAGO_MARCA} - {p['concepto_modulo']}",
+            detalle=f"Cuadre con planilla Excel oficial 2026-08-10. {nota or ''}".strip(),
             metodo_pago="Ajuste Contable",
-            numero_transaccion=f"AJUSTE-EXCEL-{int(now.timestamp())}",
-            cantidad_pago=diff,
+            numero_transaccion=f"AJUSTE-EXCEL-M{i}-{timestamp_suffix}",
+            cantidad_pago=p["monto"],
             estado_pago=EstadoPago.APROBADO,
             fecha_subida=now,
             fecha_verificacion=now,
@@ -224,90 +207,121 @@ async def _aplicar_ajuste_diff(
             comprobante_url=None,
         )
         await pago.insert()
-
-        # 2) Subir el monto_pagado de los modulos que estén Parcial/Pendiente
-        #    Distribuir el diff de forma que el último modulo Parcial suba de 245 a 252
-        modulos_actualizados = 0
-        restante = diff
-        for m in enrollment.modulos:
-            if restante <= 0.005:
-                break
-            # Si está Parcial y el monto_pagado < costo, subir hasta el costo
-            if m.estado == "Parcial" and m.monto_pagado < m.costo:
-                subir = min(m.costo - m.monto_pagado, restante)
-                m.monto_pagado = round(m.monto_pagado + subir, 2)
-                if abs(m.monto_pagado - m.costo) < 0.01:
-                    m.estado = "Pagado"
-                restante = round(restante - subir, 2)
-                modulos_actualizados += 1
-            elif m.estado == "Pendiente" and m.monto_pagado == 0 and restante >= m.costo:
-                # Si hay un modulo Pendiente y alcanza para pagarlo completo
-                m.monto_pagado = m.costo
-                m.estado = "Pagado"
-                restante = round(restante - m.costo, 2)
-                modulos_actualizados += 1
-
-        # 3) Actualizar totales del enrollment
-        enrollment.total_pagado = round(antes_total + diff, 2)
-        enrollment.saldo_pendiente = max(0.0, round((enrollment.total_a_pagar or 0.0) - enrollment.total_pagado, 2))
-        await enrollment.save()
-
-    despues_total = round(antes_total + diff, 2) if not dry_run else antes_total
-    despues_saldo = max(0.0, round((enrollment.total_a_pagar or 0.0) - despues_total, 2)) if not dry_run else enrollment.saldo_pendiente
-
-    return AjusteResultado(
-        estudiante_carnet=str(estudiante.carnet or estudiante.registro or ""),
-        estudiante_nombre=estudiante.nombre or "",
-        curso_codigo=curso.codigo,
-        tipo="diff",
-        exito=True,
-        dry_run=dry_run,
-        antes={"total_pagado": antes_total, "saldo_pendiente": enrollment.saldo_pendiente, "modulos": antes_modulos},
-        despues={"total_pagado": despues_total, "saldo_pendiente": despues_saldo},
-        pagos_creados=0 if dry_run else 1,
-        modulos_actualizados=0 if dry_run else modulos_actualizados,
-        nota=nota,
-    )
+    return len(PAGOS_CANONICOS_DIPL_INVCI)
 
 
-async def _aplicar_ajuste_completo(
+async def _aplicar_ajuste(
     estudiante: Student,
     curso: Course,
-    enrollment: Enrollment,
+    enrollment: Optional[Enrollment],
+    tipo: str,
     monto_objetivo: float,
-    nota: str,
+    nota: Optional[str],
     dry_run: bool,
 ) -> AjusteResultado:
-    """Caso: estudiante con modulos Pendiente o modulos=[]. Restaurar modulos Pagado y crear pagos."""
-    inscripcion_id = enrollment.id
+    """Aplica el ajuste. Logica idempotente: borra pagos Ajuste previos antes de crear nuevos."""
+
+    carnet_str = str(estudiante.carnet or estudiante.registro or "")
+    nombre = estudiante.nombre or ""
+    nota = nota or ""
+
+    if tipo == "crear_enrollment":
+        if enrollment:
+            return AjusteResultado(
+                estudiante_carnet=carnet_str,
+                estudiante_nombre=nombre,
+                curso_codigo=curso.codigo,
+                tipo=tipo, exito=False, dry_run=dry_run,
+                error=f"Ya existe enrollment ({enrollment.id}). Use tipo 'completo'.",
+                nota=nota,
+            )
+        if not dry_run:
+            from models.enrollment import ModuloEstado
+            now = utcnow_naive()
+            enrollment = Enrollment(
+                estudiante_id=estudiante.id,
+                curso_id=curso.id,
+                costo_total=monto_objetivo,
+                costo_matricula=0.0,
+                cantidad_cuotas=6,
+                total_a_pagar=monto_objetivo,
+                total_pagado=monto_objetivo,
+                saldo_pendiente=0.0,
+                matricula_pagada=True,
+                estado="activo",
+                es_carga_inicial=False,
+                excluir_por_cobrar=False,
+                modulos=[ModuloEstado(**m) for m in MODULOS_CANONICOS],
+                fecha_inscripcion=now,
+            )
+            await enrollment.insert()
+            pagos_creados = await _crear_pagos_canonicos(enrollment.id, estudiante.id, curso.id, nota)
+            return AjusteResultado(
+                estudiante_carnet=carnet_str,
+                estudiante_nombre=nombre,
+                curso_codigo=curso.codigo,
+                tipo=tipo, exito=True, dry_run=dry_run,
+                antes={"enrollment_existe": False},
+                despues={"enrollment_existe": True, "total_pagado": monto_objetivo, "modulos_count": 6, "pagos_count": pagos_creados},
+                pagos_creados=pagos_creados,
+                pagos_borrados=0,
+                modulos_actualizados=6,
+                nota=nota,
+            )
+        # dry_run
+        return AjusteResultado(
+            estudiante_carnet=carnet_str,
+            estudiante_nombre=nombre,
+            curso_codigo=curso.codigo,
+            tipo=tipo, exito=True, dry_run=dry_run,
+            antes={"enrollment_existe": False},
+            despues={"enrollment_existe": True, "total_pagado": monto_objetivo, "modulos_count": 6, "pagos_count": 6},
+            pagos_creados=0, pagos_borrados=0, modulos_actualizados=0,
+            nota=nota,
+        )
+
+    # tipos diff y completo requieren enrollment existente
+    if not enrollment:
+        return AjusteResultado(
+            estudiante_carnet=carnet_str,
+            estudiante_nombre=nombre,
+            curso_codigo=curso.codigo,
+            tipo=tipo, exito=False, dry_run=dry_run,
+            error=f"No existe enrollment para este estudiante/curso. Use tipo 'crear_enrollment'.",
+            nota=nota,
+        )
+
+    # Estado actual
     antes_total = enrollment.total_pagado or 0.0
     antes_saldo = enrollment.saldo_pendiente or 0.0
     antes_modulos_count = len(enrollment.modulos)
 
-    # Determinar qué modulos restaurar
-    modulos_a_crear = []
-    for m_def in MODULOS_DIPL_INVCI_2026_1:
-        modulos_a_crear.append({
-            "nombre": m_def["nombre"],
-            "costo": m_def["costo"],
-            "monto_pagado": m_def["monto_pagado"],
-            "estado": m_def["estado"],
-            "estado_operacional": m_def["estado_operacional"],
-            "estado_academico": "Cursando",
-        })
-
-    # Verificar idempotencia
-    ajustes_previos = await _contar_pagos_ajuste_excel(inscripcion_id)
-    pagos_a_crear_count = 0
-    if ajustes_previos == 0 and not dry_run:
-        pagos_a_crear_count = 6  # 6 pagos, 1 por modulo
-
     if not dry_run:
-        # 1) Reemplazar la lista de modulos
-        from models.enrollment import ModuloEstado
-        enrollment.modulos = [ModuloEstado(**m) for m in modulos_a_crear]
+        # PASO 1: Borrar pagos "Ajuste" previos (idempotencia)
+        pagos_borrados = await _borrar_pagos_ajuste(enrollment.id)
 
-        # 2) Actualizar totales
+        # PASO 2: Actualizar modulos y enrollment
+        if tipo == "completo":
+            from models.enrollment import ModuloEstado
+            enrollment.modulos = [ModuloEstado(**m) for m in MODULOS_CANONICOS]
+            modulos_actualizados = 6
+        else:  # diff
+            # Subir los modulos Parcial a Pagado, y verificar que M6 siga Pagado
+            modulos_actualizados = 0
+            for m in enrollment.modulos:
+                if m.estado == "Parcial" and abs(m.monto_pagado - m.costo) < 0.01:
+                    m.estado = "Pagado"
+                    modulos_actualizados += 1
+                elif m.estado == "Parcial" and m.monto_pagado < m.costo:
+                    m.monto_pagado = m.costo
+                    m.estado = "Pagado"
+                    modulos_actualizados += 1
+                elif m.estado == "Pendiente":
+                    m.monto_pagado = m.costo
+                    m.estado = "Pagado"
+                    modulos_actualizados += 1
+
+        # PASO 3: Actualizar totales del enrollment
         enrollment.total_pagado = monto_objetivo
         enrollment.total_a_pagar = monto_objetivo
         enrollment.costo_total = monto_objetivo
@@ -316,105 +330,31 @@ async def _aplicar_ajuste_completo(
         enrollment.matricula_pagada = True
         await enrollment.save()
 
-        # 3) Crear 6 pagos (1 por modulo) si no se han creado ya
-        if ajustes_previos == 0:
-            now = utcnow_naive()
-            for i, m in enumerate(modulos_a_crear, 1):
-                pago = Payment(
-                    inscripcion_id=inscripcion_id,
-                    estudiante_id=estudiante.id,
-                    curso_id=curso.id,
-                    concepto=f"Ajuste por cuadre con Excel - {curso.codigo} - {m['nombre']}",
-                    detalle=f"Restauración de pago del {m['nombre']} (costo Bs {m['costo']}). {nota or ''}".strip(),
-                    metodo_pago="Ajuste Contable",
-                    numero_transaccion=f"AJUSTE-EXCEL-M{i}-{int(now.timestamp())}",
-                    cantidad_pago=m["costo"],
-                    estado_pago=EstadoPago.APROBADO,
-                    fecha_subida=now,
-                    fecha_verificacion=now,
-                    verificado_por="admin_accounting_ajuste_excel",
-                    comprobante_url=None,
-                )
-                await pago.insert()
+        # PASO 4: Crear los 6 pagos canonicos
+        pagos_creados = await _crear_pagos_canonicos(enrollment.id, estudiante.id, curso.id, nota)
 
-    return AjusteResultado(
-        estudiante_carnet=str(estudiante.carnet or estudiante.registro or ""),
-        estudiante_nombre=estudiante.nombre or "",
-        curso_codigo=curso.codigo,
-        tipo="completo",
-        exito=True,
-        dry_run=dry_run,
-        antes={"total_pagado": antes_total, "saldo_pendiente": antes_saldo, "modulos_count": antes_modulos_count},
-        despues={"total_pagado": monto_objetivo, "saldo_pendiente": 0.0, "modulos_count": 6},
-        pagos_creados=0 if dry_run else pagos_a_crear_count,
-        modulos_actualizados=0 if dry_run else 6,
-        nota=nota,
-    )
-
-
-async def _aplicar_crear_enrollment(
-    estudiante: Student,
-    curso: Course,
-    monto_objetivo: float,
-    nota: str,
-    dry_run: bool,
-) -> AjusteResultado:
-    """Caso: estudiante sin enrollment. Crear enrollment + modulos + pagos."""
-    carnet = str(estudiante.carnet or estudiante.registro or "")
-
-    if not dry_run:
-        # 1) Crear enrollment con los 6 modulos Pagado
-        from models.enrollment import ModuloEstado
-        now = utcnow_naive()
-        enrollment = Enrollment(
-            estudiante_id=estudiante.id,
-            curso_id=curso.id,
-            costo_total=monto_objetivo,
-            costo_matricula=0.0,
-            cantidad_cuotas=6,
-            total_a_pagar=monto_objetivo,
-            total_pagado=monto_objetivo,
-            saldo_pendiente=0.0,
-            matricula_pagada=True,
-            estado="activo",  # EstadoInscripcion.ACTIVO
-            es_carga_inicial=False,
-            excluir_por_cobrar=False,
-            modulos=[ModuloEstado(**m) for m in MODULOS_DIPL_INVCI_2026_1],
-            fecha_inscripcion=now,
+        return AjusteResultado(
+            estudiante_carnet=carnet_str,
+            estudiante_nombre=nombre,
+            curso_codigo=curso.codigo,
+            tipo=tipo, exito=True, dry_run=dry_run,
+            antes={"total_pagado": antes_total, "saldo_pendiente": antes_saldo, "modulos_count": antes_modulos_count},
+            despues={"total_pagado": monto_objetivo, "saldo_pendiente": 0.0, "modulos_count": len(MODULOS_CANONICOS)},
+            pagos_creados=pagos_creados,
+            pagos_borrados=pagos_borrados,
+            modulos_actualizados=modulos_actualizados,
+            nota=nota,
         )
-        await enrollment.insert()
-        inscripcion_id = enrollment.id
 
-        # 2) Crear 6 pagos
-        for i, m in enumerate(MODULOS_DIPL_INVCI_2026_1, 1):
-            pago = Payment(
-                inscripcion_id=inscripcion_id,
-                estudiante_id=estudiante.id,
-                curso_id=curso.id,
-                concepto=f"Ajuste por cuadre con Excel - {curso.codigo} - {m['nombre']}",
-                detalle=f"Creación de enrollment y pago del {m['nombre']} (costo Bs {m['costo']}). {nota or ''}".strip(),
-                metodo_pago="Ajuste Contable",
-                numero_transaccion=f"AJUSTE-EXCEL-M{i}-{int(now.timestamp())}",
-                cantidad_pago=m["costo"],
-                estado_pago=EstadoPago.APROBADO,
-                fecha_subida=now,
-                fecha_verificacion=now,
-                verificado_por="admin_accounting_ajuste_excel",
-                comprobante_url=None,
-            )
-            await pago.insert()
-
+    # dry_run
     return AjusteResultado(
-        estudiante_carnet=carnet,
-        estudiante_nombre=estudiante.nombre or "",
+        estudiante_carnet=carnet_str,
+        estudiante_nombre=nombre,
         curso_codigo=curso.codigo,
-        tipo="crear_enrollment",
-        exito=True,
-        dry_run=dry_run,
-        antes={"enrollment_existe": False},
-        despues={"enrollment_existe": True, "total_pagado": monto_objetivo, "modulos_count": 6, "pagos_count": 6},
-        pagos_creados=0 if dry_run else 6,
-        modulos_actualizados=0 if dry_run else 6,
+        tipo=tipo, exito=True, dry_run=dry_run,
+        antes={"total_pagado": antes_total, "saldo_pendiente": antes_saldo, "modulos_count": antes_modulos_count},
+        despues={"total_pagado": monto_objetivo, "saldo_pendiente": 0.0, "modulos_count": len(MODULOS_CANONICOS), "pagos_canonicos_a_crear": 6},
+        pagos_creados=0, pagos_borrados=0, modulos_actualizados=0,
         nota=nota,
     )
 
@@ -422,7 +362,7 @@ async def _aplicar_crear_enrollment(
 @router.post(
     "/ajustar-pagos-excel",
     response_model=AjusteResponse,
-    summary="F-AJUSTE-PAGOS-EXCEL: cuadrar pagos con planilla Excel oficial (solo superadmin)",
+    summary="F-AJUSTE-PAGOS-EXCEL v2: cuadrar pagos con planilla Excel oficial (idempotente)",
 )
 async def ajustar_pagos_excel(
     payload: AjusteRequest,
@@ -433,35 +373,42 @@ async def ajustar_pagos_excel(
     Ajusta los pagos del sistema para que cuadren con la planilla Excel oficial.
 
     MODO DRY_RUN:
-    - Si dry_run=true, NO se aplica ningún cambio. Solo se valida y se devuelve
-      qué se haría. Se puede llamar sin header de confirmación.
+    - Si dry_run=true, NO se aplica ningun cambio. Solo se valida y se devuelve
+      que se haria. Se puede llamar sin header de confirmacion.
 
-    MODO EJECUCIÓN:
+    MODO EJECUCION:
     - Si dry_run=false, se aplican los cambios.
     - Requiere header `X-Confirmar-Ajuste: yes`.
     - Solo superadmin.
 
-    POR QUÉ NO USAR /payments/by-staff:
+    IDEMPOTENTE (v2):
+    - Antes de crear pagos nuevos, BORRA todos los pagos con marca
+      'Ajuste por cuadre con Excel' del enrollment. Asi, ejecutar 2 veces
+      da el mismo resultado.
+    - Crea SIEMPRE los 6 pagos canonicos (5x252 + 1x210 = 1470), ya sea
+      para tipo=diff, completo o crear_enrollment.
+
+    POR QUE NO USAR /payments/by-staff:
     - El endpoint /payments/by-staff recalcula los modulos desde cero cada vez.
-    - Cuando hay pagos históricos sin asociacion a `pagos_modulos`, el recálculo
+    - Cuando hay pagos historicos sin asociacion a `pagos_modulos`, el recalculo
       los borra silenciosamente. Verificado en ITER 2 (2026-08-10) con el caso
       de Sandra Villafani (5 pagos de 287 Bs perdidos).
-    - Este endpoint hace UPDATE directo sin pasar por el recálculo.
+    - Este endpoint hace UPDATE directo sin pasar por el recalculo.
     """
-    # Si NO es dry_run, exigir header de confirmación
     if not payload.dry_run:
         if x_confirmar_ajuste != "yes":
             raise HTTPException(
                 status_code=400,
                 detail=(
                     "Para ejecutar el ajuste real (no dry_run) se requiere header "
-                    f"'{CONFIRM_HEADER}: yes'. Sin este header no se aplica ningún cambio. "
+                    f"'{CONFIRM_HEADER}: yes'. Sin este header no se aplica ningun cambio. "
                     "Primero ejecuta con dry_run=true para previsualizar."
                 ),
             )
 
     resultados: List[AjusteResultado] = []
     pagos_creados_total = 0
+    pagos_borrados_total = 0
     modulos_actualizados_total = 0
     exitosos = 0
     fallidos = 0
@@ -475,9 +422,7 @@ async def ajustar_pagos_excel(
                     estudiante_carnet=ajuste.estudiante_carnet,
                     estudiante_nombre="",
                     curso_codigo=ajuste.curso_codigo,
-                    tipo=ajuste.tipo,
-                    exito=False,
-                    dry_run=payload.dry_run,
+                    tipo=ajuste.tipo, exito=False, dry_run=payload.dry_run,
                     error=f"Estudiante con carnet {ajuste.estudiante_carnet} no encontrado en el sistema",
                     nota=ajuste.nota,
                 ))
@@ -491,71 +436,45 @@ async def ajustar_pagos_excel(
                     estudiante_carnet=ajuste.estudiante_carnet,
                     estudiante_nombre=estudiante.nombre or "",
                     curso_codigo=ajuste.curso_codigo,
-                    tipo=ajuste.tipo,
-                    exito=False,
-                    dry_run=payload.dry_run,
-                    error=f"Curso con código {ajuste.curso_codigo} no encontrado en el sistema",
+                    tipo=ajuste.tipo, exito=False, dry_run=payload.dry_run,
+                    error=f"Curso con codigo {ajuste.curso_codigo} no encontrado en el sistema",
                     nota=ajuste.nota,
                 ))
                 fallidos += 1
                 continue
 
-            # 3) Buscar enrollment
-            enrollment = await _buscar_enrollment(estudiante.id, curso.id)
+            # 3) Buscar enrollment (puede no existir para crear_enrollment)
+            enrollment = None
+            if ajuste.tipo != "crear_enrollment":
+                enrollment = await _buscar_enrollment(estudiante.id, curso.id)
 
-            # 4) Aplicar el tipo de ajuste correspondiente
-            if ajuste.tipo == "crear_enrollment":
-                if enrollment:
-                    resultados.append(AjusteResultado(
-                        estudiante_carnet=ajuste.estudiante_carnet,
-                        estudiante_nombre=estudiante.nombre or "",
-                        curso_codigo=ajuste.curso_codigo,
-                        tipo=ajuste.tipo,
-                        exito=False,
-                        dry_run=payload.dry_run,
-                        error=f"Ya existe un enrollment para este estudiante/curso (id={enrollment.id}). No se puede crear.",
-                        nota=ajuste.nota,
-                    ))
-                    fallidos += 1
-                    continue
-                resultado = await _aplicar_crear_enrollment(estudiante, curso, ajuste.monto_objetivo, ajuste.nota, payload.dry_run)
-            elif ajuste.tipo in ("diff", "completo"):
-                if not enrollment:
-                    resultados.append(AjusteResultado(
-                        estudiante_carnet=ajuste.estudiante_carnet,
-                        estudiante_nombre=estudiante.nombre or "",
-                        curso_codigo=ajuste.curso_codigo,
-                        tipo=ajuste.tipo,
-                        exito=False,
-                        dry_run=payload.dry_run,
-                        error=f"No existe enrollment para este estudiante/curso. Use tipo 'crear_enrollment'.",
-                        nota=ajuste.nota,
-                    ))
-                    fallidos += 1
-                    continue
-
-                if ajuste.tipo == "diff":
-                    resultado = await _aplicar_ajuste_diff(estudiante, curso, enrollment, ajuste.monto_objetivo, ajuste.nota, payload.dry_run)
-                else:  # completo
-                    resultado = await _aplicar_ajuste_completo(estudiante, curso, enrollment, ajuste.monto_objetivo, ajuste.nota, payload.dry_run)
-            else:
+            # 4) Validar tipo
+            if ajuste.tipo not in ("diff", "completo", "crear_enrollment"):
                 resultados.append(AjusteResultado(
                     estudiante_carnet=ajuste.estudiante_carnet,
                     estudiante_nombre=estudiante.nombre or "",
                     curso_codigo=ajuste.curso_codigo,
-                    tipo=ajuste.tipo,
-                    exito=False,
-                    dry_run=payload.dry_run,
-                    error=f"Tipo de ajuste inválido: '{ajuste.tipo}'. Use 'diff', 'completo' o 'crear_enrollment'.",
+                    tipo=ajuste.tipo, exito=False, dry_run=payload.dry_run,
+                    error=f"Tipo de ajuste invalido: '{ajuste.tipo}'. Use 'diff', 'completo' o 'crear_enrollment'.",
                     nota=ajuste.nota,
                 ))
                 fallidos += 1
                 continue
 
+            # 5) Aplicar
+            resultado = await _aplicar_ajuste(
+                estudiante, curso, enrollment,
+                ajuste.tipo, ajuste.monto_objetivo, ajuste.nota,
+                payload.dry_run,
+            )
             resultados.append(resultado)
             pagos_creados_total += resultado.pagos_creados
+            pagos_borrados_total += resultado.pagos_borrados
             modulos_actualizados_total += resultado.modulos_actualizados
-            exitosos += 1
+            if resultado.exito:
+                exitosos += 1
+            else:
+                fallidos += 1
 
         except Exception as e:
             logger.exception(f"Error procesando ajuste para {ajuste.estudiante_carnet}: {e}")
@@ -563,9 +482,7 @@ async def ajustar_pagos_excel(
                 estudiante_carnet=ajuste.estudiante_carnet,
                 estudiante_nombre="",
                 curso_codigo=ajuste.curso_codigo,
-                tipo=ajuste.tipo,
-                exito=False,
-                dry_run=payload.dry_run,
+                tipo=ajuste.tipo, exito=False, dry_run=payload.dry_run,
                 error=f"{type(e).__name__}: {str(e)}",
                 nota=ajuste.nota,
             ))
@@ -579,6 +496,7 @@ async def ajustar_pagos_excel(
         exitosos=exitosos,
         fallidos=fallidos,
         pagos_creados_total=pagos_creados_total,
+        pagos_borrados_total=pagos_borrados_total,
         modulos_actualizados_total=modulos_actualizados_total,
         resultados=resultados,
     )
