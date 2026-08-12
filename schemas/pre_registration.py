@@ -113,6 +113,50 @@ class PreRegistrationSubmit(BaseModel):
     carrera_codigo: Optional[str] = Field(None, max_length=20, description="Código de carrera (de la planilla de Lisa).")
     descuento_porcentaje: Optional[float] = Field(None, ge=0, le=1, description="Descuento pre-aprobado (0.0-1.0). Aplica SOLO a módulos.")
 
+    # F-2026-08-11-CAMPOS-EC-MODALIDAD (reunion UAGRM 2026-08-11, seccion 4):
+    # procedencia (codigo departamento Bolivia) + modalidad (presencial/virtual)
+    # + carta_firmada_url (URL del PDF firmado por el director).
+    # Regla de validacion: si modalidad='virtual' o procedencia != 'SCZ',
+    # carta_firmada_url es OBLIGATORIA (reunion UAGRM).
+    procedencia: Optional[str] = Field(None, max_length=10, description="Codigo del departamento de Bolivia: SCZ, LPZ, CBA, TJA, CHS, POT, ORU, BEN, PND.")
+    modalidad: Optional[str] = Field(None, max_length=20, description="Modalidad de estudio: 'presencial' o 'virtual'.")
+    carta_firmada_url: Optional[str] = Field(None, max_length=500, description="URL de la carta firmada por el director (PDF en Drive/OneDrive/Dropbox). Requerida si modalidad=virtual o procedencia!=SCZ.")
+
+    @field_validator("modalidad")
+    @classmethod
+    def modalidad_valida(cls, v):
+        if v is None or v == "":
+            return None
+        v_norm = v.strip().lower()
+        if v_norm not in ("presencial", "virtual"):
+            raise ValueError("Modalidad debe ser 'presencial' o 'virtual'.")
+        return v_norm
+
+    @field_validator("procedencia")
+    @classmethod
+    def procedencia_valida(cls, v):
+        if v is None or v == "":
+            return None
+        v_norm = v.strip().upper()
+        if v_norm not in ("SCZ", "LPZ", "CBA", "TJA", "CHS", "POT", "ORU", "BEN", "PND"):
+            raise ValueError("Procedencia debe ser un codigo de departamento valido de Bolivia (SCZ, LPZ, CBA, TJA, CHS, POT, ORU, BEN, PND).")
+        return v_norm
+
+    @field_validator("carta_firmada_url")
+    @classmethod
+    def carta_firmada_requerida_si_provincia_o_virtual(cls, v, info):
+        # F-2026-08-11-CAMPOS-EC-MODALIDAD: regla de la reunion.
+        # Si el estudiante es de provincia (procedencia != SCZ) o eligio virtual,
+        # la carta firmada es obligatoria.
+        modalidad = (info.data.get("modalidad") or "").lower() if info.data.get("modalidad") else ""
+        procedencia = (info.data.get("procedencia") or "").upper() if info.data.get("procedencia") else ""
+        requiere_carta = modalidad == "virtual" or (procedencia and procedencia != "SCZ")
+        if requiere_carta and not (v and str(v).strip()):
+            raise ValueError(
+                "La carta firmada por el director es obligatoria para estudiantes de provincia (procedencia != SCZ) o modalidad virtual."
+            )
+        return v
+
     @field_validator("carnet")
     @classmethod
     def carnet_valido(cls, v: str) -> str:

@@ -108,6 +108,14 @@ class StudentCreate(BaseModel):
     carrera_codigo: Optional[str] = Field(None, max_length=20)
     descuento_porcentaje: Optional[float] = Field(None, ge=0, le=1)
 
+    # F-2026-08-11-CAMPOS-EC-MODALIDAD (reunion UAGRM 2026-08-11).
+    # procedencia (codigo departamento Bolivia), modalidad (presencial/virtual),
+    # carta_firmada_url (PDF firmado por el director). Validacion detallada en
+    # schemas/pre_registration.py al enviar el form publico.
+    procedencia: Optional[str] = Field(None, max_length=10)
+    modalidad: Optional[str] = Field(None, max_length=20)
+    carta_firmada_url: Optional[str] = Field(None, max_length=500)
+
     @field_validator('sexo', 'estado_civil', 'tipo_sangre', mode='before')
     @classmethod
     def _empty_enum_a_none(cls, v):
@@ -232,6 +240,11 @@ class StudentResponse(BaseModel):
     carrera_codigo: Optional[str] = None
     descuento_porcentaje: Optional[float] = None
 
+    # F-2026-08-11-CAMPOS-EC-MODALIDAD
+    procedencia: Optional[str] = None
+    modalidad: Optional[str] = None
+    carta_firmada_url: Optional[str] = None
+
     # Estado y Metadata
     activo: bool
     lista_cursos_ids: List[PyObjectId] = []
@@ -355,6 +368,11 @@ class StudentUpdateAdmin(BaseModel):
     formulario_descuento_numero: Optional[int] = Field(None, ge=0)
     carrera_codigo: Optional[str] = Field(None, max_length=20)
     descuento_porcentaje: Optional[float] = Field(None, ge=0, le=1)
+
+    # F-2026-08-11-CAMPOS-EC-MODALIDAD
+    procedencia: Optional[str] = Field(None, max_length=10)
+    modalidad: Optional[str] = Field(None, max_length=20)
+    carta_firmada_url: Optional[str] = Field(None, max_length=500)
 
     @field_validator('sexo', 'estado_civil', 'tipo_sangre', mode='before')
     @classmethod

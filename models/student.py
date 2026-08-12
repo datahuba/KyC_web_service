@@ -193,6 +193,28 @@ class Student(MongoBaseModel):
         None, ge=0, le=1,
         description="Descuento pre-aprobado del Excel EC (0.0-1.0). Aplica SOLO a módulos, NO a matrícula.",
     )
+
+    # ========================================================================
+    # F-2026-08-11-CAMPOS-EC-MODALIDAD (reunion UAGRM 2026-08-11, seccion 4):
+    # Modalidad de estudio + carta firmada por el director.
+    # Si el estudiante es de PROVINCIA (procedencia != SCZ) o eligio VIRTUAL,
+    # debe subir la carta firmada por el director (decision de la reunion).
+    # ========================================================================
+
+    # Modalidad de estudio. 'presencial' = asiste fisicamente, 'virtual' = online.
+    # Distinto de `modalidad_ingreso` (P.S.A. y similares) que es el canal de ADMISION.
+    modalidad: Optional[str] = Field(
+        None, max_length=20,
+        description="Modalidad de estudio del programa ('presencial' | 'virtual'). Distinto de modalidad_ingreso (P.S.A.).",
+    )
+
+    # URL o identificador de la carta firmada por el director. Requerida para
+    # estudiantes de provincia o modalidad virtual. El estudiante sube el PDF
+    # a Google Drive / OneDrive / Dropbox y pega el link aca.
+    carta_firmada_url: Optional[str] = Field(
+        None, max_length=500,
+        description="URL de la carta firmada por el director (PDF en Google Drive, OneDrive, Dropbox). Requerida si el estudiante es de provincia o modalidad virtual.",
+    )
     
     class Settings:
         name = "students"

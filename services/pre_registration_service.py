@@ -254,6 +254,12 @@ async def submit_public_form(slug: str, data: PreRegistrationSubmit) -> PreRegis
         "formulario_descuento_numero": data.formulario_descuento_numero,
         "carrera_codigo": (data.carrera_codigo or "").strip() or None,
         "descuento_porcentaje": data.descuento_porcentaje,
+        # F-2026-08-11-CAMPOS-EC-MODALIDAD (reunion UAGRM 2026-08-11, seccion 4):
+        # procedencia (codigo departamento) + modalidad (presencial/virtual)
+        # + carta_firmada_url (URL del PDF firmado por el director).
+        "procedencia": (data.procedencia or "").strip().upper() or None,
+        "modalidad": (data.modalidad or "").strip().lower() or None,
+        "carta_firmada_url": (data.carta_firmada_url or "").strip() or None,
     }
 
     sub = PreRegistration(
@@ -411,6 +417,10 @@ async def approve_submission(submission_id: PydanticObjectId, admin_username: st
         formulario_descuento_numero=data.get("formulario_descuento_numero") or None,
         carrera_codigo=(data.get("carrera_codigo") or None),
         descuento_porcentaje=data.get("descuento_porcentaje") or None,
+        # F-2026-08-11-CAMPOS-EC-MODALIDAD (reunion UAGRM 2026-08-11, seccion 4).
+        procedencia=(data.get("procedencia") or None),
+        modalidad=(data.get("modalidad") or None),
+        carta_firmada_url=(data.get("carta_firmada_url") or None),
     )
     await student.insert()
 
