@@ -449,23 +449,26 @@ def test_34_aprobacion_setea_estado_pendiente_si_hay_descuento():
 
 
 def test_35_wizard_paso5_resumen_incluye_tipo_estudiante():
-    """El wizard paso 5 (Confirmar) debe mostrar la seccion 'Tipo de estudiante'
-    con el badge de primera carrera o profesional + titulo cargado.
-    F-2026-08-12-DESCUENTO-BECA-FIX-WIZARD-RESUMEN."""
+    """El wizard paso 5 (Confirmar) debe mostrar la seccion de resumen del
+    titulo profesional con badge segun si declaro tener o no titulo.
+    F-2026-08-12-DESCUENTO-BECA-FIX-WIZARD-RESUMEN (V2 2026-08-12):
+    el labeling ahora es neutral (no dice 'primera carrera' ni 'profesional
+    con titulo' en la UI publica). El estudiante solo ve 'Si/No tiene
+    titulo' + 'Documento adjunto'/'No se adjunto documento'."""
     src = _read_wizard()
     # Tomamos desde currentStep === 5 hasta el final del archivo para
     # incluir todo el bloque del paso 5 (puede ser muy largo).
     idx = src.find("currentStep === 5")
     assert idx >= 0, "No se encontró el paso 5 en el wizard"
     bloque = src[idx:]
-    assert "Tipo de estudiante" in bloque, \
-        "Wizard paso 5 debe incluir seccion 'Tipo de estudiante' en el resumen"
+    # V2: titulo de la seccion ahora es 'Título profesional' (no 'Tipo de estudiante')
+    assert "Título profesional" in bloque or "Titulo profesional" in bloque, \
+        "Wizard paso 5 debe incluir seccion 'Título profesional' en el resumen"
+    # V2: el badge muestra 'Sí' o 'No' segun tenga titulo, no 'Primera carrera'/'Profesional'
+    assert "¿Tienes título?" in bloque or "Tienes título?" in bloque, \
+        "Debe preguntar '¿Tienes título?' en el resumen"
     assert "esPrimerCarrera" in bloque, \
         "Seccion debe condicionar por esPrimerCarrera"
-    assert "Primera carrera" in bloque, \
-        "Debe tener badge 'Primera carrera' para primer carrera"
-    assert "Profesional" in bloque, \
-        "Debe tener badge 'Profesional' para profesional con titulo"
 
 
 def test_36_panel_tiene_boton_validar_descuento_vicerrectorado():
