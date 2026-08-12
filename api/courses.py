@@ -821,48 +821,61 @@ async def put_resolucion(
 async def create_course(
     *,
     course_in: CourseCreate,
-    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-AUTOSERVICIO: encargado_curso/coord/CPD/ADMIN/SUPERADMIN pueden intentar. Inline check abajo: solo CPD/SUPERADMIN pueden crear programas NUEVOS o EN EJECUCION; encargado/coord solo HISTORICOS.
+    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-AUTOSERVICIO: cualquier EC/COORD/CPD/ADMIN/SUPERADMIN pueden intentar. Validaciones inline abajo.
 ) -> Any:
     """Crear nuevo curso.
 
-    F-2026-08-11-EC-AUTOSERVICIO (Kevin, reunion educacion continua): encargado
-    de educacion continua puede crear programas HISTORICOS para dejar registro
-    de cohortes pasadas. NO puede crear programas nuevos ni en ejecucion
-    (esos siguen siendo CPD o SUPERADMIN).
+    F-2026-08-12-EC-RESOLUCION-OBLIGATORIA (Kevin 2026-08-12 post-reunion):
+    el EC/COORD/CPD/ADMIN/SUPERADMIN pueden crear los 3 tipos de programas
+    (historico, programado/proximo, en ejecucion). La diferencia es la
+    resolucion PDF:
 
-    Reglas:
-    - CPD, ADMIN, SUPERADMIN: pueden crear cualquier tipo (nuevo, en ejecucion, historico)
-    - ENCARGADO_CURSO, COORDINADOR: SOLO pueden crear programas donde la
-      fecha_fin YA PASO (es decir, 'historicos'/'cerrados' por fecha).
-      Si intentan crear un curso nuevo/en_ejecucion, se rechaza con 403.
-    - Cobranza, docente, estudiante: 403.
+    - Historico (es_historico=True): resolucion OPCIONAL. Sirve solo
+      como registro/documento de respaldo.
+    - Programado/proximo (estado 'proximo'): resolucion OPCIONAL.
+    - En ejecucion (estado 'en_ejecucion'): resolucion OBLIGATORIA.
+      Sin resolucion NO se puede crear el programa.
+
+    Para subir la resolucion antes de crear el curso, hay un endpoint
+    auxiliar `POST /courses/upload-resolucion-temp` que sube el PDF a
+    cloudinary y devuelve la URL temporal. El frontend usa esa URL
+    en el payload de create_course.
     """
     from core.timezone_utils import utcnow_naive
     from datetime import datetime as _dt
 
-    if current_user.rol not in (UserRole.CPD, UserRole.ADMIN, UserRole.SUPERADMIN):
-        # F-2026-08-12-EC-HISTORICO-CREAR (Kevin 2026-08-12 post-reunion):
-        # el EC/COORDINADOR solo puede crear programas historicos. Si marca
-        # es_historico=True, NO exigimos fecha_fin (un programa del que
-        # solo queremos dejar registro puede no tener fecha exacta en
-        # los archivos). Si NO marca es_historico=True pero trae fecha_fin,
-        # validamos que sea pasada (comportamiento original).
-        es_historico_flag = bool(getattr(course_in, "es_historico", False))
+    # F-2026-08-12-EC-RESOLUCION-OBLIGATORIA: validar la resolucion segun
+    # el tipo de programa. Si es en_ejecucion, la resolucion_pdf_url
+    # debe estar presente (ya sea porque se subio via temp o viene en
+    # el payload). Si no, 400 con mensaje claro.
+    es_historico_flag = bool(getattr(course_in, "es_historico", False))
+    estado_override = getattr(course_in, "estado_override", None)
+    resolucion_pdf_url = getattr(course_in, "resolucion_pdf_url", None)
+
+    # Determinar si el programa sera en ejecucion. Miramos estado_override
+    # (lo que el usuario eligio en el form) o estado persistido.
+    sera_en_ejecucion = (estado_override == "en_ejecucion") and not es_historico_flag
+
+    if sera_en_ejecucion and not resolucion_pdf_url:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Para crear un programa EN EJECUCION es obligatorio subir la "
+                "resolucion PDF. Usa el endpoint POST /courses/upload-resolucion-temp "
+                "para subir el PDF primero, luego pasa la URL devuelta en "
+                "resolucion_pdf_url al crear el curso."
+            ),
+        )
+
+    # F-2026-08-12-EC-HISTORICO-CREAR (Kevin 2026-08-12 post-reunion):
+    # cualquier EC puede crear cualquier tipo, pero:
+    # - Si es historico (es_historico=True), NO exigimos fecha_fin
+    #   (programas del pasado lejano pueden no tener fecha exacta).
+    # - Si NO es historico y trae fecha_fin, validamos que sea pasada
+    #   (es coherente con que es un programa "historico/cerrado").
+    if not es_historico_flag:
         fecha_fin = getattr(course_in, "fecha_fin", None)
-        if not es_historico_flag:
-            # F-2026-08-12-EC-HISTORICO-CREAR: si el EC intenta crear un
-            # programa NO historico sin fecha_fin, lo rechazamos. Si trae
-            # fecha_fin, validamos que sea pasada.
-            if fecha_fin is None:
-                raise HTTPException(
-                    status_code=403,
-                    detail=(
-                        "Como encargado/coordinador, solo puedes crear programas historicos "
-                        "(es_historico=True). Si es un programa reciente o en ejecucion, "
-                        "consulta con CPD o superadmin."
-                    ),
-                )
-            # fecha_fin puede ser date o datetime; normalizar a datetime UTC-naive
+        if fecha_fin is not None:
             if isinstance(fecha_fin, _dt):
                 fin_dt = fecha_fin
             else:
@@ -870,11 +883,11 @@ async def create_course(
             now_naive = utcnow_naive()
             if fin_dt >= now_naive:
                 raise HTTPException(
-                    status_code=403,
+                    status_code=400,
                     detail=(
-                        "Como encargado/coordinador, solo puedes crear programas historicos "
-                        "(fecha_fin ya paso). Para crear programas nuevos o en ejecucion, "
-                        "consulta con CPD o superadmin."
+                        "La fecha_fin debe ser anterior a hoy (programa cerrado/historico). "
+                        "Si es un programa en ejecucion o por ejecutarse, "
+                        "no pongas fecha_fin (queda null) o usa una fecha futura."
                     ),
                 )
     try:
@@ -898,6 +911,52 @@ async def create_course(
         return course
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# F-2026-08-12-EC-RESOLUCION-OBLIGATORIA (Kevin 2026-08-12 post-reunion):
+# el EC decidio que la resolucion PDF es:
+# - Historico: OPCIONAL
+# - Programado (proximo): OPCIONAL
+# - En ejecucion: OBLIGATORIA
+# Si no cumple, el programa NO se crea.
+# Para resolver esto, agregamos un endpoint de upload TEMPORAL que
+# sube el PDF a cloudinary SIN asociarlo a ningun curso. El frontend
+# sube el PDF primero, obtiene la URL, y la pasa en el payload de
+# create_course. Asi el backend puede validar que para en_ejecucion
+# la URL este presente.
+
+@router.post(
+    "/upload-resolucion-temp",
+    summary="F-2026-08-12-EC-RESOLUCION-OBLIGATORIA: subir PDF de resolucion temporal (sin asociar a curso)",
+)
+async def upload_resolucion_temp(
+    file: UploadFile = File(..., description="PDF de la resolucion"),
+    current_user: User = Depends(require_encargado_curso),
+) -> Any:
+    """
+    Sube un PDF de resolucion a cloudinary y devuelve la URL temporal
+    (sin asociarla a ningun curso). El frontend usa esta URL al crear
+    el curso via POST /courses con resolucion_pdf_url=...
+
+    Para programas en ejecucion la resolucion es OBLIGATORIA (se
+    valida en create_course). Para historicos y programados es
+    opcional.
+    """
+    if file.content_type != "application/pdf":
+        raise HTTPException(400, "Solo se aceptan archivos PDF")
+    try:
+        from core.cloudinary_utils import upload_pdf
+        # Subir a una carpeta "temp" - no se asocia a ningun curso
+        url = await upload_pdf(
+            file=file,
+            folder="resoluciones/cursos/temp",
+            public_id=f"temp_{current_user.id}_{int(datetime.now().timestamp())}",
+        )
+        return {"url": url}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Error subiendo PDF: {str(e)}")
 
 @router.get(
     "/{id}",
