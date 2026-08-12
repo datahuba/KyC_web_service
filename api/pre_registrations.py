@@ -415,7 +415,16 @@ async def list_submissions(
 )
 async def approve_submission(
     submission_id: PydanticObjectId,
-    current_user: User = Depends(require_cpd)
+    # F-FIX-PRE-REGISTROS-EC-APPROVE (2026-08-12, Kevin): el EC (encargado
+    # de curso) tiene un rol activo en el panel de pre-registros (valida
+    # titulo, valida descuento, ve detalle, etc) y DEBE poder aprobar
+    # pre-inscripciones de los cursos que le corresponden. Antes solo
+    # CPD/ADMIN/SUPERADMIN podian aprobar porque el decorador era
+    # `require_cpd`. Eso bloqueaba al EC con 403 ANTES de llegar a la
+    # logica del check de cursos_asignados que ya estaba abajo. Cambiar
+    # a `require_encargado_curso` permite al EC llegar al check, y la
+    # logica valida que la submission sea de un curso que le pertenece.
+    current_user: User = Depends(require_encargado_curso)
 ) -> Any:
     # Chequear que la submission sea visible para este rol
     from models.pre_registration import PreRegistration
@@ -450,7 +459,10 @@ async def approve_submission(
 async def reject_submission(
     submission_id: PydanticObjectId,
     body: PreRegistrationReject,
-    current_user: User = Depends(require_cpd)
+    # F-FIX-PRE-REGISTROS-EC-APPROVE (2026-08-12, Kevin): mismo fix que
+    # approve_submission. El EC debe poder rechazar pre-inscripciones
+    # de sus cursos.
+    current_user: User = Depends(require_encargado_curso)
 ) -> Any:
     from models.pre_registration import PreRegistration
     from models.enums import UserRole
