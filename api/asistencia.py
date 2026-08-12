@@ -17,7 +17,7 @@ Permisos:
 """
 from datetime import datetime
 from typing import List, Any
-from fastapi import APIRouter, Depends, HTTPException, Query, Path
+from fastapi import APIRouter, Depends, HTTPException, Query, Path, Response
 from beanie import PydanticObjectId
 
 from models.asistencia import Sesion, AsistenciaRegistro
@@ -29,7 +29,7 @@ from schemas.asistencia import (
     AsistenciaItem, AsistenciaBulkRegister, AsistenciaRegistroResponse,
     PorcentajeAsistenciaModulo,
 )
-from services.notification_service import require_staff, get_current_user, require_docente
+from api.dependencies import require_staff, get_current_user, require_docente
 
 router = APIRouter()
 
@@ -126,12 +126,13 @@ async def get_sesion(
 @router.delete(
     "/sesiones/{sesion_id}",
     status_code=204,
+    response_class=Response,
     summary="[Staff] Eliminar una sesion y todos sus registros de asistencia",
 )
 async def eliminar_sesion(
     sesion_id: PydanticObjectId,
     current_user: User = Depends(require_staff),
-) -> Any:
+):
     """
     F-2026-08-11-ASISTENCIA: elimina la sesion Y todos sus registros
     de asistencia asociados. CUIDADO: accion irreversible.
