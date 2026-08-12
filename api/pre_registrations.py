@@ -137,21 +137,26 @@ async def upload_carta_firmada(slug: str, file: UploadFile = File(...)) -> Any:
 
 
 # F-2026-08-11-CAMPOS-EC-RESOLUCION (Kevin 22:37): el estudiante puede subir
-# opcionalmente la resolucion del programa al que se inscribe (PDF que emite
-# la UAGRM aprobando el programa). Es OPCIONAL porque a veces la resolucion
-# se sube despues por el admin. Pero si el estudiante ya la tiene a mano,
-# puede incluirla aca para ahorrar tiempo al encargado de EC.
+# opcionalmente la resolucion de BECA / DESCUENTO al que se inscribe
+# (PDF que emite Vicerrectorado aprobando el descuento). NO es la resolucion
+# del programa (eso lo emite el CPD/admin), sino la resolucion que aplica el
+# descuento del estudiante (educacion continua tiene descuentos por convenio,
+# por vinculo familiar con la UAGRM, etc).
+#
+# Es OPCIONAL porque a veces la resolucion la sube el admin despues. Pero si
+# el estudiante ya la tiene a mano, puede incluirla aca para ahorrar tiempo
+# al encargado de EC.
 #
 # Misma mecanica que upload-carta: valida que el form exista y este abierto,
 # sube a Cloudinary (folder dedicado), devuelve la URL publica.
 @router.post(
-    "/public/{slug}/upload-resolucion",
-    summary="Subir resolucion del programa (público, opcional, sin auth)"
+    "/public/{slug}/upload-resolucion-beca",
+    summary="Subir resolucion de beca/descuento (publico, opcional, sin auth)"
 )
 async def upload_resolucion(slug: str, file: UploadFile = File(...)) -> Any:
     """
-    Sube la resolucion del programa (PDF/JPG/PNG, max 20MB) a Cloudinary y
-    devuelve la URL publica que el frontend guarda en `resolucionUrl`.
+    Sube la resolucion de beca/descuento (PDF/JPG/PNG, max 20MB) a Cloudinary
+    y devuelve la URL publica que el frontend guarda en `resolucionUrl`.
 
     Valida que el slug exista y el formulario este abierto (no requiere auth).
     """
@@ -163,14 +168,14 @@ async def upload_resolucion(slug: str, file: UploadFile = File(...)) -> Any:
     try:
         result = await upload_document(
             file=file,
-            folder=f"pre-registrations/resoluciones/{slug}",
+            folder=f"pre-registrations/resoluciones-beca/{slug}",
         )
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error al subir la resolucion: {str(e)}",
+            detail=f"Error al subir la resolucion de beca: {str(e)}",
         )
 
     return {
@@ -191,10 +196,15 @@ async def upload_resolucion(slug: str, file: UploadFile = File(...)) -> Any:
     response_model=PaginatedResponse[PreRegistrationFormResponse],
     summary="Listar Formularios visibles para mi rol"
 )
+@router.get(
+	"/forms",
+	response_model=PaginatedResponse[PreRegistrationFormResponse],
+	summary="Listar Formularios visibles para mi rol"
+)
 async def list_forms(
-    page: int = Query(1, ge=1),
-    per_page: int = Query(20, ge=1, le=100),
-    current_user: User = Depends(require_cpd)
+	page: int = Query(1, ge=1),
+	per_page: int = Query(20, ge=1, le=100),
+	current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-FIX-COUNTERS-403: encargado_curso/coordinador tambien pueden listar forms
 ) -> Any:
     items, total = await pre_registration_service.get_forms_for_admin(
         current_user=current_user, page=page, per_page=per_page
@@ -217,7 +227,7 @@ async def list_forms(
 )
 async def get_form(
     form_id: PydanticObjectId,
-    current_user: User = Depends(require_cpd)
+    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-FIX-COUNTERS-403: encargado_curso/coordinador tambien pueden ver forms individuales
 ) -> Any:
     form = await pre_registration_service.get_form_by_id(form_id)
     if not form:
@@ -333,7 +343,7 @@ async def list_submissions(
     per_page: int = Query(20, ge=1, le=100),
     form_id: Optional[str] = Query(None, description="Filtrar por ID de form"),
     estado: Optional[str] = Query(None, description="pendiente | aprobado | rechazado"),
-    current_user: User = Depends(require_cpd)
+    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-FIX-COUNTERS-403: encargado_curso/coordinador tambien pueden listar submissions
 ) -> Any:
     items, total = await pre_registration_service.get_submissions_for_admin(
         current_user=current_user, form_id=form_id, estado=estado, page=page, per_page=per_page
@@ -423,7 +433,7 @@ async def reject_submission(
     "/counters",
     summary="Conteos globales (para badges en sidebar)"
 )
-async def counters(current_user: User = Depends(require_cpd)) -> Any:
+async def counters(current_user: User = Depends(require_encargado_curso)) -> Any: # F-2026-08-11-EC-FIX-COUNTERS-403: encargado_curso/coordinador tambien pueden ver badges de counters
     return await pre_registration_service.get_forms_counters()
 
 

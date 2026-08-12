@@ -198,12 +198,14 @@ def test_api_pre_registrations_tiene_endpoint_upload_carta():
     )
 
 def test_api_pre_registrations_tiene_endpoint_upload_resolucion():
-    """F-2026-08-11-CAMPOS-EC-RESOLUCION (Kevin 22:37): el backend expone el
-    endpoint POST /pre-registrations/public/{slug}/upload-resolucion para que
-    el estudiante suba la resolucion del programa (opcional)."""
+    """F-2026-08-11-EC-FIX-COUNTERS-403 (Kevin 23:36): el backend expone el
+    endpoint POST /pre-registrations/public/{slug}/upload-resolucion-beca
+    (NO /upload-resolucion) para que el estudiante suba la resolucion de
+    BECA/DESCUENTO emitida por Vicerrectorado. Renombrado para distinguir
+    de la resolucion del PROGRAMA que emite el admin/CPD."""
     api_py = (REPO_BACKEND / "api" / "pre_registrations.py").read_text(encoding="utf-8")
-    assert "/public/{slug}/upload-resolucion" in api_py, (
-        "El router debe tener el endpoint /public/{slug}/upload-resolucion"
+    assert "/public/{slug}/upload-resolucion-beca" in api_py, (
+        "El router debe tener el endpoint /public/{slug}/upload-resolucion-beca (renombrado desde upload-resolucion)"
     )
     assert "upload_resolucion" in api_py, (
         "La funcion del endpoint debe llamarse upload_resolucion"
@@ -224,8 +226,46 @@ def test_student_model_tiene_resolucion_url():
     """F-2026-08-11-CAMPOS-EC-RESOLUCION: Student.resolucion_url existe."""
     student_py = (REPO_BACKEND / "models" / "student.py").read_text(encoding="utf-8")
     assert "resolucion_url: Optional[str]" in student_py, (
-        "Student debe tener campo 'resolucion_url' para la URL de la resolucion del programa"
+        "Student debe tener campo 'resolucion_url' para la URL de la resolucion de beca/descuento"
     )
+
+def test_api_pre_registrations_endpoints_lectura_usan_encargado_curso():
+    """F-2026-08-11-EC-FIX-COUNTERS-403 (Kevin 23:36): los endpoints de
+    LECTURA (list, get, counters) deben usar require_encargado_curso
+    (NO require_cpd) para que encargado_curso y coordinador puedan ver
+    el panel de pre-registros sin 403.
+
+    El bug: el encargado EC veia 'Acceso restringido. La seccion academica
+    esta reservada para el CPD o Administracion' al cargar el panel
+    porque los endpoints get_de_list/submissions/counters usaban
+    require_cpd. Los endpoints de DECISION (approve/reject) deben
+    seguir usando require_cpd."""
+    api_py = (REPO_BACKEND / "api" / "pre_registrations.py").read_text(encoding="utf-8")
+
+    # Contar require_cpd: deben quedar SOLO 2 (approve + reject)
+    cpd_count = api_py.count("Depends(require_cpd)")
+    assert cpd_count == 2, (
+        f"Debe haber exactamente 2 dependencias de require_cpd (approve + reject). "
+        f"Encontre {cpd_count}. Los endpoints de LECTURA (list_forms, get_form, "
+        f"list_submissions, counters) deben usar require_encargado_curso para "
+        f"que EC/coord puedan acceder al panel sin 403."
+    )
+
+    # Verificar que los 4 endpoints de lectura usan require_encargado_curso
+    import re
+    # Patrones: "async def list_forms(", "async def get_form(", "async def list_submissions(", "async def counters("
+    # seguido de (lineas intermedias) "Depends(require_encargado_curso)"
+    lectura_funcs = ["list_forms", "get_form", "list_submissions", "counters"]
+    for fname in lectura_funcs:
+        # Buscar la firma de la funcion y verificar que use require_encargado_curso
+        m = re.search(rf"async def {fname}\([^)]*\)[^:]*:[^#\n]*\n[^#\n]*Depends\((\w+)\)", api_py, re.DOTALL)
+        if m:
+            dep = m.group(1)
+            assert dep == "require_encargado_curso", (
+                f"F-2026-08-11-EC-FIX-COUNTERS-403: {fname}() debe usar "
+                f"require_encargado_curso (no {dep}) para que EC/coord puedan acceder. "
+                f"Sin este fix, el encargado de EC ve 'Acceso restringido' en el panel."
+            )
 
 def test_pre_registration_submit_tiene_resolucion_url():
     """F-2026-08-11-CAMPOS-EC-RESOLUCION: PreRegistrationSubmit acepta resolucion_url."""
