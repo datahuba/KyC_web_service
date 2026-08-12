@@ -195,6 +195,12 @@ class CourseResponse(BaseModel):
     estado_override: Optional[str] = None
     estado_calculado: Optional[str] = None
 
+    # FIX-F-2026-08-12-EC-CREADO-POR (Kevin 2026-08-12): ID del User que
+    # creo el programa. None para cursos pre-existentes. El frontend lo usa
+    # en listados para mostrar "Creado por: <username>" y como dato de
+    # auditoria.
+    creado_por_id: Optional[PyObjectId] = None
+
     created_at: datetime
     updated_at: datetime
     

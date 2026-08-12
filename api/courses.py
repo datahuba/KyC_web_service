@@ -897,6 +897,19 @@ async def create_course(
         # inmediatamente despues de crear.
         course.estado_calculado = course.get_estado_actual()
 
+        # FIX-F-2026-08-12-EC-CREADO-POR (Kevin 2026-08-12): guardar quien
+        # creo el programa. Esto se persistia implicitamente en User.cursos_asignados
+        # via el auto-asign, pero NO en el Course. Sin este campo no se puede
+        # hacer migraciones retroactivas ("asignar a este EC los programas que
+        # el creo") ni trazabilidad. Ademas, por seguridad forzamos `activo=True`
+        # aunque el frontend mande False: la decision de visibilidad se hace
+        # via el flag `es_historico`, no via `activo` (FIX-F-2026-08-12-EC-ACTIVO-HISTORICO).
+        # Si en el futuro queremos un flag "inactivo" para archivar manualmente,
+        # usamos otro campo dedicado (ej: `archivado`).
+        course.creado_por_id = current_user.id
+        course.activo = True
+        await course.save()
+
         # F-2026-08-12-EC-AUTOASIGNAR-CURSO (Kevin 2026-08-12 post-reunion):
         # cuando un EC/COORDINADOR crea un programa historico, debe
         # autoasignarse a su lista de cursos_asignados. Asi el programa

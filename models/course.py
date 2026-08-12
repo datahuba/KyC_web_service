@@ -275,6 +275,20 @@ class Course(MongoBaseModel):
                     "False (default) si es un programa en ejecucion o por ejecutarse, "
                     "donde se exige la estructura completa (docentes, modulos, pagos, etc.)."
     )
+
+    # FIX-F-2026-08-12-EC-CREADO-POR (Kevin 2026-08-12): trazabilidad de quien
+    # creo el programa. Antes no se guardaba, lo que impedia hacer migraciones
+    # retroactivas ("asignar a este EC los programas que el creo") y rompia el
+    # flujo de auto-asignacion cuando el EC se equivocaba de boton. Ahora cada
+    # curso tiene un `creado_por_id` apuntando al User que lo creo (sea
+    # EC/COORDINADOR/CPD/ADMIN/SUPERADMIN). Para cursos pre-existentes (sin
+    # este campo), el endpoint de migracion `POST /admin/migrate/ec-creador`
+    # hace el backfill una sola vez.
+    creado_por_id: Optional[PyObjectId] = Field(
+        default=None,
+        description="FIX-F-2026-08-12-EC-CREADO-POR: ID del User que creo el programa. "
+                    "None para cursos pre-existentes (usar endpoint de migracion)."
+    )
     
     # ========================================================================
     # REQUISITOS (DOCUMENTACIÓN)

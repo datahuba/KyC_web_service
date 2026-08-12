@@ -431,3 +431,100 @@ async def migrate_ec_historico_cursos(
             f"Total ECs revisados: {len(ecs)}."
         ),
     }
+
+
+# ============================================================================
+# F-2026-08-12-EC-ACTIVO-HISTORICO (Kevin 2026-08-12)
+# ============================================================================
+# Migracion retroactiva: para todos los cursos con `activo=False` Y
+# `creado_por_id IS NULL`, los activa a `activo=True`. Esto resuelve el
+# problema de los programas historicos creados por el EC que quedaron
+# con `activo=False` (porque el frontend forzaba ese flag para historicos)
+# y no aparecian en el modal "Editar Usuario" del admin ni en el dashboard
+# del EC. El flag `es_historico` ya marca la separacion correcta, no hace
+# falta `activo=False` ademas.
+#
+# Tambien setea `creado_por_id` a un valor best-effort: si el curso esta en
+# `cursos_asignados` de algun EC activo, usamos ese EC. Si no, lo dejamos None
+# (campo nullable, no rompe nada).
+#
+# Solo superadmin/admin puede ejecutar (operacion masiva de BD).
+# ============================================================================
+
+@router.post(
+    "/migrate/ec-fix-activo-historicos",
+    summary="F-2026-08-12-EC-ACTIVO-HISTORICO: Activar historicos y backfill de creado_por_id",
+)
+async def migrate_ec_fix_activo_historicos(
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Activa todos los cursos con `activo=False` y backfillea `creado_por_id`
+    con un EC si el curso esta en sus `cursos_asignados`. Es idempotente:
+    si el curso ya esta activo, no lo toca.
+
+    Devuelve un resumen con cuantos cursos se activaron y a cuantos se les
+    pudo inferir el creador.
+    """
+    if current_user.rol not in (UserRole.SUPERADMIN, UserRole.ADMIN):
+        raise HTTPException(
+            status_code=403,
+            detail="Solo superadmin/admin puede ejecutar migraciones de BD."
+        )
+
+    from models.course import Course
+    from models.user import User as UserModel
+
+    # 1. Obtener todos los cursos inactivos
+    cursos_inactivos = await Course.find(Course.activo == False).to_list()
+    if not cursos_inactivos:
+        return {
+            "success": True,
+            "cursos_inactivos": 0,
+            "cursos_activados": 0,
+            "creadores_inferidos": 0,
+            "message": "No hay cursos inactivos en la BD. Nada que hacer.",
+        }
+
+    # 2. Obtener todos los ECs/COORDINADORES activos con sus cursos_asignados
+    ecs = await UserModel.find(
+        UserModel.rol.in_([UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]),
+        UserModel.activo == True,
+    ).to_list()
+    # Invertir el mapa: curso_id -> User (tomar el primer EC que lo tiene)
+    curso_a_ec: dict = {}
+    for ec in ecs:
+        for cid in (ec.cursos_asignados or []):
+            if str(cid) not in curso_a_ec:
+                curso_a_ec[str(cid)] = ec
+
+    cursos_activados = 0
+    creadores_inferidos = 0
+    for curso in cursos_inactivos:
+        cambios = False
+        # Activar
+        if not curso.activo:
+            curso.activo = True
+            cambios = True
+            cursos_activados += 1
+        # Backfill de creado_por_id (best-effort)
+        if not curso.creado_por_id:
+            ec_candidato = curso_a_ec.get(str(curso.id))
+            if ec_candidato:
+                curso.creado_por_id = ec_candidato.id
+                creadores_inferidos += 1
+                cambios = True
+        if cambios:
+            await curso.save()
+
+    return {
+        "success": True,
+        "cursos_inactivos": len(cursos_inactivos),
+        "cursos_activados": cursos_activados,
+        "creadores_inferidos": creadores_inferidos,
+        "message": (
+            f"Migracion completada: {cursos_activados} cursos activados, "
+            f"{creadores_inferidos} creadores inferidos desde cursos_asignados. "
+            f"Total cursos inactivos revisados: {len(cursos_inactivos)}."
+        ),
+    }
