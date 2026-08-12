@@ -467,6 +467,61 @@ async def approve_submission(submission_id: PydanticObjectId, admin_username: st
     sub.migrated_to_student_id = student.id
     await sub.save()
 
+    # F-2026-08-12-PRE-INSCRIPCION-AUTO-ENROLL (Kevin 2026-08-12 post-reunion):
+    # al aprobar una pre-inscripcion, ademas de crear el Student, inscribirlo
+    # automaticamente en el programa del formulario. Asi el estudiante
+    # aparece inmediatamente en la lista de inscritos del programa y el
+    # panel /app/inscripciones lo muestra sin tener que hacer
+    # Inscripcion Individual manual.
+    #
+    # Solo se crea el Enrollment (sin pagos), porque Kevin decidio que los
+    # pagos se confirman despues del pago real (no se asume que el
+    # estudiante ya pago). El Enrollment queda en PENDIENTE_PAGO.
+    #
+    # Si el form no tiene programa_id o el curso esta cerrado, NO se
+    # falla el approve (solo se loguea warning). El estudiante queda
+    # creado, pero sin inscripcion. El EC puede inscribirlo manualmente
+    # despues desde Inscripcion Individual.
+    if sub.form_id:
+        try:
+            from models.pre_registration import PreRegistrationForm
+            from schemas.enrollment import EnrollmentCreate
+            from services import enrollment_service
+
+            form = await PreRegistrationForm.get(sub.form_id)
+            if form and form.programa_id:
+                try:
+                    # Reutilizamos el service de enrollment, que ya calcula
+                    # matricula diferenciada (primer carrera vs profesional),
+                    # descuentos, requisitos, modulos, etc.
+                    enrollment_in = EnrollmentCreate(
+                        estudiante_id=student.id,
+                        curso_id=form.programa_id,
+                        # NO pasamos descuento_id ni descuento_personalizado
+                        # porque la pre-inscripcion usa el campo
+                        # descuento_porcentaje del Student (que se valida
+                        # por separado en el modal "Validar descuento").
+                    )
+                    await enrollment_service.create_enrollment(
+                        enrollment_in=enrollment_in,
+                        admin_username=admin_username,
+                        student=student,
+                    )
+                except ValueError as ve:
+                    # El curso esta cerrado/inactivo, o ya esta inscrito, etc.
+                    # No fallamos el approve, solo logueamos.
+                    print(
+                        f"[pre-registration] No se pudo inscribir automáticamente "
+                        f"al estudiante {student.nombre} en el programa {form.programa_id}: {ve}"
+                    )
+        except Exception as e:
+            # Cualquier error inesperado en la inscripcion NO debe tumbar el
+            # approve (el Student ya esta creado). Logueamos y seguimos.
+            print(
+                f"[pre-registration] Error inesperado inscribiendo automáticamente "
+                f"al estudiante {student.id} en el programa del form {sub.form_id}: {e}"
+            )
+
     # Email de bienvenida con contraseña inicial (best-effort, no bloqueante)
     try:
         from core.config import settings
