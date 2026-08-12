@@ -87,7 +87,25 @@ async def listar_sesiones(
     """
     F-2026-08-11-ASISTENCIA: lista todas las sesiones registradas para
     un modulo de un enrollment, ordenadas por fecha ascendente.
+
+    F-2026-08-12-EC-CURSOS-FILTRO (Kevin 2026-08-12): si el usuario es
+    EC/COORDINADOR, validar que el enrollment pertenezca a uno de SUS
+    cursos asignados. Si no, 403.
     """
+    # F-2026-08-12-EC-CURSOS-FILTRO: check de seguridad
+    if isinstance(current_user, User) and current_user.rol in (
+        UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR
+    ):
+        from models.enrollment import Enrollment
+        enr = await Enrollment.get(enrollment_id)
+        if not enr:
+            raise HTTPException(status_code=404, detail="Enrollment no encontrado")
+        if enr.curso_id not in (current_user.cursos_asignados or []):
+            raise HTTPException(
+                status_code=403,
+                detail="No tienes permiso para ver sesiones de este curso."
+            )
+
     sesiones = await Sesion.find(
         Sesion.enrollment_id == enrollment_id,
         Sesion.modulo_index == modulo_index,
@@ -107,10 +125,24 @@ async def get_sesion(
     """
     F-2026-08-11-ASISTENCIA: devuelve la sesion + todos los registros
     de asistencia de los estudiantes.
+
+    F-2026-08-12-EC-CURSOS-FILTRO (Kevin 2026-08-12): si EC/COORDINADOR,
+    validar que el enrollment de la sesion sea de un curso permitido.
     """
     sesion = await Sesion.get(sesion_id)
     if not sesion:
         raise HTTPException(status_code=404, detail="Sesion no encontrada")
+
+    # F-2026-08-12-EC-CURSOS-FILTRO: check de seguridad
+    if isinstance(current_user, User) and current_user.rol in (
+        UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR
+    ):
+        enr = await Enrollment.get(sesion.enrollment_id)
+        if not enr or enr.curso_id not in (current_user.cursos_asignados or []):
+            raise HTTPException(
+                status_code=403,
+                detail="No tienes permiso para ver sesiones de este curso."
+            )
 
     registros = await AsistenciaRegistro.find(
         AsistenciaRegistro.sesion_id == sesion_id,

@@ -9,7 +9,7 @@ from services import student_service
 from beanie import PydanticObjectId
 
 # IMPORTAMOS NUESTRAS LLAVES DE SEGURIDAD GRANULARES DE LA UAGRM
-from api.dependencies import require_superadmin, require_cpd, require_staff, require_cobranza, get_current_user, require_encargado_curso
+from api.dependencies import require_superadmin, require_cpd, require_staff, require_cobranza, get_current_user, require_encargado_curso, filtro_cursos_por_rol
 
 router = APIRouter()
 
@@ -44,8 +44,17 @@ async def read_students(
     # primero que este presente gana (compatibilidad hacia atras).
     query_term = q or carnet or registro or nombre or search
 
+    # F-2026-08-12-EC-CURSOS-FILTRO (Kevin 2026-08-12 post-reunion UAGRM):
+    # el EC solo debe ver estudiantes de SUS cursos asignados. El helper
+    # filtro_cursos_por_rol devuelve None para ADMIN/SUPERADMIN/CPD/MAE
+    # (acceso total) o un dict $in para EC/COORDINADOR/COBRANZA-segmentado.
+    cursos_filtro = filtro_cursos_por_rol(current_user)
+    cursos_asignados_list = cursos_filtro.get("curso_id", {}).get("$in") if cursos_filtro else None
+
     students, total_count = await student_service.get_students(
-        page=page, per_page=per_page, q=query_term, activo=activo, estado_titulo=estado_titulo, curso_id=curso_id
+        page=page, per_page=per_page, q=query_term, activo=activo,
+        estado_titulo=estado_titulo, curso_id=curso_id,
+        cursos_asignados=cursos_asignados_list,
     )
 
     total_pages = math.ceil(total_count / per_page) if total_count > 0 else 0

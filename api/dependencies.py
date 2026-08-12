@@ -364,9 +364,32 @@ def filtro_cursos_por_rol(current_user: User) -> Optional[dict]:
     para separar "Usuarios Globales" de "Asignados a Curso(s)"). Un cajero sin
     cursos marcados conserva acceso total, para no romper cuentas de Cobranza
     ya existentes que nunca se configuraron con cursos específicos.
+
+    F-2026-08-12-EC-CURSOS-FILTRO (Kevin 2026-08-12 post-reunion UAGRM):
+    extender el filtro a COORDINADOR tambien (supervisa EC de su area, debe
+    ver solo datos de los cursos que supervisa, que son los mismos cursos
+    asignados). Esto unifica el comportamiento EC + COORDINADOR + COBRANZA.
     """
-    if current_user.rol == UserRole.ENCARGADO_CURSO:
+    if current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
         return {"curso_id": {"$in": current_user.cursos_asignados}}
+    if current_user.rol == UserRole.COBRANZA and current_user.cursos_asignados:
+        return {"curso_id": {"$in": current_user.cursos_asignados}}
+    return None
+
+
+def filtro_cursos_por_rol_estricto(current_user: User) -> Optional[dict]:
+    """
+    Igual que filtro_cursos_por_rol pero retorna filtro incluso si cursos_asignados
+    está vacío (devuelve $in [] = no muestra nada). Usar SOLO en endpoints que
+    tienen sentido semántico de "0 cursos = 0 datos" (ej. dashboard del EC).
+
+    F-2026-08-12-EC-CURSOS-FILTRO (Kevin 2026-08-12): el EC sin cursos asignados
+    NO debe ver datos de TODOS los cursos por accidente. Si no tiene cursos,
+    no ve nada (mejor que ver todo por error de config).
+    """
+    if current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
+        cursos = current_user.cursos_asignados or []
+        return {"curso_id": {"$in": cursos}}
     if current_user.rol == UserRole.COBRANZA and current_user.cursos_asignados:
         return {"curso_id": {"$in": current_user.cursos_asignados}}
     return None

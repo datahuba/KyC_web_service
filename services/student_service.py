@@ -40,13 +40,19 @@ async def get_students(
     q: Optional[str] = None,
     activo: Optional[bool] = None,
     estado_titulo: Optional[EstadoTitulo] = None,
-    curso_id: Optional[PydanticObjectId] = None
+    curso_id: Optional[PydanticObjectId] = None,
+    # F-2026-08-12-EC-CURSOS-FILTRO (Kevin 2026-08-12 post-reunion UAGRM):
+    # si el usuario es ENCARGADO_CURSO / COORDINADOR / COBRANZA-segmentado,
+    # el endpoint le pasa su lista de cursos_asignados y el service filtra
+    # a estudiantes que estan en al menos uno de esos cursos. Si la lista
+    # está vacía, retorna lista vacía (no se muestran todos los estudiantes).
+    cursos_asignados: Optional[list] = None,
 ) -> tuple[List[Student], int]:
     """
     Obtener lista de estudiantes con filtros avanzados y paginación
     """
     query = Student.find()
-    
+
     if q:
         # F-FIX-FILTROS-STUDENTS (2026-08-10, Kevin): antes el filtro `q`
         # estaba mal armado. Comparaba el campo con un dict literal
@@ -69,10 +75,10 @@ async def get_students(
                 RegEx(Student.registro, "^" + q_escaped + "$", "i")
             )
         )
-    
+
     if activo is not None:
         query = query.find(Student.activo == activo)
-    
+
     if estado_titulo:
         if estado_titulo == EstadoTitulo.SIN_TITULO:
             query = query.find(
@@ -83,15 +89,32 @@ async def get_students(
             )
         else:
             query = query.find(Student.titulo.estado == estado_titulo)
-    
-    if curso_id:
-        query = query.find(Student.lista_cursos_ids == curso_id)
-    
+
+    # F-2026-08-12-EC-CURSOS-FILTRO: si llega curso_id especifico Y
+    # cursos_asignados, intersectamos (AND logico). El EC puede pedir un
+    # curso especifico dentro de los que le pertenecen, pero NO un curso
+    # fuera de su lista.
+    if curso_id is not None and cursos_asignados is not None:
+        if curso_id not in cursos_asignados:
+            # El EC pidio un curso que no le pertenece → lista vacia
+            return [], 0
+        cursos_asignados = [curso_id]
+    elif curso_id is not None:
+        cursos_asignados = [curso_id]
+
+    if cursos_asignados is not None:
+        # Filtrar por intersección: estudiantes que tienen al menos uno
+        # de los cursos_asignados en su lista_cursos_ids. Si cursos_asignados
+        # es lista vacia, retorna 0 matches (no estudiantes sin cursos).
+        if not cursos_asignados:
+            return [], 0
+        query = query.find({"lista_cursos_ids": {"$in": cursos_asignados}})
+
     total_count = await query.count()
     skip = (page - 1) * per_page
-    
+
     students = await query.sort("-created_at").skip(skip).limit(per_page).to_list()
-    
+
     return students, total_count
 
 
