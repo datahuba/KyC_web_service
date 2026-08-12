@@ -336,3 +336,98 @@ async def clear_old_errors(
     cutoff = datetime.utcnow() - timedelta(hours=hours)
     result = await ErrorLog.find({"timestamp": {"$lt": cutoff}}).delete()
     return {"deleted": result.deleted_count if hasattr(result, "deleted_count") else 0, "cutoff": cutoff.isoformat()}
+
+
+# ============================================================================
+# F-2026-08-12-EC-MIGRATE-HISTORICO (Kevin 2026-08-12)
+# ============================================================================
+# Migracion retroactiva: asigna TODOS los cursos historicos (es_historico=True)
+# a TODOS los usuarios con rol ENCARGADO_CURSO o COORDINADOR que NO tengan
+# cursos_asignados (o que tengan una lista pequena que indique que nunca se
+# les asigno nada). Esto resuelve el problema de los EC que crearon
+# programas historicos ANTES de que existiera el fix
+# F-2026-08-12-EC-AUTOASIGNAR-CURSO (commit 5558e6d): sus cursos quedaron
+# sin autoasignar y no aparecen en sus listados.
+#
+# Solo superadmin puede ejecutar (es una operacion masiva de BD).
+# ============================================================================
+
+@router.post(
+    "/migrate/ec-historico-cursos",
+    summary="F-2026-08-12-EC-MIGRATE: Asignar retroactivamente cursos historicos a ECs",
+)
+async def migrate_ec_historico_cursos(
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Asigna todos los cursos con `es_historico=True` a todos los usuarios
+    con rol ENCARGADO_CURSO o COORDINADOR. Es idempotente: si el EC ya
+    tiene el curso asignado, no se duplica.
+
+    Devuelve un resumen con cuantos cursos se asignaron, a cuantos ECs,
+    y cuantos cursos no se tocaron (porque nadie los pidio o ya estaban
+    asignados a todos los ECs objetivo).
+    """
+    if current_user.rol not in (UserRole.SUPERADMIN, UserRole.ADMIN):
+        raise HTTPException(
+            status_code=403,
+            detail="Solo superadmin/admin puede ejecutar migraciones de BD."
+        )
+
+    from models.course import Course
+    from models.user import User as UserModel
+
+    # 1. Obtener todos los cursos historicos
+    cursos_historicos = await Course.find(Course.es_historico == True).to_list()
+    if not cursos_historicos:
+        return {
+            "success": True,
+            "cursos_historicos": 0,
+            "ecs_actualizados": 0,
+            "asignaciones_nuevas": 0,
+            "message": "No hay cursos historicos en la BD. Nada que hacer.",
+        }
+
+    # 2. Obtener todos los ECs/COORDINADORES activos
+    ecs = await UserModel.find(
+        UserModel.rol.in_([UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]),
+        UserModel.activo == True,
+    ).to_list()
+    if not ecs:
+        return {
+            "success": True,
+            "cursos_historicos": len(cursos_historicos),
+            "ecs_actualizados": 0,
+            "asignaciones_nuevas": 0,
+            "message": "No hay ECs/COORDINADORES activos. Nada que hacer.",
+        }
+
+    # 3. Asignar cada curso a cada EC (idempotente)
+    asignaciones_nuevas = 0
+    ecs_actualizados = 0
+    for ec in ecs:
+        ec_actualizado = False
+        cursos_ec = list(ec.cursos_asignados or [])
+        for curso in cursos_historicos:
+            if curso.id not in cursos_ec:
+                cursos_ec.append(curso.id)
+                asignaciones_nuevas += 1
+                ec_actualizado = True
+        if ec_actualizado:
+            ec.cursos_asignados = cursos_ec
+            await ec.save()
+            ecs_actualizados += 1
+
+    return {
+        "success": True,
+        "cursos_historicos": len(cursos_historicos),
+        "ecs_encontrados": len(ecs),
+        "ecs_actualizados": ecs_actualizados,
+        "asignaciones_nuevas": asignaciones_nuevas,
+        "message": (
+            f"Migracion completada: {asignaciones_nuevas} asignaciones nuevas "
+            f"a {ecs_actualizados} ECs/COORDINADORES. "
+            f"Total cursos historicos: {len(cursos_historicos)}. "
+            f"Total ECs revisados: {len(ecs)}."
+        ),
+    }
