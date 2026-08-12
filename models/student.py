@@ -270,7 +270,38 @@ class Student(MongoBaseModel):
         description="F-2026-08-12-DESCUENTO-BECA: motivo del rechazo si el encargado EC determino "
                     "que el titulo no es valido. Null si fue verificado o sigue pendiente."
     )
-    
+
+    # F-2026-08-12-DESCUENTO-BECA-VALIDACION (Kevin 2026-08-12, post-reunion UAGRM):
+    # El descuento de vicerrectorado que el estudiante propuso (via descuento_porcentaje
+    # en la submission) NO se aplica automaticamente. El encargado EC debe validarlo
+    # explicitamente DESPUES de aprobar la pre-inscripcion (mismo patron que el titulo
+    # profesional). Estado: 'no_aplica' (no hay descuento propuesto) | 'pendiente' (sin
+    # revisar) | 'aprobado' (encargado confirmo, el descuento se aplica) | 'rechazado'
+    # (encargado determino que el descuento no corresponde, se cobra precio completo).
+    # NOTA: si el rechazo es del descuento, el estudiante sigue matriculado, solo se
+    # cobra el modulo completo.
+    descuento_vicerrectorado_monto: Optional[float] = Field(
+        None, ge=0, le=1,
+        description="F-2026-08-12-DESCUENTO-BECA-VALIDACION: monto del descuento de "
+                    "vicerrectorado que el estudiante propuso (0.0-1.0). Aplica SOLO a modulos. "
+                    "Null si el estudiante no propuso descuento. Se setea automaticamente al "
+                    "aprobar la submission si hay descuento_porcentaje."
+    )
+    descuento_vicerrectorado_estado: str = Field(
+        default="no_aplica",
+        description="F-2026-08-12-DESCUENTO-BECA-VALIDACION: estado de validacion del "
+                    "descuento de vicerrectorado. 'no_aplica' (no hay descuento), 'pendiente' "
+                    "(sin revisar), 'aprobado' (encargado lo confirmo, se aplica), 'rechazado' "
+                    "(encargado determino que no corresponde, se cobra precio completo). "
+                    "Default 'no_aplica'."
+    )
+    descuento_vicerrectorado_motivo_rechazo: Optional[str] = Field(
+        None, max_length=500,
+        description="F-2026-08-12-DESCUENTO-BECA-VALIDACION: motivo del rechazo si el "
+                    "encargado determino que el descuento de vicerrectorado no corresponde. "
+                    "Null si fue aprobado o sigue pendiente."
+    )
+
     class Settings:
         name = "students"
         indexes = [

@@ -439,6 +439,24 @@ async def approve_submission(submission_id: PydanticObjectId, admin_username: st
         es_primer_carrera=bool(data.get("es_primer_carrera", True)),
         titulo_profesional_url=(data.get("titulo_profesional_url") or None),
         titulo_profesional_estado="pendiente",  # el encargado EC lo valida despues
+        # F-2026-08-12-DESCUENTO-BECA-VALIDACION (Kevin 2026-08-12, post-reunion):
+        # Si el estudiante propuso un descuento (campo descuentoPorcentaje del
+        # wizard, 0-100%), se persiste como descuento_vicerrectorado_monto
+        # (convertido a 0-1) con estado "pendiente". El encargado EC debe
+        # validarlo explicitamente despues (mismo patron que el titulo).
+        # Si rechazo: el estudiante sigue matriculado pero se cobra el modulo
+        # completo (sin descuento).
+        # Si no propuso descuento: queda en "no_aplica".
+        descuento_vicerrectorado_monto=(
+            float(data.get("descuentoPorcentaje") or data.get("descuento_porcentaje") or 0) / 100.0
+            if (data.get("descuentoPorcentaje") or data.get("descuento_porcentaje"))
+            else None
+        ),
+        descuento_vicerrectorado_estado=(
+            "pendiente"
+            if (data.get("descuentoPorcentaje") or data.get("descuento_porcentaje"))
+            else "no_aplica"
+        ),
     )
     await student.insert()
 
@@ -488,6 +506,69 @@ async def reject_submission(
     sub.fecha_revision = utcnow_naive()
     await sub.save()
     return sub
+
+
+# ============================================================================
+# F-2026-08-12-DESCUENTO-BECA-VALIDACION (Kevin 2026-08-12, post-reunion
+# UAGRM): el descuento de vicerrectorado que el estudiante propuso en el
+# wizard NO se aplica automaticamente al aprobar la pre-inscripcion. Queda
+# en estado "pendiente" y el encargado EC debe aprobarlo o rechazarlo
+# explicitamente desde el panel. Si se rechaza, el estudiante sigue
+# matriculado pero se cobra el modulo completo (sin descuento).
+# ============================================================================
+
+async def aprobar_descuento_vicerrectorado(student_id: PydanticObjectId) -> Student:
+    """
+    Aprueba el descuento de vicerrectorado de un estudiante. El descuento
+    ya debio haber sido propuesto al aprobar la submission (estado
+    "pendiente"). Si no hay descuento propuesto, lanza ValueError.
+    """
+    student = await Student.get(student_id)
+    if not student:
+        raise ValueError("Estudiante no encontrado.")
+    if (
+        student.descuento_vicerrectorado_monto is None
+        or student.descuento_vicerrectorado_estado == "no_aplica"
+    ):
+        raise ValueError(
+            "El estudiante no propuso un descuento de vicerrectorado. "
+            "Solo se puede validar un descuento pendiente de aprobacion."
+        )
+    student.descuento_vicerrectorado_estado = "aprobado"
+    student.descuento_vicerrectorado_motivo_rechazo = None
+    await student.save()
+    return student
+
+
+async def rechazar_descuento_vicerrectorado(
+    student_id: PydanticObjectId,
+    motivo: str,
+) -> Student:
+    """
+    Rechaza el descuento de vicerrectorado. El estudiante sigue matriculado
+    pero se cobra el modulo completo (sin descuento). El motivo se guarda
+    para trazabilidad.
+    """
+    student = await Student.get(student_id)
+    if not student:
+        raise ValueError("Estudiante no encontrado.")
+    if (
+        student.descuento_vicerrectorado_monto is None
+        or student.descuento_vicerrectorado_estado == "no_aplica"
+    ):
+        raise ValueError(
+            "El estudiante no propuso un descuento de vicerrectorado. "
+            "Solo se puede rechazar un descuento pendiente de aprobacion."
+        )
+    motivo_clean = (motivo or "").strip()
+    if len(motivo_clean) < 3:
+        raise ValueError(
+            "Para rechazar el descuento debes indicar un motivo de al menos 3 caracteres."
+        )
+    student.descuento_vicerrectorado_estado = "rechazado"
+    student.descuento_vicerrectorado_motivo_rechazo = motivo_clean
+    await student.save()
+    return student
 
 
 # ============================================================================

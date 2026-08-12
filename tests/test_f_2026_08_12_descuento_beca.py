@@ -69,6 +69,31 @@ def _read(rel: str) -> str:
     return (ROOT / rel).read_text(encoding="utf-8")
 
 
+def _read_wizard() -> str:
+    """Lee el archivo del wizard publico (paso 5 incluye Tipo de estudiante)."""
+    # El wizard vive en el frontend. Buscamos el path del repo del frontend
+    # subiendo un nivel desde el backend.
+    candidates = [
+        ROOT.parent / "kyc-client" / "src" / "routes" / "pre-registro" / "[slug]" / "+page.svelte",
+        ROOT.parent / "kyc-client" / "src" / "routes" / "pre-registro" / "[slug]" / "+page.svelte",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c.read_text(encoding="utf-8")
+    raise FileNotFoundError(f"No se encontró el archivo del wizard. Probé: {[str(c) for c in candidates]}")
+
+
+def _read_panel() -> str:
+    """Lee el archivo del panel del encargado (botón Validar descuento)."""
+    candidates = [
+        ROOT.parent / "kyc-client" / "src" / "routes" / "app" / "pre-registros" / "+page.svelte",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c.read_text(encoding="utf-8")
+    raise FileNotFoundError(f"No se encontró el archivo del panel. Probé: {[str(c) for c in candidates]}")
+
+
 def test_1_matricula_primer_carrera_default_settings():
     src = _read("core/config.py")
     assert "MATRICULA_PRIMER_CARRERA_DEFAULT" in src, "Falta MATRICULA_PRIMER_CARRERA_DEFAULT en settings"
@@ -310,6 +335,167 @@ def test_27_validar_titulo_aprobado_verifica():
     # Si aprobado=True → estado="verificado", motivo=None
     assert '"verificado"' in bloque, "Si aprobado, debe setear estado='verificado'"
     assert '"rechazado"' in bloque, "Si NO aprobado, debe setear estado='rechazado'"
+
+
+# ============================================================================
+# F-2026-08-12-DESCUENTO-BECA-VALIDACION (Kevin 2026-08-12, post-reunion):
+# Tests del nuevo endpoint PUT /students/{id}/descuento-vicerrectorado/validar
+# y la logica de aprobacion que setea estado=pendiente si hay descuento.
+# ============================================================================
+
+def test_28_student_tiene_campos_descuento_vicerrectorado():
+    """Student debe tener los 3 campos nuevos del descuento de vicerrectorado."""
+    src = _read("models/student.py")
+    assert "descuento_vicerrectorado_monto" in src, \
+        "Falta campo descuento_vicerrectorado_monto en Student"
+    assert "descuento_vicerrectorado_estado" in src, \
+        "Falta campo descuento_vicerrectorado_estado en Student"
+    assert "descuento_vicerrectorado_motivo_rechazo" in src, \
+        "Falta campo descuento_vicerrectorado_motivo_rechazo en Student"
+    # Default del estado debe ser "no_aplica"
+    assert 'default="no_aplica"' in src, \
+        "descuento_vicerrectorado_estado debe tener default='no_aplica'"
+
+
+def test_29_student_schema_response_incluye_campos_vicerrectorado():
+    """StudentResponse debe incluir los 3 campos nuevos."""
+    src = _read("schemas/student.py")
+    assert "descuento_vicerrectorado_monto" in src, \
+        "Falta descuento_vicerrectorado_monto en StudentResponse"
+    assert "descuento_vicerrectorado_estado" in src, \
+        "Falta descuento_vicerrectorado_estado en StudentResponse"
+    assert "descuento_vicerrectorado_motivo_rechazo" in src, \
+        "Falta descuento_vicerrectorado_motivo_rechazo en StudentResponse"
+
+
+def test_30_endpoint_descuento_vicerrectorado_existe():
+    """El endpoint PUT /students/{id}/descuento-vicerrectorado/validar debe existir."""
+    src = _read("api/students.py")
+    assert '"/{id}/descuento-vicerrectorado/validar"' in src, \
+        "Falta endpoint PUT /students/{id}/descuento-vicerrectorado/validar"
+    assert "validar_descuento_vicerrectorado" in src, \
+        "Falta la funcion validar_descuento_vicerrectorado en api/students.py"
+
+
+def test_31_endpoint_descuento_usa_encargado_curso():
+    """El endpoint debe usar require_encargado_curso (no require_cpd).
+    El encargado EC es quien valida el descuento (no CPD)."""
+    src = _read("api/students.py")
+    idx = src.find("async def validar_descuento_vicerrectorado")
+    end = src.find("\nasync def ", idx + 1)
+    if end < 0:
+        end = len(src)
+    bloque = src[idx:end]
+    assert "require_encargado_curso" in bloque, \
+        "validar_descuento_vicerrectorado debe usar require_encargado_curso (no require_cpd)"
+
+
+def test_32_endpoint_descuento_sin_monto_retorna_400():
+    """Si el estudiante no propuso descuento (estado=no_aplica), endpoint debe retornar 400.
+    F-2026-08-12-DESCUENTO-BECA-VALIDACION: el endpoint puede delegar al
+    service; lo que importa es que el flujo completo retorne 400 cuando
+    no hay descuento propuesto. Buscamos la validacion tanto en el
+    endpoint como en el service."""
+    src_endpoint = _read("api/students.py")
+    src_service = _read("services/pre_registration_service.py")
+    # Buscar en bloque del endpoint O en el service (donde esta la logica).
+    idx = src_endpoint.find("async def validar_descuento_vicerrectorado")
+    end = src_endpoint.find("\nasync def ", idx + 1)
+    if end < 0:
+        end = len(src_endpoint)
+    bloque_endpoint = src_endpoint[idx:end] if idx >= 0 else ""
+    # El service debe validar la condicion
+    assert '"no_aplica"' in bloque_endpoint or '"no_aplica"' in src_service, \
+        "Debe validar estado != 'no_aplica' (en endpoint o service)"
+    # Mensaje de error en endpoint o service
+    assert (
+        "no propuso un descuento" in bloque_endpoint.lower()
+        or "no propuso un descuento" in src_service.lower()
+    ), "Mensaje de error debe mencionar que no propuso descuento"
+
+
+def test_33_endpoint_descuento_aprobado_y_rechazado():
+    """Si aprobado=True → estado='aprobado'. Si aprobado=False → estado='rechazado'.
+    F-2026-08-12-DESCUENTO-BECA-VALIDACION: el endpoint puede delegar al
+    service; lo que importa es que el flujo completo setee los estados
+    correctos. Buscamos en endpoint y service."""
+    src_endpoint = _read("api/students.py")
+    src_service = _read("services/pre_registration_service.py")
+    assert '"aprobado"' in src_service, \
+        "Si aprobado, debe setear estado='aprobado' (en service)"
+    assert '"rechazado"' in src_service, \
+        "Si NO aprobado, debe setear estado='rechazado' (en service)"
+
+
+def test_34_aprobacion_setea_estado_pendiente_si_hay_descuento():
+    """Cuando se aprueba una submission con descuento, el Student debe tener
+    descuento_vicerrectorado_monto > 0 y estado='pendiente'."""
+    src = _read("services/pre_registration_service.py")
+    idx = src.find("async def approve_submission")
+    end = src.find("\nasync def ", idx + 1)
+    if end < 0:
+        end = len(src)
+    bloque = src[idx:end]
+    assert "descuento_vicerrectorado_monto" in bloque, \
+        "approve_submission debe setear descuento_vicerrectorado_monto"
+    assert "descuento_vicerrectorado_estado" in bloque, \
+        "approve_submission debe setear descuento_vicerrectorado_estado"
+    # Debe convertir el descuento de 0-100% (campo del wizard) a 0-1 (formato DB)
+    assert "/ 100.0" in bloque, \
+        "approve_submission debe convertir el descuento de % a 0-1 (dividir por 100)"
+    # Si no hay descuento, estado='no_aplica'
+    assert '"no_aplica"' in bloque, \
+        "Si no hay descuento, estado='no_aplica'"
+
+
+def test_35_wizard_paso5_resumen_incluye_tipo_estudiante():
+    """El wizard paso 5 (Confirmar) debe mostrar la seccion 'Tipo de estudiante'
+    con el badge de primera carrera o profesional + titulo cargado.
+    F-2026-08-12-DESCUENTO-BECA-FIX-WIZARD-RESUMEN."""
+    src = _read_wizard()
+    # Tomamos desde currentStep === 5 hasta el final del archivo para
+    # incluir todo el bloque del paso 5 (puede ser muy largo).
+    idx = src.find("currentStep === 5")
+    assert idx >= 0, "No se encontró el paso 5 en el wizard"
+    bloque = src[idx:]
+    assert "Tipo de estudiante" in bloque, \
+        "Wizard paso 5 debe incluir seccion 'Tipo de estudiante' en el resumen"
+    assert "esPrimerCarrera" in bloque, \
+        "Seccion debe condicionar por esPrimerCarrera"
+    assert "Primera carrera" in bloque, \
+        "Debe tener badge 'Primera carrera' para primer carrera"
+    assert "Profesional" in bloque, \
+        "Debe tener badge 'Profesional' para profesional con titulo"
+
+
+def test_36_panel_tiene_boton_validar_descuento_vicerrectorado():
+    """El panel del encargado debe tener un boton 'Validar descuento' (similar a
+    'Validar titulo') para que el encargado EC apruebe el descuento de vicerrectorado."""
+    src = _read_panel()
+    assert "Validar descuento" in src, \
+        "Falta boton 'Validar descuento' en el panel del encargado"
+    assert "showValidateDescuentoModal" in src or "showValidateDescuento" in src, \
+        "Falta state var para el modal de validar descuento"
+
+
+def test_37_modal_validar_descuento_existe():
+    """El modal 'Validar descuento de vicerrectorado' debe existir en el panel."""
+    src = _read_panel()
+    assert "Validar descuento de vicerrectorado" in src or "validarDescuento" in src, \
+        "Falta el modal 'Validar descuento de vicerrectorado' en el panel"
+    assert "approveDescuentoVicerrectorado" in src or "approve_descuento" in src, \
+        "Falta la funcion approveDescuentoVicerrectorado en el panel"
+    assert "rejectDescuentoVicerrectorado" in src or "reject_descuento" in src, \
+        "Falta la funcion rejectDescuentoVicerrectorado en el panel"
+
+
+def test_38_service_tiene_aprobar_y_rechazar_descuento():
+    """El pre-registration service debe tener funciones para aprobar y rechazar
+    el descuento de vicerrectorado."""
+    src = _read("services/pre_registration_service.py")
+    assert "aprobar_descuento_vicerrectorado" in src or "validar_descuento" in src, \
+        "Falta service function para aprobar el descuento de vicerrectorado"
+
 
 
 def test_28_validar_titulo_motivo_minimo():

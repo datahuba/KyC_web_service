@@ -672,6 +672,58 @@ async def validar_titulo_profesional(
 
 
 # ============================================================================
+# F-2026-08-12-DESCUENTO-BECA-VALIDACION (Kevin 2026-08-12, post-reunion UAGRM):
+# Endpoint para que el encargado EC valide (apruebe o rechace) el descuento
+# de vicerrectorado que el estudiante propuso en la pre-inscripcion.
+# El descuento SOLO se aplica si el estado es "aprobado". Si se rechaza,
+# el estudiante sigue matriculado pero se cobra el modulo completo (sin descuento).
+# La logica vive en pre_registration_service.aprobar_descuento_vicerrectorado
+# y rechazar_descuento_vicerrectorado (capa de servicio).
+# ============================================================================
+@router.put("/{id}/descuento-vicerrectorado/validar", response_model=StudentResponse)
+async def validar_descuento_vicerrectorado(
+    id: PydanticObjectId,
+    aprobado: bool = Form(...),
+    motivo: Optional[str] = Form(None),
+    current_user: User = Depends(require_encargado_curso),
+) -> Any:
+    """
+    Valida el descuento de vicerrectorado propuesto por el estudiante.
+
+    F-2026-08-12-DESCUENTO-BECA-VALIDACION (Kevin 2026-08-12, post-reunion):
+    el encargado EC es quien aprueba o rechaza el descuento. Idealmente deberia
+    ser validado por alguien mas (CPD o vicerrectorado), pero por ahora lo
+    hace el encargado EC.
+
+    - aprobado=true: estado='aprobado', el descuento se aplica
+    - aprobado=false: estado='rechazado', se cobra precio completo
+
+    Restriccion: solo se puede validar si el estudiante propuso un descuento
+    (descuento_vicerrectorado_monto no nulo). Si no hay descuento, 400.
+    """
+    # F-2026-08-12-DESCUENTO-BECA-VALIDACION: delega la logica al service.
+    # El service valida que el estudiante exista, que tenga un descuento
+    # propuesto y que el motivo (si rechaza) tenga >= 3 chars.
+    from services import pre_registration_service
+    try:
+        if aprobado:
+            student = await pre_registration_service.aprobar_descuento_vicerrectorado(student_id=id)
+        else:
+            student = await pre_registration_service.rechazar_descuento_vicerrectorado(
+                student_id=id,
+                motivo=(motivo or "").strip(),
+            )
+    except ValueError as e:
+        msg = str(e)
+        # Si el error es por estudiante no encontrado, devolvemos 404
+        if "no encontrado" in msg.lower():
+            raise HTTPException(status_code=404, detail=msg)
+        # El resto son errores de validacion (no propuso descuento, motivo corto, etc)
+        raise HTTPException(status_code=400, detail=msg)
+    return student
+
+
+# ============================================================================
 # ISSUE G: Selector en Importación Masiva
 # ============================================================================
 @router.post("/import/excel", summary="Importar Estudiantes de forma Masiva desde Excel")

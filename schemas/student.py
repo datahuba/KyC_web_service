@@ -284,6 +284,14 @@ class StudentResponse(BaseModel):
     titulo_profesional_estado: str = "pendiente"
     titulo_profesional_motivo_rechazo: Optional[str] = None
 
+    # F-2026-08-12-DESCUENTO-BECA-VALIDACION (Kevin 2026-08-12, post-reunion UAGRM):
+    # descuento de vicerrectorado que el estudiante propuso. El encargado EC
+    # debe validarlo explicitamente (mismo patron que el titulo profesional).
+    # Si estado=aprobado, el descuento se aplica. Si rechazado, se cobra completo.
+    descuento_vicerrectorado_monto: Optional[float] = None
+    descuento_vicerrectorado_estado: str = "no_aplica"
+    descuento_vicerrectorado_motivo_rechazo: Optional[str] = None
+
     # Estado y Metadata
     activo: bool
     lista_cursos_ids: List[PyObjectId] = []
