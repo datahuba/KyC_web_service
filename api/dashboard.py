@@ -298,12 +298,28 @@ async def _build_dashboard_v2(current_user: User) -> dict:
     students_raw_task = students_query.to_list()
     cursos_all, students_raw = await asyncio.gather(cursos_all_task, students_raw_task)
     students_by_id: dict = {str(s.id): s for s in students_raw}
+    # F-2026-08-12-EC-DASHBOARD-HISTORICOS (Kevin 2026-08-12): antes el
+    # dashboard excluia TODOS los historicos del `courseBreakdown` (desglose
+    # por programa). Para perfiles administrativos (admin/superadmin/mae/cobranza)
+    # eso esta OK porque no quieren ver programas cerrados en su resumen.
+    # Pero para EC/COORDINADOR que solo tienen historicos asignados, eso
+    # dejaba su dashboard VACIO ("No hay cursos registrados") aunque tuviera
+    # 3+ programas para gestionar.
+    # Fix: si el user es EC/COORDINADOR, NO excluir sus historicos del
+    # courseBreakdown. Los demas roles siguen viendo el mismo comportamiento
+    # (historicos excluidos del desglose).
+    user_rol_str = str(getattr(current_user, "rol", "") or "").lower()
+    es_perfil_encargado = ("encargado" in user_rol_str) or ("coordinador" in user_rol_str)
     curso_historico_ids: set = {c.id for c in cursos_all if getattr(c, "es_historico", False)}
-    cursos_visibles: list[Course] = [
-        c for c in cursos_all
-        if c.id not in curso_historico_ids
-        and getattr(c, "estado", None) != "cerrado"
-    ]
+    cursos_visibles: list[Course] = []
+    for c in cursos_all:
+        # Si esta cerrado, siempre fuera
+        if getattr(c, "estado", None) == "cerrado":
+            continue
+        # Si es historico y el user NO es perfil encargado, fuera
+        if c.id in curso_historico_ids and not es_perfil_encargado:
+            continue
+        cursos_visibles.append(c)
     curso_ids_visibles: list = [c.id for c in cursos_visibles]
     cursos_by_id: dict = {str(c.id): c for c in cursos_visibles}
 
