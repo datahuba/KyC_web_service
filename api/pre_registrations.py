@@ -392,10 +392,15 @@ async def list_submissions(
     per_page: int = Query(20, ge=1, le=100),
     form_id: Optional[str] = Query(None, description="Filtrar por ID de form"),
     estado: Optional[str] = Query(None, description="pendiente | aprobado | rechazado"),
+    # F-2026-08-12-DESCUENTOS-TAB (Kevin 2026-08-12): si es true, devuelve
+    # solo submissions con descuento propuesto > 0. Usado por la pestana
+    # "Descuentos" del panel de pre-registros.
+    con_descuento: bool = Query(False, description="F-2026-08-12-DESCUENTOS-TAB: solo submissions con descuento propuesto > 0"),
     current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-FIX-COUNTERS-403: encargado_curso/coordinador tambien pueden listar submissions
 ) -> Any:
     items, total = await pre_registration_service.get_submissions_for_admin(
-        current_user=current_user, form_id=form_id, estado=estado, page=page, per_page=per_page
+        current_user=current_user, form_id=form_id, estado=estado,
+        page=page, per_page=per_page, con_descuento=con_descuento,
     )
     enriched = [await _enrich_submission(s) for s in items]
     total_pages = math.ceil(total / per_page) if total > 0 else 0
@@ -495,7 +500,7 @@ async def reject_submission(
     summary="Conteos globales (para badges en sidebar)"
 )
 async def counters(current_user: User = Depends(require_encargado_curso)) -> Any: # F-2026-08-11-EC-FIX-COUNTERS-403: encargado_curso/coordinador tambien pueden ver badges de counters
-    return await pre_registration_service.get_forms_counters()
+    return await pre_registration_service.get_forms_counters(current_user)
 
 
 # ============================================================================

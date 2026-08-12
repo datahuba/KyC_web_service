@@ -326,8 +326,16 @@ async def get_submissions_for_admin(
     estado: Optional[str] = None,
     page: int = 1,
     per_page: int = 20,
+    con_descuento: bool = False,
 ) -> Tuple[List[PreRegistration], int]:
-    """Lista submissions visibles para el usuario actual."""
+    """Lista submissions visibles para el usuario actual.
+
+    F-2026-08-12-DESCUENTOS-TAB (Kevin 2026-08-12 post-reunion): si
+    `con_descuento=True`, filtra a submissions que propusieron descuento
+    de vicerrectorado (> 0). Usado por la pestana "Descuentos" del panel
+    de pre-registros para que el EC tenga una vista unificada de todos
+    los descuentos pendientes/aprobados/rechazados.
+    """
     # Primero, set de form_ids visibles
     form_query: dict = {}
     if current_user.rol == UserRole.CPD:
@@ -366,6 +374,10 @@ async def get_submissions_for_admin(
     sub_query: dict = {"form_id": {"$in": form_ids_oid}}
     if estado and estado in ("pendiente", "aprobado", "rechazado"):
         sub_query["estado"] = estado
+    # F-2026-08-12-DESCUENTOS-TAB: filtro para que la pestana "Descuentos"
+    # muestre solo submissions con descuento propuesto > 0.
+    if con_descuento:
+        sub_query["data.descuento_porcentaje"] = {"$gt": 0}
 
     total = await PreRegistration.find(sub_query).count()
     skip = (page - 1) * per_page
@@ -577,7 +589,21 @@ async def aprobar_descuento_vicerrectorado(student_id: PydanticObjectId) -> Stud
     Aprueba el descuento de vicerrectorado de un estudiante. El descuento
     ya debio haber sido propuesto al aprobar la submission (estado
     "pendiente"). Si no hay descuento propuesto, lanza ValueError.
+
+    F-2026-08-12-DESCUENTO-RECALC (Kevin 2026-08-12 post-reunion B1):
+    ademas de cambiar el estado a 'aprobado', recalcula el `total_a_pagar`
+    del Enrollment activo del estudiante aplicando el descuento SOLO a:
+    - Modulos no pagados (los ya pagados conservan su costo original)
+    - Monto restante despues de la matricula (la matricula ya se cobro
+      al aprobar la pre-inscripcion, no se toca)
+
+    Asi, si el estudiante ya pago la matricula de 200 Bs y le aprueban
+    un descuento del 50% sobre los 3000 Bs de colegiatura, su nuevo
+    `total_a_pagar` = 200 + 1500 = 1700 Bs (en lugar de 200 + 3000 = 3200).
     """
+    from models.enrollment import Enrollment
+    from models.enums import EstadoInscripcion
+
     student = await Student.get(student_id)
     if not student:
         raise ValueError("Estudiante no encontrado.")
@@ -592,6 +618,56 @@ async def aprobar_descuento_vicerrectorado(student_id: PydanticObjectId) -> Stud
     student.descuento_vicerrectorado_estado = "aprobado"
     student.descuento_vicerrectorado_motivo_rechazo = None
     await student.save()
+
+    # F-2026-08-12-DESCUENTO-RECALC: recalcular total_a_pagar del Enrollment
+    # activo (si existe) aplicando el descuento. Si no hay enrollment todavia
+    # (caso raro donde se aprobo descuento antes de aprobar submission), no
+    # hay nada que recalcular: cuando se apruebe la submission, el Enrollment
+    # se creara con el descuento aplicado via el campo descuento_curso.
+    descuento_pct = float(student.descuento_vicerrectorado_monto or 0.0)
+    if descuento_pct <= 0:
+        return student
+
+    enrollment = await Enrollment.find_one(
+        Enrollment.estudiante_id == student_id,
+        Enrollment.estado != EstadoInscripcion.CANCELADO,
+    )
+    if not enrollment:
+        return student
+
+    # Aplicar el descuento SOLO a los modulos no pagados.
+    # La matricula NO se modifica (ya fue cobrada al aprobar la submission).
+    ahorro_total = 0.0
+    for mod in (enrollment.modulos or []):
+        if mod.estado == "Pagado":
+            continue
+        costo_original = float(mod.costo or 0.0)
+        if costo_original <= 0:
+            continue
+        descuento_aplicado = round(costo_original * descuento_pct, 2)
+        # El costo del modulo es lo que el estudiante DEBE pagar (no el original).
+        # Actualizar `costo` baja el monto pendiente; mantener `costo_original`
+        # para auditoria (campo nuevo si se quiere agregar en el futuro).
+        mod.costo = round(costo_original - descuento_aplicado, 2)
+        ahorro_total += descuento_aplicado
+
+    # Recalcular total_a_pagar: matricula + modulos (con descuento aplicado)
+    # NO tocar total_pagado (lo ya pagado se respeta).
+    if ahorro_total > 0:
+        total_modulos_nuevo = sum(float(m.costo or 0.0) for m in (enrollment.modulos or []))
+        costo_matricula = float(getattr(enrollment, "costo_matricula", 0) or 0)
+        enrollment.total_a_pagar = round(costo_matricula + total_modulos_nuevo, 2)
+        # saldo_pendiente se mantiene derivado (Pydantic validator lo calcula)
+        enrollment.saldo_pendiente = max(
+            0.0, enrollment.total_a_pagar - float(enrollment.total_pagado or 0)
+        )
+        # Anotar el descuento aplicado en el snapshot del enrollment para
+        # que sea visible en listados y reportes. Usamos descuento_personalizado
+        # (que ya existe) para representar el % del vicerrectorado.
+        from models.enrollment import Enrollment as _E
+        enrollment.descuento_personalizado = descuento_pct * 100
+        await enrollment.save()
+
     return student
 
 
@@ -630,13 +706,74 @@ async def rechazar_descuento_vicerrectorado(
 # Métricas (para badges y dashboard)
 # ============================================================================
 
-async def get_forms_counters() -> dict:
-    """Conteos globales (para badges en sidebar)."""
-    forms_total = await PreRegistrationForm.find().count()
-    forms_activos = await PreRegistrationForm.find(PreRegistrationForm.estado == "activo").count()
-    subs_pendientes = await PreRegistration.find(PreRegistration.estado == "pendiente").count()
+async def get_forms_counters(current_user: User) -> dict:
+    """Conteos globales (para badges en sidebar).
+
+    F-2026-08-11-EC-FIX-COUNTERS-403: encargado_curso y coordinador ven
+    solo counts de SUS cursos asignados. Antes este service no recibia
+    el user y retornaba el total global (lo que hacia parecer a un EC
+    que tenia 0 submissions cuando en realidad tenia 5 en su curso).
+
+    F-2026-08-12-DESCUENTOS-TAB (Kevin 2026-08-12): nuevo campo
+    `descuentos_pendientes` = submissions con descuento propuesto > 0
+    que aun NO fueron migradas a Student o que fueron migradas pero el
+    descuento sigue en estado 'pendiente'. Usado para el badge de la
+    pestana "Descuentos".
+    """
+    # F-2026-08-11-EC-FIX-COUNTERS-403: set de form_ids visibles
+    form_query: dict = {}
+    if current_user.rol == UserRole.CPD:
+        form_query = {"programa_id": None}
+    elif current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
+        cursos = current_user.cursos_asignados or []
+        if not cursos:
+            return {
+                "forms_total": 0,
+                "forms_activos": 0,
+                "submissions_pendientes": 0,
+                "descuentos_pendientes": 0,
+            }
+        form_query = {"programa_id": {"$in": cursos}}
+    elif current_user.rol not in (UserRole.SUPERADMIN, UserRole.ADMIN):
+        return {
+            "forms_total": 0,
+            "forms_activos": 0,
+            "submissions_pendientes": 0,
+            "descuentos_pendientes": 0,
+        }
+
+    forms_total = await PreRegistrationForm.find(form_query).count()
+    forms_activos = await PreRegistrationForm.find(
+        form_query, PreRegistrationForm.estado == "activo"
+    ).count()
+
+    form_ids = [f.id for f in await PreRegistrationForm.find(form_query).to_list()]
+    if not form_ids:
+        return {
+            "forms_total": forms_total,
+            "forms_activos": forms_activos,
+            "submissions_pendientes": 0,
+            "descuentos_pendientes": 0,
+        }
+
+    # Submissions pendientes (estado=submission)
+    subs_pendientes = await PreRegistration.find(
+        PreRegistration.form_id.in_(form_ids),  # type: ignore
+        PreRegistration.estado == "pendiente",
+    ).count()
+
+    # F-2026-08-12-DESCUENTOS-TAB: submissions con descuento propuesto > 0
+    # que aun requieren accion del EC (estado 'pendiente' o 'aprobado').
+    # Excluimos las rechazadas (ya fueron revisadas).
+    descuentos_pendientes = await PreRegistration.find(
+        PreRegistration.form_id.in_(form_ids),  # type: ignore
+        PreRegistration.estado.in_(["pendiente", "aprobado"]),  # type: ignore
+        {"data.descuento_porcentaje": {"$gt": 0}},
+    ).count()
+
     return {
         "forms_total": forms_total,
         "forms_activos": forms_activos,
         "submissions_pendientes": subs_pendientes,
+        "descuentos_pendientes": descuentos_pendientes,
     }
