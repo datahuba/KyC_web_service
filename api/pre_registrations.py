@@ -8,8 +8,9 @@ crearles un Student + User con la convención 'Uagrm.<CI>'.
 
 Endpoints:
   PÚBLICOS (sin auth):
-    GET  /pre-registrations/public/{slug}    -> ver form por slug
-    POST /pre-registrations/public/{slug}    -> enviar submission
+    GET  /pre-registrations/public/{slug}                -> ver form por slug
+    POST /pre-registrations/public/{slug}                -> enviar submission
+    POST /pre-registrations/public/{slug}/upload-carta   -> subir carta firmada (F-2026-08-11-CAMPOS-EC-MODALIDAD)
 
   ADMIN (auth requerida):
     GET  /pre-registrations/forms            -> listar forms visibles (superadmin, admin, cpd, encargado, coord)
@@ -27,7 +28,7 @@ Endpoints:
 
 import math
 from typing import Any, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from beanie import PydanticObjectId
 
 from models.user import User
@@ -44,6 +45,7 @@ from schemas.pre_registration import (
 )
 from schemas.common import PaginatedResponse, PaginationMeta
 from services import pre_registration_service
+from core.cloudinary_utils import upload_document
 from api.dependencies import require_superadmin, require_cpd, require_encargado_curso
 
 router = APIRouter()
@@ -80,6 +82,58 @@ async def submit_public_form(slug: str, data: PreRegistrationSubmit) -> Any:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return await _enrich_submission(sub)
+
+
+# F-2026-08-11-CAMPOS-EC-MODALIDAD: endpoint público para subir la carta
+# firmada por el director desde el wizard de preinscripción. Reusa Cloudinary
+# (ya configurado en el sistema) en lugar de guardar archivos en disco local,
+# porque (a) el sistema ya tiene Cloudinary operativo, (b) la URL resultante
+# es https pública y se puede servir directamente, (c) el contenedor se puede
+# reiniciar sin perder los archivos.
+#
+# Tipos permitidos: PDF, JPG, PNG. Tamaño max: 20MB (mismo limite que
+# upload_document de cloudinary_utils). El endpoint es público (sin auth)
+# porque el visitante del wizard no está logueado.
+@router.post(
+    "/public/{slug}/upload-carta",
+    summary="Subir carta firmada por el director (público, sin auth)"
+)
+async def upload_carta_firmada(slug: str, file: UploadFile = File(...)) -> Any:
+    """
+    Sube la carta firmada (PDF/JPG/PNG, max 20MB) a Cloudinary y devuelve
+    la URL publica que el frontend guarda en `cartaFirmadaUrl`.
+
+    Valida que el slug exista y el formulario este abierto (no requiere auth).
+    """
+    # Validar que el form exista y este abierto (reusa la misma validacion
+    # que submit_public_form)
+    try:
+        await pre_registration_service.get_public_form_by_slug(slug)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Subir a Cloudinary en folder dedicado. Reusa la funcion generica
+    # upload_document que ya valida tipo y tamaño (max 20MB).
+    try:
+        result = await upload_document(
+            file=file,
+            folder=f"pre-registrations/cartas-firmadas/{slug}",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al subir la carta firmada: {str(e)}",
+        )
+
+    return {
+        "url": result["url"],
+        "public_id": result["public_id"],
+        "resource_type": result["resource_type"],
+        "mime_type": result["mime_type"],
+        "size_bytes": result["size_bytes"],
+    }
 
 
 # ============================================================================

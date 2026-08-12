@@ -148,7 +148,77 @@ def test_pr_page_svelte_tiene_3_inputs_nuevos():
     page = (REPO_FRONTEND / "src" / "routes" / "pre-registro" / "[slug]" / "+page.svelte").read_text(encoding="utf-8")
     assert 'id="pr-procedencia"' in page, "Input de procedencia debe existir"
     assert 'id="pr-modalidad"' in page, "Input de modalidad debe existir"
-    assert 'id="pr-carta"' in page, "Input de carta firmada debe existir"
+    assert 'id="pr-carta"' in page, "Input de carta firmada debe existir (file upload)"
+
+def test_pr_page_svelte_carta_es_file_upload_no_url():
+    """F-2026-08-11-CAMPOS-EC-MODALIDAD-FILE (Kevin 22:17): la carta es file upload,
+    no un input type='url' (UX mejor: el visitante elige el archivo de su maquina)."""
+    page = (REPO_FRONTEND / "src" / "routes" / "pre-registro" / "[slug]" / "+page.svelte").read_text(encoding="utf-8")
+    # Usamos regex para tolerar variaciones en la cantidad de tabs
+    import re
+    m = re.search(r'<input[^>]*id="pr-carta"[^>]*type="(\w+)"', page)
+    assert m is not None, (
+        "El input pr-carta debe existir (F-2026-08-11-CAMPOS-EC-MODALIDAD-FILE)"
+    )
+    input_type = m.group(1)
+    assert input_type == "file", (
+        f"El input pr-carta debe ser type='file' (file upload directo a Cloudinary), "
+        f"no type='{input_type}' (que obligaba al usuario a subir el archivo a Drive y pegar un link)."
+    )
+    # Acepta PDF, JPG, PNG
+    assert 'accept=".pdf,.jpg,.jpeg,.png' in page, (
+        "El input file debe aceptar PDF, JPG y PNG"
+    )
+
+def test_pr_page_svelte_tiene_handler_upload_y_remove():
+    """Handlers para subir y quitar el archivo de carta."""
+    page = (REPO_FRONTEND / "src" / "routes" / "pre-registro" / "[slug]" / "+page.svelte").read_text(encoding="utf-8")
+    assert "function handleCartaSelected" in page, (
+        "Debe existir funcion handleCartaSelected que sube el archivo a Cloudinary"
+    )
+    assert "function removeCarta" in page, (
+        "Debe existir funcion removeCarta que limpia el state"
+    )
+    assert "uploadCartaFirmada" in page, (
+        "El wizard debe importar y usar uploadCartaFirmada del servicio"
+    )
+
+def test_api_pre_registrations_tiene_endpoint_upload_carta():
+    """F-2026-08-11-CAMPOS-EC-MODALIDAD-FILE: el backend expone el endpoint
+    POST /pre-registrations/public/{slug}/upload-carta."""
+    api_py = (REPO_BACKEND / "api" / "pre_registrations.py").read_text(encoding="utf-8")
+    assert "/public/{slug}/upload-carta" in api_py, (
+        "El router debe tener el endpoint /public/{slug}/upload-carta"
+    )
+    assert "upload_carta_firmada" in api_py, (
+        "La funcion del endpoint debe llamarse upload_carta_firmada"
+    )
+    assert "upload_document" in api_py, (
+        "El endpoint debe reusar upload_document de cloudinary_utils (no reinventar la rueda)"
+    )
+
+def test_apiKyC_config_tiene_postFormData():
+    """F-2026-08-11-CAMPOS-EC-MODALIDAD-FILE: apiKyC.config.ts expone
+    postFormData para multipart upload."""
+    cfg = (REPO_FRONTEND / "src" / "lib" / "config" / "apiKyC.config.ts").read_text(encoding="utf-8")
+    assert "async postFormData" in cfg, (
+        "apiKyC debe tener un metodo postFormData para multipart (lo usa uploadCartaFirmada)"
+    )
+    # NO debe setear Content-Type a mano (el browser lo hace)
+    assert "delete headersObj['Content-Type']" in cfg or 'delete headersObj["Content-Type"]' in cfg, (
+        "postFormData debe eliminar Content-Type para que el browser ponga el boundary"
+    )
+
+def test_pr_service_ts_tiene_uploadCartaFirmada():
+    """F-2026-08-11-CAMPOS-EC-MODALIDAD-FILE: pre-registration.service.ts
+    expone uploadCartaFirmada que usa postFormData."""
+    svc = (REPO_FRONTEND / "src" / "lib" / "services" / "pre-registration.service.ts").read_text(encoding="utf-8")
+    assert "export async function uploadCartaFirmada" in svc, (
+        "pre-registration.service.ts debe exportar uploadCartaFirmada"
+    )
+    assert "postFormData" in svc, (
+        "uploadCartaFirmada debe usar apiKyC.postFormData (no fetch manual)"
+    )
 
 def test_pr_page_svelte_select_procedencia_tiene_9_departamentos():
     """El select de procedencia tiene los 9 departamentos de Bolivia."""

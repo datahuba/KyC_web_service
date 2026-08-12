@@ -1,0 +1,18 @@
+F-DASHBOARD-COURSE-BREAKDOWN-PENDIENTE-PAGO: incluir pendiente_pago
+
+PROBLEMA (2026-08-10, Kevin):
+La vista "Desglose por Programa > courseBreakdown" mostraba
+POR COBRAR distinto al de la vista "Gestion de Pagos > Matriz"
+para el mismo curso.
+
+Ejemplo MAE-GPETDOJ-2026 (82 becados 50%):
+- Vista Matriz: Bs 836,400 (82 estudiantes, suma saldo_pendiente)
+- courseBreakdown: Bs 652,800 (64 con estado='activo', excluye los 18 pendiente_pago)
+- Diferencia: 18 x Bs 10,200 = Bs 183,600
+
+FIX:
+- _build_course_breakdown_from_memory ahora incluye 'pendiente_pago'
+  ademas de 'activo'. Excluye solo SUSPENDIDO, COMPLETADO, CANCELADO,
+  RETIRADO (mismo criterio que la vista Matriz).
+- Esto alinea con la formula de Por Cobrar = (costo - pagos) de TODOS los
+  inscritos que aun pueden pagar (US-004 v3, 2026-08-04).

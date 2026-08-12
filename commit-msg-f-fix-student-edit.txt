@@ -1,0 +1,34 @@
+F-FIX-STUDENT-EDIT-PERMISSIONS: encargado_curso y coordinador pueden editar estudiantes
+
+Antes: el endpoint PUT /students/{id} usaba `require_cpd`, que solo permitia
+los roles CPD, ADMIN y SUPERADMIN. Pero el frontend permitia abrir el
+StudentForm en modo edicion a `encargado_curso` y `coordinador` sin chequear
+el permiso real, asi que Lisa y otros recibian 403 al guardar cambios en
+datos personales de estudiantes (cumpleanos, celular, domicilio, etc.).
+
+Este es el patron "anti-defense in depth": el frontend lo dejaba entrar y
+el backend lo rechazaba tarde -- el usuario perdia tiempo llenando el form.
+
+Fix en 3 capas (lo mejor de lo mejor):
+  1. BACKEND: api/students.py - cambiar `require_cpd` por
+     `require_encargado_curso` en update_student_admin. El helper
+     require_encargado_curso ya permite los 5 roles: ENCARGADO_CURSO,
+     COORDINADOR, CPD, ADMIN, SUPERADMIN.
+  2. FRONTEND: routes/app/students/+page.svelte - alinear `canEditStudent`
+     con `canCreateStudent` y `canEnrollStudent` (incluir encargado_curso
+     y coordinador). Tambien agregar check en `handleEdit()` para no abrir
+     el form si el usuario no tiene permiso (defense in depth).
+  3. TESTS: tests/test_student_update_permissions.py - 11 tests que
+     verifican las 3 capas (backend endpoint, helper roles, frontend
+     canEditStudent, handleEdit validation, regresion update_student_self).
+
+Roles que ahora PUEDEN editar estudiantes:
+  SUPERADMIN, ADMIN, CPD, COORDINADOR, ENCARGADO_CURSO
+
+Roles que NO pueden editar (intactos):
+  DOCENTE, COBRANZA, ESTUDIANTE (este usa /me)
+
+Reportado por: Lisa (encargado_curso) - "errores en los perfiles de
+estudiantes con su edicion de datos como cumpleanos y otros"
+
+Refs: F-REUNION-EDUCACION-CONTINUA-UAGRM (2026-08-11)
