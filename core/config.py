@@ -102,6 +102,18 @@ class Settings(BaseSettings):
     DASHBOARD_PRECOMPUTE_ENABLED: bool = Field(default=True, env="DASHBOARD_PRECOMPUTE_ENABLED")
     DASHBOARD_PRECOMPUTE_INTERVAL_SECONDS: int = Field(default=240, env="DASHBOARD_PRECOMPUTE_INTERVAL_SECONDS")
 
+    # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12, reunion UAGRM):
+    # Precios default de matricula para educacion continua.
+    # - MATRICULA_PRIMER_CARRERA_DEFAULT: si el estudiante es PRIMERA CARRERA
+    #   en la UAGRM (es_primer_carrera=True), paga este monto.
+    # - MATRICULA_PROFESIONAL_DEFAULT: si ya tiene titulo profesional
+    #   (es_primer_carrera=False), paga este monto.
+    # Un Course puede overridear estos defaults con `matricula_primer_carrera`
+    # y `matricula_profesional` propios. Si el Course no los define, se usan
+    # estos defaults globales.
+    MATRICULA_PRIMER_CARRERA_DEFAULT: float = Field(default=200.0, env="MATRICULA_PRIMER_CARRERA_DEFAULT")
+    MATRICULA_PROFESIONAL_DEFAULT: float = Field(default=500.0, env="MATRICULA_PROFESIONAL_DEFAULT")
+
     model_config = {
         "env_file": ".env",
         "case_sensitive": True

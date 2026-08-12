@@ -21,6 +21,7 @@ from beanie import PydanticObjectId
 from beanie.operators import In, Or
 from beanie.exceptions import RevisionIdWasChanged
 from services import enrollment_service
+from services.matricula_helper import get_matricula_for_student
 from core.timezone_utils import utcnow_naive, to_bolivia_time
 
 # ISSUE-P-REVERSION: ventana en la que el banco puede revertir una transferencia ya aprobada
@@ -2111,7 +2112,7 @@ async def get_matriz_deudores(
                 "nombre": curso.nombre_programa,
                 "codigo": curso.codigo,
                 "modulos": [m.nombre for m in (curso.modulos or [])],
-                "matricula_monto": float(curso.matricula_interno or 0.0),
+                "matricula_monto": get_matricula_for_student(curso),  # F-2026-08-12-DESCUENTO-BECA: usa default (primer carrera, mas seguro)
             },
             "estudiantes": [],
             "resumen": {
@@ -2142,7 +2143,7 @@ async def get_matriz_deudores(
         "nombre": curso.nombre_programa,
         "codigo": curso.codigo,
         "modulos": [m.nombre for m in (curso.modulos or [])],
-        "matricula_monto": float(curso.matricula_interno or 0.0),
+        "matricula_monto": get_matricula_for_student(curso),  # F-2026-08-12-DESCUENTO-BECA: usa default (primer carrera, mas seguro)
     }
 
     estudiantes_out: list = []
@@ -3028,9 +3029,12 @@ async def generar_lista_habilitados(
             "beca_porcentaje": round(beca_pct, 1) if beca_tiene else 0.0,
         }
 
-    def _costo_modulo(i):
+    def _costo_modulo(i, est=None):
+        # F-2026-08-12-DESCUENTO-BECA: si es la matricula (i=0), el costo
+        # depende del tipo de estudiante (primer carrera vs profesional).
+        # Si est es None, asume primer carrera (mas seguro, cobra menos).
         if i == 0:
-            return float(curso.matricula_interno or 0)
+            return get_matricula_for_student(curso, est)
         return float(curso.modulos[i - 1].costo or 0)
 
     for enr in enrollments:
@@ -3069,7 +3073,7 @@ async def generar_lista_habilitados(
             for i, mod in enumerate(curso.modulos or [], start=1):
                 mod_estado = enr.modulos[i - 1] if i - 1 < len(enr.modulos) else None
                 monto_pagado_mod = float(mod_estado.monto_pagado) if mod_estado else 0.0
-                costo_total = _costo_modulo(i)
+                costo_total = _costo_modulo(i, est=estudiante)
 
                 # Docente del módulo (lookup en map, sin query)
                 docente_mod_nombre = ""
@@ -3091,11 +3095,11 @@ async def generar_lista_habilitados(
                 # Matrícula: sumar pagos con concepto "Matrícula" (del map)
                 pagos_mat = pagos_por_enrollment_mat.get(enr.id, [])
                 monto_pagado = sum(p.cantidad_pago for p in pagos_mat)
-                costo_total = _costo_modulo(0)
+                costo_total = _costo_modulo(0, est=estudiante)
             else:
                 mod_estado = enr.modulos[modulo_index - 1] if modulo_index - 1 < len(enr.modulos) else None
                 monto_pagado = float(mod_estado.monto_pagado) if mod_estado else 0.0
-                costo_total = _costo_modulo(modulo_index)
+                costo_total = _costo_modulo(modulo_index, est=estudiante)
 
             mod_nombre = ""
             if modulo_index <= len(curso.modulos or []):

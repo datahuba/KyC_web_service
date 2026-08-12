@@ -114,7 +114,12 @@ async def create_enrollment(
     
     # 4. Obtener precios del curso (precio único)
     costo_total = course.get_costo_total()
-    costo_matricula = course.get_matricula()
+    # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12, reunion UAGRM):
+    # la matricula depende del tipo de estudiante (primer carrera vs
+    # profesional con titulo). El override del curso o el default global
+    # (200/500) se calcula en services/matricula_helper.py.
+    from services.matricula_helper import get_matricula_for_student
+    costo_matricula = get_matricula_for_student(course, student)
 
     # F-HISTORICO-IMPORT (2026-08-03, Kevin): los programas historicos pueden
     # tener cantidad_cuotas=0 (no se exige en historicos). Enrollment requiere

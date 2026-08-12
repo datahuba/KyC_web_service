@@ -129,6 +129,27 @@ class PreRegistrationSubmit(BaseModel):
     # para que el programa tenga su resolucion persistida.
     resolucion_url: Optional[str] = Field(None, max_length=500, description="URL de la resolucion del programa (PDF que emite la UAGRM). OPCIONAL — el estudiante puede incluirla si ya la tiene, sino el admin la sube despues.")
 
+    # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12, reunion UAGRM):
+    # Pregunta binaria que determina el precio de matricula.
+    # - es_primer_carrera=True: cobra matricula_primer_carrera (default 200)
+    # - es_primer_carrera=False: cobra matricula_profesional (default 500)
+    #   Y debe subir foto del titulo profesional (titulo_profesional_url).
+    # Default True por seguridad: si el visitante no contesta, cobra menos.
+    es_primer_carrera: bool = Field(
+        default=True,
+        description="F-2026-08-12-DESCUENTO-BECA: ¿Es tu primera carrera en la UAGRM? "
+                    "True=si (cobra matricula primer carrera, default 200 Bs). "
+                    "False=no, ya tengo titulo profesional (cobra matricula profesional, default 500 Bs, "
+                    "y titulo_profesional_url pasa a ser obligatorio). "
+                    "Default True por seguridad."
+    )
+    titulo_profesional_url: Optional[str] = Field(
+        None, max_length=500,
+        description="F-2026-08-12-DESCUENTO-BECA: URL de la foto del titulo profesional "
+                    "(PDF/JPG/PNG en Cloudinary). REQUERIDA si es_primer_carrera=False. "
+                    "El encargado EC valida este documento al aprobar la pre-inscripcion."
+    )
+
     @field_validator("modalidad")
     @classmethod
     def modalidad_valida(cls, v):
@@ -161,6 +182,20 @@ class PreRegistrationSubmit(BaseModel):
         if requiere_carta and not (v and str(v).strip()):
             raise ValueError(
                 "La carta firmada por el director es obligatoria para estudiantes de provincia (procedencia != SCZ) o modalidad virtual."
+            )
+        return v
+
+    @field_validator("titulo_profesional_url")
+    @classmethod
+    def titulo_requerido_si_no_primer_carrera(cls, v, info):
+        # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12): si el estudiante NO
+        # es primer carrera (ya tiene titulo profesional), la foto del titulo
+        # es OBLIGATORIA. El encargado EC lo valida en el panel al aprobar.
+        es_primer_carrera = info.data.get("es_primer_carrera", True)
+        if es_primer_carrera is False and not (v and str(v).strip()):
+            raise ValueError(
+                "Si ya tienes título profesional, debes subir una foto o escaneo del título. "
+                "El encargado de educación continua lo validará antes de aprobar tu pre-inscripción."
             )
         return v
 

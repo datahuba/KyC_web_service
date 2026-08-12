@@ -225,6 +225,51 @@ class Student(MongoBaseModel):
         None, max_length=500,
         description="URL de la resolucion del programa (PDF que emite la UAGRM). OPCIONAL.",
     )
+
+    # ========================================================================
+    # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12, reunion UAGRM):
+    # Discriminacion PRIMERA CARRERA vs PROFESIONAL CON TITULO.
+    # - es_primer_carrera=True: el estudiante NO tiene titulo profesional
+    #   previo, esta cursando su primera carrera en la UAGRM. Cobra
+    #   matricula_primer_carrera (default global 200 Bs).
+    # - es_primer_carrera=False: ya tiene titulo profesional, viene por
+    #   posgrado/segunda carrera. Cobra matricula_profesional (default
+    #   global 500 Bs).
+    # Default True (primer carrera) por seguridad: si el dato no esta
+    # claro, cobra menos, nunca mas.
+    # El descuento_porcentaje (de EC, si lo trae) sigue aplicando SOLO
+    # a modulos, NUNCA a matricula (regla F-074-FIX-4 Kevin 2026-07-23).
+    # Un primer carrera PUEDE tener descuento en modulos (Kevin 2026-08-12).
+    # ========================================================================
+    es_primer_carrera: bool = Field(
+        default=True,
+        description="F-2026-08-12-DESCUENTO-BECA: True si es primera carrera en la UAGRM "
+                    "(sin titulo profesional previo, cobra matricula primer carrera). "
+                    "False si ya tiene titulo profesional (cobra matricula profesional). "
+                    "Default True por seguridad: si no se sabe, cobra menos."
+    )
+
+    # F-2026-08-12-DESCUENTO-BECA: si el estudiante NO es primer carrera,
+    # debe subir una foto del titulo profesional. El encargado EC valida
+    # ese titulo desde el panel de pre-registros (modal de detalle).
+    # Estado: 'pendiente' | 'verificado' | 'rechazado'.
+    titulo_profesional_url: Optional[str] = Field(
+        None, max_length=500,
+        description="F-2026-08-12-DESCUENTO-BECA: URL de la foto del titulo profesional "
+                    "(PDF/JPG/PNG en Cloudinary). Requerida si es_primer_carrera=False. "
+                    "El encargado EC valida este documento al aprobar la pre-inscripcion."
+    )
+    titulo_profesional_estado: str = Field(
+        default="pendiente",
+        description="F-2026-08-12-DESCUENTO-BECA: estado de validacion del titulo profesional. "
+                    "'pendiente' (recien subido, sin revisar), 'verificado' (encargado EC confirmo), "
+                    "'rechazado' (encargado EC lo rechazo). Default 'pendiente'."
+    )
+    titulo_profesional_motivo_rechazo: Optional[str] = Field(
+        None, max_length=500,
+        description="F-2026-08-12-DESCUENTO-BECA: motivo del rechazo si el encargado EC determino "
+                    "que el titulo no es valido. Null si fue verificado o sigue pendiente."
+    )
     
     class Settings:
         name = "students"

@@ -121,6 +121,31 @@ class StudentCreate(BaseModel):
     # (tambien el admin puede subirla despues via /app/courses).
     resolucion_url: Optional[str] = Field(None, max_length=500)
 
+    # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12, reunion UAGRM):
+    # Discriminacion primera carrera vs profesional con titulo.
+    # es_primer_carrera=True: cobra matricula primer carrera (default 200).
+    # es_primer_carrera=False: cobra matricula profesional (default 500) Y
+    # titulo_profesional_url es OBLIGATORIA (validado por el encargado EC).
+    es_primer_carrera: bool = Field(
+        default=True,
+        description="F-2026-08-12-DESCUENTO-BECA: True=primera carrera (cobra menos matricula), "
+                    "False=ya tiene titulo profesional (cobra mas matricula)."
+    )
+    titulo_profesional_url: Optional[str] = Field(
+        None, max_length=500,
+        description="F-2026-08-12-DESCUENTO-BECA: URL de la foto del titulo profesional "
+                    "(PDF/JPG/PNG en Cloudinary). Requerida si es_primer_carrera=False."
+    )
+    titulo_profesional_estado: str = Field(
+        default="pendiente",
+        description="F-2026-08-12-DESCUENTO-BECA: 'pendiente'|'verificado'|'rechazado'. "
+                    "Lo setea el encargado EC al revisar el documento."
+    )
+    titulo_profesional_motivo_rechazo: Optional[str] = Field(
+        None, max_length=500,
+        description="F-2026-08-12-DESCUENTO-BECA: motivo si el encargado EC rechazo el titulo."
+    )
+
     @field_validator('sexo', 'estado_civil', 'tipo_sangre', mode='before')
     @classmethod
     def _empty_enum_a_none(cls, v):
@@ -252,6 +277,13 @@ class StudentResponse(BaseModel):
     # F-2026-08-11-CAMPOS-EC-RESOLUCION
     resolucion_url: Optional[str] = None
 
+    # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12): discriminacion
+    # primera carrera vs profesional con titulo.
+    es_primer_carrera: bool = True
+    titulo_profesional_url: Optional[str] = None
+    titulo_profesional_estado: str = "pendiente"
+    titulo_profesional_motivo_rechazo: Optional[str] = None
+
     # Estado y Metadata
     activo: bool
     lista_cursos_ids: List[PyObjectId] = []
@@ -382,6 +414,19 @@ class StudentUpdateAdmin(BaseModel):
     carta_firmada_url: Optional[str] = Field(None, max_length=500)
     # F-2026-08-11-CAMPOS-EC-RESOLUCION
     resolucion_url: Optional[str] = Field(None, max_length=500)
+    # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12)
+    es_primer_carrera: Optional[bool] = Field(
+        default=None,
+        description="F-2026-08-12-DESCUENTO-BECA: True=primera carrera, False=profesional con titulo. "
+                    "Si no se envia, se conserva el valor actual del Student."
+    )
+    titulo_profesional_url: Optional[str] = Field(None, max_length=500)
+    titulo_profesional_estado: Optional[str] = Field(
+        default=None,
+        description="F-2026-08-12-DESCUENTO-BECA: 'pendiente'|'verificado'|'rechazado'. "
+                    "Si no se envia, se conserva el valor actual."
+    )
+    titulo_profesional_motivo_rechazo: Optional[str] = Field(None, max_length=500)
 
     @field_validator('sexo', 'estado_civil', 'tipo_sangre', mode='before')
     @classmethod

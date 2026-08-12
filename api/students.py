@@ -612,7 +612,61 @@ async def rechazar_documento_estudiante(
     elif tipo == "afiliacion":
         student.afiliacion_estado = "rechazado"
         student.afiliacion_motivo_rechazo = motivo
-        
+
+    await student.save()
+    return student
+
+
+# ============================================================================
+# F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12, reunion UAGRM):
+# Validacion del titulo profesional subido por el estudiante al
+# pre-registrarse. Lo hace el encargado de educacion continua desde
+# el modal de detalle de la submission en /app/pre-registros.
+#
+# Estados posibles:
+#   'pendiente'  → recien subido, sin revisar (default al aprobar submission)
+#   'verificado' → encargado EC confirmo que el titulo es valido
+#   'rechazado'  → encargado EC rechazo el titulo (motivo obligatorio)
+# ============================================================================
+@router.put("/{id}/titulo/validar", response_model=StudentResponse)
+async def validar_titulo_profesional(
+    id: PydanticObjectId,
+    aprobado: bool = Form(...),
+    motivo: Optional[str] = Form(None),
+    current_user: User = Depends(require_encargado_curso)
+) -> Any:
+    """
+    F-2026-08-12-DESCUENTO-BECA: el encargado de educacion continua valida
+    (o rechaza) el titulo profesional que subio el estudiante. Si rechaza,
+    el `motivo` es obligatorio para que el estudiante sepa que falta.
+
+    Restriccion: solo se puede validar si el estudiante subio el titulo
+    (titulo_profesional_url no nulo). Si no subio nada, 400.
+    """
+    student = await student_service.get_student(id=id)
+    if not student:
+        raise HTTPException(status_code=404, detail="Estudiante no encontrado")
+
+    if not student.titulo_profesional_url:
+        raise HTTPException(
+            status_code=400,
+            detail="No se puede validar el título: el estudiante no ha subido el archivo. "
+                   "Pídele que primero suba su título profesional y luego vuelve a validar."
+        )
+
+    if aprobado:
+        student.titulo_profesional_estado = "verificado"
+        student.titulo_profesional_motivo_rechazo = None
+    else:
+        motivo_clean = (motivo or "").strip()
+        if len(motivo_clean) < 3:
+            raise HTTPException(
+                status_code=400,
+                detail="Para rechazar el título debes indicar un motivo de al menos 3 caracteres."
+            )
+        student.titulo_profesional_estado = "rechazado"
+        student.titulo_profesional_motivo_rechazo = motivo_clean
+
     await student.save()
     return student
 

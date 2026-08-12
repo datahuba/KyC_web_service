@@ -187,6 +187,55 @@ async def upload_resolucion(slug: str, file: UploadFile = File(...)) -> Any:
     }
 
 
+# F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12, reunion UAGRM):
+# el estudiante que NO es primera carrera debe subir una foto o escaneo
+# del titulo profesional. El encargado de educacion continua lo valida
+# desde el modal de detalle de la submission.
+#
+# Misma mecanica que upload-carta y upload-resolucion-beca: valida que el
+# form exista y este abierto, sube a Cloudinary (folder dedicado), devuelve
+# la URL publica que el frontend guarda en `tituloProfesionalUrl`.
+@router.post(
+    "/public/{slug}/upload-titulo",
+    summary="Subir foto del titulo profesional (publico, sin auth, requerido si NO es primer carrera)"
+)
+async def upload_titulo_profesional(slug: str, file: UploadFile = File(...)) -> Any:
+    """
+    Sube la foto del titulo profesional (PDF/JPG/PNG, max 20MB) a Cloudinary
+    y devuelve la URL publica que el frontend guarda en `tituloProfesionalUrl`.
+
+    Valida que el slug exista y el formulario este abierto (no requiere auth).
+    El estudiante solo la sube si respondio que NO es primera carrera en la
+    UAGRM (es_primer_carrera=False). El encargado de educacion continua
+    valida el documento desde el modal de detalle de la submission.
+    """
+    try:
+        await pre_registration_service.get_public_form_by_slug(slug)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        result = await upload_document(
+            file=file,
+            folder=f"pre-registrations/titulos-profesionales/{slug}",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al subir el titulo profesional: {str(e)}",
+        )
+
+    return {
+        "url": result["url"],
+        "public_id": result["public_id"],
+        "resource_type": result["resource_type"],
+        "mime_type": result["mime_type"],
+        "size_bytes": result["size_bytes"],
+    }
+
+
 # ============================================================================
 # ADMIN (auth) — prefijo /pre-registrations/forms y /pre-registrations/submissions
 # ============================================================================

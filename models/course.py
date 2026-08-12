@@ -131,6 +131,26 @@ class Course(MongoBaseModel):
                     "En programas historicos (es_historico=True) puede ser 0 (no se exige)."
     )
 
+    # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12, reunion UAGRM):
+    # Matriculas DIFERENCIADAS por tipo de estudiante (educacion continua).
+    # Si ambos son None, se usan los defaults globales del sistema
+    # (MATRICULA_PRIMER_CARRERA_DEFAULT=200, MATRICULA_PROFESIONAL_DEFAULT=500).
+    # Si el Course define estos campos, son el override para ESTE curso.
+    # Ver `get_matricula_for_student()` en services/payment_service.py para
+    # la regla hibrida (default global + override por curso).
+    matricula_primer_carrera: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="F-2026-08-12-DESCUENTO-BECA: override de matricula para estudiantes de PRIMERA CARRERA en la UAGRM. "
+                    "Si None, usa settings.MATRICULA_PRIMER_CARRERA_DEFAULT (200 Bs por default)."
+    )
+    matricula_profesional: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="F-2026-08-12-DESCUENTO-BECA: override de matricula para estudiantes que YA TIENEN TITULO PROFESIONAL. "
+                    "Si None, usa settings.MATRICULA_PROFESIONAL_DEFAULT (500 Bs por default)."
+    )
+
     # ========================================================================
     # CARGO ADICIONAL (opcional): gastos complementarios al programa
     # ========================================================================

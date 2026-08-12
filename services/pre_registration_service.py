@@ -264,6 +264,12 @@ async def submit_public_form(slug: str, data: PreRegistrationSubmit) -> PreRegis
         # programa es OPCIONAL pero se persiste aca para que el admin la vea
         # al aprobar y la copie a Course.resolucion_pdf_url.
         "resolucion_url": (data.resolucion_url or "").strip() or None,
+        # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12): discriminacion
+        # primera carrera vs profesional con titulo. es_primer_carrera default
+        # True (mas seguro, cobra menos si no se sabe). titulo_profesional_url
+        # es OBLIGATORIO si es_primer_carrera=False (validado en el schema).
+        "es_primer_carrera": bool(data.es_primer_carrera) if data.es_primer_carrera is not None else True,
+        "titulo_profesional_url": (data.titulo_profesional_url or "").strip() or None,
     }
 
     sub = PreRegistration(
@@ -427,6 +433,12 @@ async def approve_submission(submission_id: PydanticObjectId, admin_username: st
         carta_firmada_url=(data.get("carta_firmada_url") or None),
         # F-2026-08-11-CAMPOS-EC-RESOLUCION (Kevin 22:37).
         resolucion_url=(data.get("resolucion_url") or None),
+        # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12): discriminacion
+        # primera carrera vs profesional con titulo. se persiste tal cual
+        # el data dict (que ya fue validado en el schema).
+        es_primer_carrera=bool(data.get("es_primer_carrera", True)),
+        titulo_profesional_url=(data.get("titulo_profesional_url") or None),
+        titulo_profesional_estado="pendiente",  # el encargado EC lo valida despues
     )
     await student.insert()
 
