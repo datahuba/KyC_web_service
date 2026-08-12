@@ -153,6 +153,16 @@ async def read_courses(
     current_user: Union[User, Student] = Depends(get_current_user) # Abierto para todos
 ) -> Any:
     """Listar cursos con paginación y filtros"""
+    # F-2026-08-12-EC-CURSOS-FILTRO (Kevin 2026-08-12 post-reunion UAGRM):
+    # el EC solo debe ver SUS cursos asignados. Esto filtra el dropdown
+    # de cursos en el frontend (cursos del EC, no todos). Si no es User
+    # (es Student) o no tiene cursos_asignados, ve todos (acceso normal).
+    cursos_asignados_list = None
+    if isinstance(current_user, User):
+        from api.dependencies import filtro_cursos_por_rol
+        cursos_filtro = filtro_cursos_por_rol(current_user)
+        cursos_asignados_list = cursos_filtro.get("curso_id", {}).get("$in") if cursos_filtro else None
+
     courses, total_count = await course_service.get_courses(
         page=page,
         per_page=per_page,
@@ -161,6 +171,7 @@ async def read_courses(
         tipo_curso=tipo_curso,
         modalidad=modalidad,
         estado=estado,
+        cursos_asignados=cursos_asignados_list,
     )
 
     # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): popular

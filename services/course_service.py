@@ -43,6 +43,11 @@ async def get_courses(
     tipo_curso: Optional[TipoCurso] = None,
     modalidad: Optional[Modalidad] = None,
     estado: Optional[str] = None,
+    # F-2026-08-12-EC-CURSOS-FILTRO (Kevin 2026-08-12): si llega una lista
+    # de cursos_asignados, filtra la query a SOLO esos cursos. Usado por
+    # EC/COORDINADOR/COBRANZA-segmentado para ver solo SUS cursos.
+    # Si llega vacia, retorna lista vacia (no se rompe).
+    cursos_asignados: Optional[list] = None,
 ) -> tuple[List[Course], int]:
     """
     Obtiene múltiples cursos con paginación y filtros
@@ -58,6 +63,8 @@ async def get_courses(
             (programado | en_ejecucion | cerrado). Como el estado se
             calcula en runtime según fechas, se trae un set más amplio
             y se filtra en memoria (es aceptable hasta ~500 cursos).
+        cursos_asignados: F-2026-08-12-EC-CURSOS-FILTRO - si no es None,
+            filtra a solo los cursos en esta lista (usado para EC).
     """
     query = Course.find()
 
@@ -82,6 +89,13 @@ async def get_courses(
     # 4. Filtro Modalidad
     if modalidad:
         query = query.find(Course.modalidad == modalidad)
+
+    # 5. F-2026-08-12-EC-CURSOS-FILTRO: si cursos_asignados es lista vacia,
+    # retornar 0 resultados (no exponer todos los cursos).
+    if cursos_asignados is not None:
+        if not cursos_asignados:
+            return [], 0
+        query = query.find({"_id": {"$in": cursos_asignados}})
 
     total_count = await query.count()
     skip = (page - 1) * per_page
