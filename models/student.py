@@ -215,6 +215,16 @@ class Student(MongoBaseModel):
         None, max_length=500,
         description="URL de la carta firmada por el director (PDF en Google Drive, OneDrive, Dropbox). Requerida si el estudiante es de provincia o modalidad virtual.",
     )
+
+    # F-2026-08-11-CAMPOS-EC-RESOLUCION (Kevin 22:37): URL de la resolucion
+    # del programa (PDF que emite la UAGRM aprobando el programa). Es OPCIONAL:
+    # el estudiante puede incluirla al preinscribirse o el admin la sube
+    # despues via /app/courses. Cuando se aprueba la submission y la URL está
+    # presente, se copia a Course.resolucion_pdf_url.
+    resolucion_url: Optional[str] = Field(
+        None, max_length=500,
+        description="URL de la resolucion del programa (PDF que emite la UAGRM). OPCIONAL.",
+    )
     
     class Settings:
         name = "students"

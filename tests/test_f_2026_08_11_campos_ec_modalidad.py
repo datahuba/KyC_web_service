@@ -197,6 +197,43 @@ def test_api_pre_registrations_tiene_endpoint_upload_carta():
         "El endpoint debe reusar upload_document de cloudinary_utils (no reinventar la rueda)"
     )
 
+def test_api_pre_registrations_tiene_endpoint_upload_resolucion():
+    """F-2026-08-11-CAMPOS-EC-RESOLUCION (Kevin 22:37): el backend expone el
+    endpoint POST /pre-registrations/public/{slug}/upload-resolucion para que
+    el estudiante suba la resolucion del programa (opcional)."""
+    api_py = (REPO_BACKEND / "api" / "pre_registrations.py").read_text(encoding="utf-8")
+    assert "/public/{slug}/upload-resolucion" in api_py, (
+        "El router debe tener el endpoint /public/{slug}/upload-resolucion"
+    )
+    assert "upload_resolucion" in api_py, (
+        "La funcion del endpoint debe llamarse upload_resolucion"
+    )
+
+def test_pr_service_persiste_resolucion_url():
+    """F-2026-08-11-CAMPOS-EC-RESOLUCION: el servicio persiste resolucion_url
+    en el data dict del PreRegistration y al aprobar lo copia al Student."""
+    svc = (REPO_BACKEND / "services" / "pre_registration_service.py").read_text(encoding="utf-8")
+    assert '"resolucion_url"' in svc, (
+        "submit_public_form debe persistir resolucion_url en el data dict"
+    )
+    assert "resolucion_url=(data.get(\"resolucion_url\") or None)" in svc, (
+        "approve_submission debe copiar resolucion_url al Student"
+    )
+
+def test_student_model_tiene_resolucion_url():
+    """F-2026-08-11-CAMPOS-EC-RESOLUCION: Student.resolucion_url existe."""
+    student_py = (REPO_BACKEND / "models" / "student.py").read_text(encoding="utf-8")
+    assert "resolucion_url: Optional[str]" in student_py, (
+        "Student debe tener campo 'resolucion_url' para la URL de la resolucion del programa"
+    )
+
+def test_pre_registration_submit_tiene_resolucion_url():
+    """F-2026-08-11-CAMPOS-EC-RESOLUCION: PreRegistrationSubmit acepta resolucion_url."""
+    schema_py = (REPO_BACKEND / "schemas" / "pre_registration.py").read_text(encoding="utf-8")
+    assert "resolucion_url: Optional[str]" in schema_py, (
+        "PreRegistrationSubmit debe aceptar resolucion_url"
+    )
+
 def test_apiKyC_config_tiene_postFormData():
     """F-2026-08-11-CAMPOS-EC-MODALIDAD-FILE: apiKyC.config.ts expone
     postFormData para multipart upload."""
@@ -219,6 +256,37 @@ def test_pr_service_ts_tiene_uploadCartaFirmada():
     assert "postFormData" in svc, (
         "uploadCartaFirmada debe usar apiKyC.postFormData (no fetch manual)"
     )
+
+def test_pr_service_ts_tiene_uploadResolucion():
+    """F-2026-08-11-CAMPOS-EC-RESOLUCION: pre-registration.service.ts
+    expone uploadResolucion que usa postFormData."""
+    svc = (REPO_FRONTEND / "src" / "lib" / "services" / "pre-registration.service.ts").read_text(encoding="utf-8")
+    assert "export async function uploadResolucion" in svc, (
+        "pre-registration.service.ts debe exportar uploadResolucion"
+    )
+
+def test_pr_page_svelte_tiene_resolucion_input_y_handler():
+    """F-2026-08-11-CAMPOS-EC-RESOLUCION: el wizard tiene el input file de
+    resolucion y los handlers handleResolucionSelected + removeResolucion."""
+    page = (REPO_FRONTEND / "src" / "routes" / "pre-registro" / "[slug]" / "+page.svelte").read_text(encoding="utf-8")
+    assert "id=\"pr-resolucion\"" in page, "Input file pr-resolucion debe existir"
+    assert "function handleResolucionSelected" in page, "Handler handleResolucionSelected debe existir"
+    assert "function removeResolucion" in page, "Handler removeResolucion debe existir"
+    assert "uploadResolucion" in page, "Wizard debe importar uploadResolucion del servicio"
+
+def test_pre_registros_admin_page_muestra_carta_y_resolucion():
+    """F-2026-08-11-CAMPOS-EC-MODALIDAD-VIEW (Kevin 22:37): el panel del
+    encargado muestra las URLs de carta firmada y resolucion en la tabla
+    de submissions, y un modal de detalle con TODO."""
+    page = (REPO_FRONTEND / "src" / "routes" / "app" / "pre-registros" / "+page.svelte").read_text(encoding="utf-8")
+    assert "openDetailModal" in page, "Funcion openDetailModal debe existir en la pagina admin"
+    assert "showDetailModal" in page, "State showDetailModal debe existir"
+    assert "detailSubmission" in page, "State detailSubmission debe existir"
+    # La tabla debe mostrar badges de carta y resol como links
+    assert "sub.data.carta_firmada_url" in page, "Tabla debe iterar sub.data.carta_firmada_url"
+    assert "sub.data.resolucion_url" in page, "Tabla debe iterar sub.data.resolucion_url"
+    # El modal debe mostrar preview de imagen para JPG/PNG
+    assert "isCloudinaryImage" in page, "Helper isCloudinaryImage debe existir para mostrar preview inline"
 
 def test_pr_page_svelte_select_procedencia_tiene_9_departamentos():
     """El select de procedencia tiene los 9 departamentos de Bolivia."""

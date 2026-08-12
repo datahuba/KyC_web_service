@@ -136,6 +136,52 @@ async def upload_carta_firmada(slug: str, file: UploadFile = File(...)) -> Any:
     }
 
 
+# F-2026-08-11-CAMPOS-EC-RESOLUCION (Kevin 22:37): el estudiante puede subir
+# opcionalmente la resolucion del programa al que se inscribe (PDF que emite
+# la UAGRM aprobando el programa). Es OPCIONAL porque a veces la resolucion
+# se sube despues por el admin. Pero si el estudiante ya la tiene a mano,
+# puede incluirla aca para ahorrar tiempo al encargado de EC.
+#
+# Misma mecanica que upload-carta: valida que el form exista y este abierto,
+# sube a Cloudinary (folder dedicado), devuelve la URL publica.
+@router.post(
+    "/public/{slug}/upload-resolucion",
+    summary="Subir resolucion del programa (público, opcional, sin auth)"
+)
+async def upload_resolucion(slug: str, file: UploadFile = File(...)) -> Any:
+    """
+    Sube la resolucion del programa (PDF/JPG/PNG, max 20MB) a Cloudinary y
+    devuelve la URL publica que el frontend guarda en `resolucionUrl`.
+
+    Valida que el slug exista y el formulario este abierto (no requiere auth).
+    """
+    try:
+        await pre_registration_service.get_public_form_by_slug(slug)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        result = await upload_document(
+            file=file,
+            folder=f"pre-registrations/resoluciones/{slug}",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al subir la resolucion: {str(e)}",
+        )
+
+    return {
+        "url": result["url"],
+        "public_id": result["public_id"],
+        "resource_type": result["resource_type"],
+        "mime_type": result["mime_type"],
+        "size_bytes": result["size_bytes"],
+    }
+
+
 # ============================================================================
 # ADMIN (auth) — prefijo /pre-registrations/forms y /pre-registrations/submissions
 # ============================================================================

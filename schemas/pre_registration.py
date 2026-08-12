@@ -122,6 +122,13 @@ class PreRegistrationSubmit(BaseModel):
     modalidad: Optional[str] = Field(None, max_length=20, description="Modalidad de estudio: 'presencial' o 'virtual'.")
     carta_firmada_url: Optional[str] = Field(None, max_length=500, description="URL de la carta firmada por el director (PDF en Drive/OneDrive/Dropbox). Requerida si modalidad=virtual o procedencia!=SCZ.")
 
+    # F-2026-08-11-CAMPOS-EC-RESOLUCION (Kevin 22:37): la resolucion del programa
+    # es OPCIONAL. Si el estudiante ya la tiene a mano puede incluirla, sino
+    # el admin (CPD o encargado) la sube despues via /app/courses. Cuando se
+    # aprueba la submission, esta URL se copia a Course.resolucion_pdf_url
+    # para que el programa tenga su resolucion persistida.
+    resolucion_url: Optional[str] = Field(None, max_length=500, description="URL de la resolucion del programa (PDF que emite la UAGRM). OPCIONAL — el estudiante puede incluirla si ya la tiene, sino el admin la sube despues.")
+
     @field_validator("modalidad")
     @classmethod
     def modalidad_valida(cls, v):

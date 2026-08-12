@@ -116,6 +116,11 @@ class StudentCreate(BaseModel):
     modalidad: Optional[str] = Field(None, max_length=20)
     carta_firmada_url: Optional[str] = Field(None, max_length=500)
 
+    # F-2026-08-11-CAMPOS-EC-RESOLUCION (Kevin 22:37): URL de la resolucion
+    # del programa que el estudiante subio al preinscribirse. Es OPCIONAL
+    # (tambien el admin puede subirla despues via /app/courses).
+    resolucion_url: Optional[str] = Field(None, max_length=500)
+
     @field_validator('sexo', 'estado_civil', 'tipo_sangre', mode='before')
     @classmethod
     def _empty_enum_a_none(cls, v):
@@ -244,6 +249,8 @@ class StudentResponse(BaseModel):
     procedencia: Optional[str] = None
     modalidad: Optional[str] = None
     carta_firmada_url: Optional[str] = None
+    # F-2026-08-11-CAMPOS-EC-RESOLUCION
+    resolucion_url: Optional[str] = None
 
     # Estado y Metadata
     activo: bool
@@ -373,6 +380,8 @@ class StudentUpdateAdmin(BaseModel):
     procedencia: Optional[str] = Field(None, max_length=10)
     modalidad: Optional[str] = Field(None, max_length=20)
     carta_firmada_url: Optional[str] = Field(None, max_length=500)
+    # F-2026-08-11-CAMPOS-EC-RESOLUCION
+    resolucion_url: Optional[str] = Field(None, max_length=500)
 
     @field_validator('sexo', 'estado_civil', 'tipo_sangre', mode='before')
     @classmethod

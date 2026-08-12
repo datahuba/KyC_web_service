@@ -260,6 +260,10 @@ async def submit_public_form(slug: str, data: PreRegistrationSubmit) -> PreRegis
         "procedencia": (data.procedencia or "").strip().upper() or None,
         "modalidad": (data.modalidad or "").strip().lower() or None,
         "carta_firmada_url": (data.carta_firmada_url or "").strip() or None,
+        # F-2026-08-11-CAMPOS-EC-RESOLUCION (Kevin 22:37): la resolucion del
+        # programa es OPCIONAL pero se persiste aca para que el admin la vea
+        # al aprobar y la copie a Course.resolucion_pdf_url.
+        "resolucion_url": (data.resolucion_url or "").strip() or None,
     }
 
     sub = PreRegistration(
@@ -421,6 +425,8 @@ async def approve_submission(submission_id: PydanticObjectId, admin_username: st
         procedencia=(data.get("procedencia") or None),
         modalidad=(data.get("modalidad") or None),
         carta_firmada_url=(data.get("carta_firmada_url") or None),
+        # F-2026-08-11-CAMPOS-EC-RESOLUCION (Kevin 22:37).
+        resolucion_url=(data.get("resolucion_url") or None),
     )
     await student.insert()
 
