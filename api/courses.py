@@ -841,31 +841,42 @@ async def create_course(
     from datetime import datetime as _dt
 
     if current_user.rol not in (UserRole.CPD, UserRole.ADMIN, UserRole.SUPERADMIN):
-        # ENCARGADO_CURSO o COORDINADOR: solo historicos (fecha_fin < hoy)
+        # F-2026-08-12-EC-HISTORICO-CREAR (Kevin 2026-08-12 post-reunion):
+        # el EC/COORDINADOR solo puede crear programas historicos. Si marca
+        # es_historico=True, NO exigimos fecha_fin (un programa del que
+        # solo queremos dejar registro puede no tener fecha exacta en
+        # los archivos). Si NO marca es_historico=True pero trae fecha_fin,
+        # validamos que sea pasada (comportamiento original).
+        es_historico_flag = bool(getattr(course_in, "es_historico", False))
         fecha_fin = getattr(course_in, "fecha_fin", None)
-        if fecha_fin is None:
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    "Como encargado/coordinador, solo puedes crear programas historicos. "
-                    "El programa debe tener fecha_fin (ya finalizo)."
-                ),
-            )
-        # fecha_fin puede ser date o datetime; normalizar a datetime UTC-naive
-        if isinstance(fecha_fin, _dt):
-            fin_dt = fecha_fin
-        else:
-            fin_dt = _dt.combine(fecha_fin, _dt.min.time())
-        now_naive = utcnow_naive()
-        if fin_dt >= now_naive:
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    "Como encargado/coordinador, solo puedes crear programas historicos "
-                    "(fecha_fin ya paso). Para crear programas nuevos o en ejecucion, "
-                    "consulta con CPD o superadmin."
-                ),
-            )
+        if not es_historico_flag:
+            # F-2026-08-12-EC-HISTORICO-CREAR: si el EC intenta crear un
+            # programa NO historico sin fecha_fin, lo rechazamos. Si trae
+            # fecha_fin, validamos que sea pasada.
+            if fecha_fin is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Como encargado/coordinador, solo puedes crear programas historicos "
+                        "(es_historico=True). Si es un programa reciente o en ejecucion, "
+                        "consulta con CPD o superadmin."
+                    ),
+                )
+            # fecha_fin puede ser date o datetime; normalizar a datetime UTC-naive
+            if isinstance(fecha_fin, _dt):
+                fin_dt = fecha_fin
+            else:
+                fin_dt = _dt.combine(fecha_fin, _dt.min.time())
+            now_naive = utcnow_naive()
+            if fin_dt >= now_naive:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Como encargado/coordinador, solo puedes crear programas historicos "
+                        "(fecha_fin ya paso). Para crear programas nuevos o en ejecucion, "
+                        "consulta con CPD o superadmin."
+                    ),
+                )
     try:
         course = await course_service.create_course(course_in=course_in)
         # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): popular
