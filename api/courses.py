@@ -883,6 +883,18 @@ async def create_course(
         # estado_calculado para que el frontend muestre el badge correcto
         # inmediatamente despues de crear.
         course.estado_calculado = course.get_estado_actual()
+
+        # F-2026-08-12-EC-AUTOASIGNAR-CURSO (Kevin 2026-08-12 post-reunion):
+        # cuando un EC/COORDINADOR crea un programa historico, debe
+        # autoasignarse a su lista de cursos_asignados. Asi el programa
+        # aparece en sus listados (filtrados por cursos_asignados) y
+        # puede cargar estudiantes. Sin esto, el EC crea el programa
+        # pero no lo ve nunca.
+        if current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
+            if course.id not in (current_user.cursos_asignados or []):
+                current_user.cursos_asignados = (current_user.cursos_asignados or []) + [course.id]
+                await current_user.save()
+
         return course
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
