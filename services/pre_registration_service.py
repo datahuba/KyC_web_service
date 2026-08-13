@@ -385,6 +385,31 @@ async def get_submissions_for_admin(
     return items, total
 
 
+def _normalize_descuento(value) -> Optional[float]:
+    """
+    F-FIX-DESCUENTO-DOBLE-DIVISION (Kevin 2026-08-22): normaliza un valor de
+    descuento (puede llegar como string '50' o 0.5) al formato canonico 0-1
+    que requiere el modelo Student.descuento_vicerrectorado_monto.
+
+    - Si el valor es None o vacio: retorna None (sin descuento).
+    - Si el valor es > 1.0: se interpreta como porcentaje 0-100 y se divide
+      entre 100 (compatibilidad con campos legacy `descuentoPorcentaje` del form).
+    - Si el valor es <= 1.0: se asume que ya esta en formato 0-1 (lo que manda
+      el frontend actual `kyc-client/.../[slug]/+page.svelte:408`).
+    """
+    if value is None or value == "":
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if f < 0:
+        return None
+    if f > 1.0:
+        return round(f / 100.0, 4)
+    return round(f, 4)
+
+
 async def approve_submission(submission_id: PydanticObjectId, admin_username: str) -> Student:
     """
     Aprobar: crea Student + User con la convención 'Uagrm.<CI>' y envía
@@ -459,10 +484,15 @@ async def approve_submission(submission_id: PydanticObjectId, admin_username: st
         # Si rechazo: el estudiante sigue matriculado pero se cobra el modulo
         # completo (sin descuento).
         # Si no propuso descuento: queda en "no_aplica".
-        descuento_vicerrectorado_monto=(
-            float(data.get("descuentoPorcentaje") or data.get("descuento_porcentaje") or 0) / 100.0
-            if (data.get("descuentoPorcentaje") or data.get("descuento_porcentaje"))
-            else None
+        # F-FIX-DESCUENTO-DOBLE-DIVISION (Kevin 2026-08-22): el frontend ya divide
+        # entre 100 al enviar (kyc-client/src/routes/pre-registro/[slug]/+page.svelte
+        # linea 408: `Number(v)/100`), por lo que `data.descuento_porcentaje` llega
+        # en formato 0-1 (ej: 0.5 para 50%). El backend dividia OTRA VEZ entre 100,
+        # guardando 0.005 en vez de 0.5, y por eso `aprobar_descuento_vicerrectorado`
+        # aplicaba un descuento del 0.5% (invisible). Usamos `_normalize_descuento`
+        # que acepta ambos formatos (>1 se interpreta como 0-100 y se divide).
+        descuento_vicerrectorado_monto=_normalize_descuento(
+            data.get("descuentoPorcentaje") or data.get("descuento_porcentaje")
         ),
         descuento_vicerrectorado_estado=(
             "pendiente"
