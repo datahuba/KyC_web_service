@@ -315,7 +315,25 @@ async def get_course_students(course_id: PydanticObjectId) -> List[CourseEnrolle
                 "total_a_pagar": enrollment.total_a_pagar,
                 "total_pagado": enrollment.total_pagado,
                 "saldo_pendiente": enrollment.saldo_pendiente,
-                "avance_pago": round(avance, 2)
+                "avance_pago": round(avance, 2),
+                # F-2026-08-22-PRE-REG-BADGE-DESCUENTO (Kevin 2026-08-22):
+                # exponer el descuento aplicado para que el frontend muestre
+                # el badge "X% descuento" en el modal Estudiantes Inscritos.
+                # descuento_personalizado es el snapshot del enrollment (en %
+                # 0-100, ej: 50.0 = 50%). descuento_origen indica si fue
+                # vicerrectorado (descuento del wizard validado), EC (campo
+                # descuento_porcentaje del Excel Lisa), o mixto.
+                "descuento_personalizado": (
+                    enrollment.descuento_personalizado
+                    if enrollment.descuento_personalizado and enrollment.descuento_personalizado > 0
+                    else None
+                ),
+                "descuento_origen": (
+                    "vicerrectorado"
+                    if (student.descuento_vicerrectorado_monto or 0) > 0
+                    else "ec" if (student.descuento_porcentaje or 0) > 0
+                    else None
+                ),
             }
         )
         report.append(item)

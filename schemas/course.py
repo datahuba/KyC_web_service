@@ -321,6 +321,19 @@ class FinancialInfo(BaseModel):
     total_pagado: float
     saldo_pendiente: float
     avance_pago: float = Field(..., description="Porcentaje de pago completado (0-100)")
+    # F-2026-08-22-PRE-REG-BADGE-DESCUENTO (Kevin 2026-08-22): exponer el
+    # descuento aplicado al enrollment para que el frontend pueda mostrar
+    # el badge "X% descuento" en el modal de Estudiantes Inscritos.
+    # - `descuento_personalizado` viene de Enrollment (snapshot, en % 0-100)
+    # - `descuento_origen` indica si fue por vicerrectorado, EC, o ninguno
+    descuento_personalizado: Optional[float] = Field(
+        None, ge=0, le=100,
+        description="% de descuento aplicado (0-100). Null si no tiene descuento."
+    )
+    descuento_origen: Optional[str] = Field(
+        None,
+        description="Origen del descuento: 'vicerrectorado' | 'ec' | 'mixto' | None"
+    )
 
 class CourseEnrolledStudent(BaseModel):
     """
