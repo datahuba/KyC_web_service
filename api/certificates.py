@@ -311,7 +311,9 @@ async def list_by_enrollment(
                 detail="No tienes permiso para ver los certificados de esta inscripción.",
             )
     elif certs and isinstance(current_user, User):
-        staff_roles = {"SUPERADMIN", "ADMIN", "CPD", "COBRANZA", "MAE", "COORDINADOR"}
+        # F-2026-08-22-EC-CERTIFICADOS-READONLY (Kevin 2026-08-22): encargado_curso
+        # tambien puede ver certificados de las inscripciones de SUS cursos.
+        staff_roles = {"SUPERADMIN", "ADMIN", "CPD", "COBRANZA", "MAE", "COORDINADOR", "ENCARGADO_CURSO"}
         if current_user.rol.value not in staff_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -354,9 +356,14 @@ async def list_certificates_admin(
             detail="Esta vista es solo para personal administrativo.",
         )
     # Verificar rol staff
+    # F-2026-08-22-EC-CERTIFICADOS-READONLY (Kevin 2026-08-22): encargado_curso
+    # tambien entra a este endpoint. El filtro de cursos_asignados de abajo
+    # (via filtro_cursos_por_rol) se encarga de que SOLO vea los certificados
+    # de SUS cursos asignados, igual que en pagos.
     from models.enums import UserRole
     staff_roles = {UserRole.ADMIN, UserRole.SUPERADMIN, UserRole.MAE,
-                   UserRole.CPD, UserRole.COBRANZA, UserRole.COORDINADOR}
+                   UserRole.CPD, UserRole.COBRANZA, UserRole.COORDINADOR,
+                   UserRole.ENCARGADO_CURSO}
     if current_user.rol not in staff_roles:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
