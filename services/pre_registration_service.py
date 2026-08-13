@@ -313,6 +313,28 @@ async def submit_public_form(slug: str, data: PreRegistrationSubmit) -> PreRegis
     except Exception as e:
         print(f"[pre-registration] Error notificando revisores: {e}")
 
+    # F-2026-08-22-PRE-REG-EMAIL-CONFIRM (Kevin 2026-08-22): email de confirmacion
+    # inmediata al visitante. Le confirma que su solicitud fue recibida y le
+    # da el numero para seguimiento. Best-effort: si falla SMTP, no bloquea
+    # el submit (el visitante ya vio la pantalla de exito en el wizard).
+    try:
+        from core.config import settings
+        from core.email_utils import send_email, build_pre_registration_received_email
+
+        html = build_pre_registration_received_email(
+            nombre=payload["nombre"],
+            nombre_programa=form.nombre,
+            submission_id=str(sub.id),
+            admin_url=f"{settings.FRONTEND_URL.rstrip('/')}/app/pre-registros",
+        )
+        await send_email(
+            payload["email"],
+            f"Recibimos tu pre-inscripción a {form.nombre}",
+            html,
+        )
+    except Exception as e:
+        print(f"[pre-registration] Error enviando email de confirmacion al visitante: {e}")
+
     return sub
 
 
