@@ -23,12 +23,19 @@ def puede_ver_economico(current_user) -> bool:
     """
     ISSUE-R-PERFIL-GENERICO: True si el usuario puede ver información económica
     (reportes de caja, resumen de ingresos, pagos). Roles económicos:
-    superadmin, admin, mae, cobranza; y COORDINADOR únicamente si su subtipo es
-    FINANCIERO (los coordinadores académico/investigación NO ven lo económico).
+    superadmin, admin, mae, cobranza, encargado_curso; y COORDINADOR únicamente
+    si su subtipo es FINANCIERO (los coordinadores académico/investigación NO
+    ven lo económico).
+
+    F-2026-08-22-EC-PAGOS-READONLY (Kevin 2026-08-22): encargado_curso entra
+    tambien (en modo SOLO LECTURA). El filtro por cursos_asignados que ya
+    está en cada endpoint se encarga de la segmentacion: el EC solo ve
+    pagos/certificados/reportes de SUS cursos asignados, igual que en
+    payments y certificates.
     """
     if not isinstance(current_user, User):
         return False
-    if current_user.rol in {UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MAE, UserRole.COBRANZA}:
+    if current_user.rol in {UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MAE, UserRole.COBRANZA, UserRole.ENCARGADO_CURSO}:
         return True
     return (
         current_user.rol == UserRole.COORDINADOR
