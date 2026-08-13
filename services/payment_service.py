@@ -101,6 +101,55 @@ PAYMENT_LIST_PROJECTION = {
     "updated_at": 1,
 }
 
+# F-2026-08-22-PAYMENTS-MATRIZ-PERF (2026-08-22, Kevin): proyecciones para
+# el endpoint /payments/matriz (get_matriz_pagos). Sin projection, motor
+# retorna TODO el documento (~30+ campos en Enrollment, varios KB por
+# enrollment con 5-10 modulos embebidos) y Beanie los deserializa a
+# Pydantic. Esto causaba que el endpoint tardara 28.85s sin filtro.
+#
+# Solo proyectamos los campos que get_matriz_pagos realmente usa.
+# Enrollment: ~12 campos de 30+ (~60% reduccion). Modulos[]: solo 4 campos
+# de 14 (~70% reduccion por subdocumento). Total estimado: ~70% menos bytes
+# transferidos desde MongoDB.
+ENROLLMENT_MATRIZ_PROJECTION = {
+    "_id": 1,
+    "estudiante_id": 1,
+    "curso_id": 1,
+    "costo_matricula": 1,
+    # Subdocumento modulos[]: solo 4 campos (de 14). Regla Kevin: la vista
+    # Matriz solo necesita saber cuanto se pago por modulo y su estado.
+    "modulos.nombre": 1,
+    "modulos.costo": 1,
+    "modulos.monto_pagado": 1,
+    "modulos.estado": 1,
+    "descuento_curso_aplicado": 1,
+    "descuento_personalizado": 1,
+    "total_a_pagar": 1,
+    "total_pagado": 1,
+    "saldo_pendiente": 1,
+    "estado": 1,
+    "matricula_pagada": 1,
+}
+
+# Course: solo 4 campos (de 20+). nombre_programa, codigo, y los nombres/
+# costos de los modulos del curso (snapshot para calcular ahorro por beca).
+COURSE_MATRIZ_PROJECTION = {
+    "_id": 1,
+    "nombre_programa": 1,
+    "codigo": 1,
+    "modulos.nombre": 1,
+    "modulos.costo": 1,
+}
+
+# Student: solo 3 campos (de 30+). La vista Matriz solo muestra nombre y
+# registro del estudiante.
+STUDENT_MATRIZ_PROJECTION = {
+    "_id": 1,
+    "nombre": 1,
+    "registro": 1,
+}
+
+
 # ========================================================================
 # MOTOR DE AUDITORÍA FINANCIERA
 # ========================================================================
@@ -1759,36 +1808,51 @@ async def get_matriz_pagos(
     # Ver F-DASHBOARD-CXC-EXCLUIR-HISTORICOS si se quiere ver donde se
     # sigue filtrando historicos para fines de cobranza.
 
-    enrollments_task = Enrollment.find(match_enroll).to_list()
+    # F-2026-08-22-PAYMENTS-MATRIZ-PERF: motor directo + projection.
+    # Antes (Beanie.find): se traian TODOS los campos de cada documento
+    # (~30+ en Enrollment, con listas embebidas de modulos[10 campos],
+    # requisitos, cargo_adicional_items, urls, campos de abandono/suspension,
+    # etc.) y luego se deserializaban a Pydantic. Eso causaba que el endpoint
+    # tardara 28.85s sin filtro (caso: usuario abre /payments/matriz por
+    # primera vez, sin filtro de programa). Ahora: solo proyectamos los
+    # campos que el endpoint realmente usa (~12 de 30+ en Enrollment,
+    # 4 de 14 en modulos[]). Reduccion estimada: ~70% de bytes transferidos.
+    # Ver constantes ENROLLMENT_MATRIZ_PROJECTION, COURSE_MATRIZ_PROJECTION
+    # y STUDENT_MATRIZ_PROJECTION arriba.
+    enrollment_coll = Enrollment.get_motor_collection()
+    course_coll = Course.get_motor_collection()
+    enrollments_task = enrollment_coll.find(match_enroll, ENROLLMENT_MATRIZ_PROJECTION).to_list(length=None)
     # F-CXC-FILTRO-PROGRAMA: si hay curso_id especifico, NO traer todos los
     # cursos (optimizacion + consistencia con lo que ve el usuario).
     if curso_id is not None:
-        courses_task = Course.find({"_id": curso_id}).to_list()
+        courses_task = course_coll.find({"_id": curso_id}, COURSE_MATRIZ_PROJECTION).to_list(length=None)
     else:
-        courses_task = Course.find({}).to_list()
+        courses_task = course_coll.find({}, COURSE_MATRIZ_PROJECTION).to_list(length=None)
     enrollments, courses = await asyncio.gather(enrollments_task, courses_task)
 
-    courses_map = {c.id: c for c in courses}
+    # F-2026-08-22-PAYMENTS-MATRIZ-PERF: enrollments y courses ahora son
+    # DICTS de motor (no objetos Beanie), porque usamos get_motor_collection()
+    # para poder aplicar proyeccion. Acceso por key (e["_id"], e.get("x"))
+    # en vez de por atributo (e.id, e.x). Ver bloque del loop mas abajo.
+    courses_map = {c["_id"]: c for c in courses}
     courses_list: list = [
         {
-            "_id": str(c.id),
-            "nombre": c.nombre_programa,
-            "codigo": c.codigo,
-            "modulos": [m.nombre for m in (c.modulos or [])],
+            "_id": str(c["_id"]),
+            "nombre": c.get("nombre_programa", ""),
+            "codigo": c.get("codigo", ""),
+            "modulos": [m.get("nombre", "") for m in (c.get("modulos") or [])],
         }
         for c in courses
     ]
 
     # Estados que NO cuentan para "Por Cobrar" (regla F-073)
     # F-083 (2026-07-28): se agrega RETIRADO. Los RETIRADOS NO suman a
-    # "Por Cobrar" (abandono definitivo, no vuelven). Sí cuentan en
-    # total_ingresos porque lo que pagaron es dinero real que entró a caja.
-    estados_excluidos = {
-        EstadoInscripcion.SUSPENDIDO,
-        EstadoInscripcion.COMPLETADO,
-        EstadoInscripcion.CANCELADO,
-        EstadoInscripcion.RETIRADO,  # F-083
-    }
+    # "Por Cobrar" (abandono definitivo, no vuelven). Si cuentan en
+    # total_ingresos porque lo que pagaron es dinero real que entro a caja.
+    # F-2026-08-22-PAYMENTS-MATRIZ-PERF: ahora comparamos contra strings
+    # directamente (motor devuelve "suspendido" como string, no como enum).
+    # Valores coinciden con EstadoInscripcion.* (que heredan de str).
+    estados_excluidos = {"suspendido", "completado", "cancelado", "retirado"}
 
     # Acumuladores de totales por columna
     tot_mat_costo = 0.0
@@ -1799,41 +1863,53 @@ async def get_matriz_pagos(
     tot_ingresos = 0.0
     tot_por_cobrar = 0.0
     tot_inscritos = 0
-    tot_pagaron_todo = 0  # F-074-FIX-4: cuántos tienen matrícula + todos los módulos pagados
-    tot_con_beca = 0       # F-074-FIX-4: cuántos tienen algún descuento
+    tot_pagaron_todo = 0  # F-074-FIX-4: cuantos tienen matricula + todos los modulos pagados
+    tot_con_beca = 0       # F-074-FIX-4: cuantos tienen algun descuento
     tot_ahorro_total = 0.0  # F-074-FIX-4: ahorro total por descuentos aplicados
 
     # Carga batch de estudiantes para resolver nombres
-    student_ids = list({e.estudiante_id for e in enrollments if e.estudiante_id})
-    students = await Student.find({"_id": {"$in": student_ids}}).to_list() if student_ids else []
-    students_map = {s.id: s for s in students}
+    student_ids = list({e["estudiante_id"] for e in enrollments if e.get("estudiante_id")})
+    students = []
+    if student_ids:
+        student_coll = Student.get_motor_collection()
+        students = await student_coll.find(
+            {"_id": {"$in": student_ids}}, STUDENT_MATRIZ_PROJECTION
+        ).to_list(length=None)
+    students_map = {s["_id"]: s for s in students}
 
     estudiantes_out: list = []
 
     for e in enrollments:
-        curso = courses_map.get(e.curso_id)
+        # F-2026-08-22-PAYMENTS-MATRIZ-PERF: 'e' es dict de motor. Acceso por
+        # key con .get() para campos opcionales (default False/0/[]).
+        curso = courses_map.get(e.get("curso_id"))
         if not curso:
             continue  # curso borrado, skip defensivo
 
-        student = students_map.get(e.estudiante_id)
-        nombre = (student.nombre if student and getattr(student, "nombre", None) else None) or "Sin nombre"
-        registro = (student.registro if student and getattr(student, "registro", None) else None) or ""
+        student = students_map.get(e.get("estudiante_id"))
+        nombre = (student.get("nombre") if student and student.get("nombre") else None) or "Sin nombre"
+        registro = (student.get("registro") if student and student.get("registro") else None) or ""
+
+        # Cacheamos el estado y la flag de matricula_pagada porque se usan
+        # varias veces en el loop. Tambien normalizamos el cast a str/bool.
+        estado_e = e.get("estado") or ""
+        mat_pagada_flag = bool(e.get("matricula_pagada", False))
 
         # Para ingresos siempre se cuentan pagos APROBADOS (es lo recaudado)
-        total_ingresos_e = float(e.total_pagado or 0.0)
+        total_ingresos_e = float(e.get("total_pagado") or 0.0)
         tot_ingresos += total_ingresos_e
 
-        # Por cobrar solo si NO está excluido
-        if e.estado in estados_excluidos:
+        # Por cobrar solo si NO esta excluido
+        if estado_e in estados_excluidos:
             por_cobrar_e = 0.0
         else:
-            por_cobrar_e = float(e.saldo_pendiente or 0.0)
+            por_cobrar_e = float(e.get("saldo_pendiente") or 0.0)
             tot_por_cobrar += por_cobrar_e
             tot_inscritos += 1
 
-        # Matrícula
-        costo_mat = float(e.costo_matricula or 0.0)
-        # Cuánto se imputó realmente a matrícula: min(total_pagado, costo_matricula)
+        # Matricula
+        costo_mat = float(e.get("costo_matricula") or 0.0)
+        # Cuanto se imputo realmente a matricula: min(total_pagado, costo_matricula)
         mat_pagado = min(total_ingresos_e, costo_mat)
         mat_pendiente = max(0.0, costo_mat - mat_pagado)
         # F-FIX-MATRICULA-CALC (2026-08-06, Kevin): si el flag matricula_pagada=True,
@@ -1841,30 +1917,30 @@ async def get_matriz_pagos(
         # cargar el Excel). Esto cubre el caso de programas SIN costo de
         # matricula (costo_mat=0) o programas donde el pago se imputo a
         # modulos pero no a la matricula.
-        if getattr(e, 'matricula_pagada', False) and e.estado not in estados_excluidos:
+        if mat_pagada_flag and estado_e not in estados_excluidos:
             mat_pendiente = 0.0
         tot_mat_costo += costo_mat
         tot_mat_pagado += mat_pagado
-        if e.estado not in estados_excluidos:
+        if estado_e not in estados_excluidos:
             tot_mat_pendiente += mat_pendiente
-            if mat_pagado + 0.01 >= costo_mat or getattr(e, 'matricula_pagada', False):
+            if mat_pagado + 0.01 >= costo_mat or mat_pagada_flag:
                 tot_mat_pagaron += 1
 
-        # Módulos
+        # Modulos
         modulos_out: list = []
-        for i, mod in enumerate(e.modulos or []):
-            costo = float(mod.costo or 0.0)
-            pagado = float(mod.monto_pagado or 0.0)
+        for i, mod in enumerate(e.get("modulos") or []):
+            costo = float(mod.get("costo") or 0.0)
+            pagado = float(mod.get("monto_pagado") or 0.0)
             pendiente = max(0.0, costo - pagado)
 
-            # Si la columna específica no está en el filtro, skip
+            # Si la columna especifica no esta en el filtro, skip
             if modulo_index is not None and modulo_index != i:
                 continue
 
             if i not in tot_modulos:
                 tot_modulos[i] = {
                     "i": i,
-                    "nombre": mod.nombre,
+                    "nombre": mod.get("nombre", ""),
                     "costo_total": 0.0,
                     "pagado": 0.0,
                     "pendiente": 0.0,
@@ -1874,7 +1950,7 @@ async def get_matriz_pagos(
             tot_mod = tot_modulos[i]
             tot_mod["costo_total"] += costo
             tot_mod["pagado"] += pagado
-            if e.estado not in estados_excluidos:
+            if estado_e not in estados_excluidos:
                 tot_mod["pendiente"] += pendiente
                 if pendiente <= 0.01:
                     tot_mod["estudiantes_pagaron"] += 1
@@ -1883,59 +1959,61 @@ async def get_matriz_pagos(
 
             modulos_out.append({
                 "i": i,
-                "nombre": mod.nombre,
+                "nombre": mod.get("nombre", ""),
                 "costo": round(costo, 2),
                 "monto_pagado": round(pagado, 2),
-                "estado": mod.estado,
-                "por_cobrar": round(pendiente, 2) if e.estado not in estados_excluidos else 0.0,
+                "estado": mod.get("estado", ""),
+                "por_cobrar": round(pendiente, 2) if estado_e not in estados_excluidos else 0.0,
             })
 
-        # Si modulo_index es 0, lo representamos como "matrícula" en la columna
-        # NOTA: por convención del Excel de Sandra, Módulo 0 visual = MATRÍCULA.
-        # Pero los módulos del curso empiezan en 0 = Módulo 1. El frontend debe
-        # mostrar la columna "MATRÍCULA" usando matricula_monto/matricula_pagado,
-        # y las columnas Módulo 1..N usando modulos[0..N-1].
+        # Si modulo_index es 0, lo representamos como "matricula" en la columna
+        # NOTA: por convencion del Excel de Sandra, Modulo 0 visual = MATRICULA.
+        # Pero los modulos del curso empiezan en 0 = Modulo 1. El frontend debe
+        # mostrar la columna "MATRICULA" usando matricula_monto/matricula_pagado,
+        # y las columnas Modulo 1..N usando modulos[0..N-1].
 
         # F-074-FIX-4 (2026-07-23): beca y ahorro del estudiante
         # Regla de Kevin (2026-07-23 10:01 GMT-4): "el descuento solamente es
         # para modulos no matriculas eso no se cambia eso es una regla si o si
-        # no hagas sonceras". La matrícula NUNCA tiene descuento, solo los
-        # módulos. Por lo tanto el `ahorro` se calcula únicamente sobre los
-        # módulos, NO sobre la matrícula. El campo `costo_matricula` en BD es
-        # el costo ORIGINAL de la matrícula (sin beca), por regla de negocio.
-        desc_curso = float(e.descuento_curso_aplicado or 0)
-        desc_personal = float(e.descuento_personalizado or 0) if e.descuento_personalizado is not None else 0.0
-        # Costo de los módulos DEL CURSO sin descuento (referencia, ya que el
-        # costo en `e.modulos[]` está CON descuento aplicado al becado)
-        costo_curso_sin_desc = sum((float(m.costo or 0.0)) for m in (curso.modulos or []))
-        # Costo de los módulos DEL ESTUDIANTE (con descuento ya aplicado)
+        # no hagas sonceras". La matricula NUNCA tiene descuento, solo los
+        # modulos. Por lo tanto el `ahorro` se calcula unicamente sobre los
+        # modulos, NO sobre la matricula. El campo `costo_matricula` en BD es
+        # el costo ORIGINAL de la matricula (sin beca), por regla de negocio.
+        desc_curso = float(e.get("descuento_curso_aplicado") or 0)
+        desc_personal_raw = e.get("descuento_personalizado")
+        desc_personal = float(desc_personal_raw or 0) if desc_personal_raw is not None else 0.0
+        # Costo de los modulos DEL CURSO sin descuento (referencia, ya que el
+        # costo en `e.modulos[]` esta CON descuento aplicado al becado)
+        costo_curso_sin_desc = sum((float(m.get("costo") or 0.0)) for m in (curso.get("modulos") or []))
+        # Costo de los modulos DEL ESTUDIANTE (con descuento ya aplicado)
         costo_modulos_con_desc_estudiante = sum(
-            (float(m.costo or 0.0)) for m in (e.modulos or [])
+            (float(m.get("costo") or 0.0)) for m in (e.get("modulos") or [])
         )
-        # Costo sin descuento del estudiante = matrícula (sin beca, regla Kevin)
-        # + módulos del CURSO sin descuento. NO se aplica beca a la matrícula.
-        costo_total_sin_desc = float(e.costo_matricula or 0.0) + costo_curso_sin_desc
-        total_a_pagar_e = float(e.total_a_pagar or 0.0)
-        # El ahorro es la diferencia entre lo que pagaría SIN beca y lo que paga
-        # CON beca. Como la beca NUNCA aplica a matrícula, el ahorro viene
-        # solamente de los módulos: (costo_curso_sin_desc - costo_modulos_con_desc_estudiante)
+        # Costo sin descuento del estudiante = matricula (sin beca, regla Kevin)
+        # + modulos del CURSO sin descuento. NO se aplica beca a la matricula.
+        costo_total_sin_desc = float(e.get("costo_matricula") or 0.0) + costo_curso_sin_desc
+        total_a_pagar_e = float(e.get("total_a_pagar") or 0.0)
+        # El ahorro es la diferencia entre lo que pagaria SIN beca y lo que paga
+        # CON beca. Como la beca NUNCA aplica a matricula, el ahorro viene
+        # solamente de los modulos: (costo_curso_sin_desc - costo_modulos_con_desc_estudiante)
         ahorro_modulos = max(0.0, costo_curso_sin_desc - costo_modulos_con_desc_estudiante)
-        ahorro_e = ahorro_modulos  # Por regla de Kevin, NUNCA se resta matrícula
+        ahorro_e = ahorro_modulos  # Por regla de Kevin, NUNCA se resta matricula
         # Beca efectiva del estudiante (puede ser 0% si no tiene descuento)
         # F-LOGICA-DESCUENTOS-MAX (2026-08-05, Kevin): "se queda con el
         # descuento de mayor porcentaje". Si el personal es menor, gana el
-        # del curso (y se avisa al usuario en el endpoint de inscripción).
+        # del curso (y se avisa al usuario en el endpoint de inscripcion).
         beca_porcentaje = max(desc_curso, desc_personal)
         # Solo se considera "con beca" si el ahorro > 0 (puede haber un descuento
-        # que no se aplicó realmente — caso bug histórico)
+        # que no se aplico realmente - caso bug historico)
         tiene_beca = ahorro_e > 0.01 and beca_porcentaje > 0
 
-        # F-074-FIX-4: "no veo el conteo del que pago todo" — calcular si pagó
-        # matrícula + todos los módulos
+        # F-074-FIX-4: "no veo el conteo del que pago todo" - calcular si pago
+        # matricula + todos los modulos
+        enroll_modulos = e.get("modulos") or []
         todos_modulos_pagados = all(
-            (m.estado == "Pagado") for m in (e.modulos or [])
-        ) if (e.modulos or []) else False
-        pago_todo = bool(e.matricula_pagada) and todos_modulos_pagados and bool(e.modulos)
+            (m.get("estado") == "Pagado") for m in enroll_modulos
+        ) if enroll_modulos else False
+        pago_todo = mat_pagada_flag and todos_modulos_pagados and bool(enroll_modulos)
 
         if pago_todo:
             tot_pagaron_todo += 1
@@ -1944,19 +2022,21 @@ async def get_matriz_pagos(
         tot_ahorro_total += ahorro_e
 
         estudiantes_out.append({
-            "estudiante_id": str(e.estudiante_id) if e.estudiante_id else "",
+            "estudiante_id": str(e.get("estudiante_id") or ""),
             "nombre": nombre,
             "registro": registro,
-            "curso_id": str(e.curso_id) if e.curso_id else "",
-            "curso_nombre": curso.nombre_programa,
-            "estado_inscripcion": e.estado.value if hasattr(e.estado, "value") else str(e.estado),
-            "matricula_pagada": bool(e.matricula_pagada),
+            "curso_id": str(e.get("curso_id") or ""),
+            "curso_nombre": curso.get("nombre_programa", ""),
+            # F-2026-08-22-PAYMENTS-MATRIZ-PERF: estado_e ya es string (motor
+            # directo), no necesita .value ni hasattr.
+            "estado_inscripcion": estado_e,
+            "matricula_pagada": mat_pagada_flag,
             "matricula_monto": round(costo_mat, 2),
             "matricula_pagado": round(mat_pagado, 2),
             "modulos": modulos_out,
             "total_ingresos": round(total_ingresos_e, 2),
             "por_cobrar": round(por_cobrar_e, 2),
-            # F-074-FIX-4: campos de auditoría de descuentos
+            # F-074-FIX-4: campos de auditoria de descuentos
             "beca_porcentaje": round(beca_porcentaje, 1),
             "ahorro": round(ahorro_e, 2),
             "costo_sin_descuento": round(costo_total_sin_desc, 2),
@@ -2005,6 +2085,7 @@ async def get_matriz_pagos(
             "cursos_count": len(courses_list),
         },
     }
+
 
 
 # =============================================================================
