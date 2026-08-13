@@ -757,19 +757,24 @@ async def get_forms_counters(current_user: User) -> dict:
         }
 
     # Submissions pendientes (estado=submission)
-    subs_pendientes = await PreRegistration.find(
-        PreRegistration.form_id.in_(form_ids),  # type: ignore
-        PreRegistration.estado == "pendiente",
-    ).count()
+    # F-FIX-COUNTERS-EXPR-FIELD (Kevin 2026-08-12): usar query dict nativo de
+    # Mongo en vez de `PreRegistration.form_id.in_(form_ids)` que falla con
+    # `TypeError: 'ExpressionField' object is not callable` en runtime
+    # (inconsistencia de Beanie al acceder a campos PyObjectId en runtime).
+    subs_pendientes = await PreRegistration.find({
+        "form_id": {"$in": form_ids},
+        "estado": "pendiente",
+    }).count()
 
     # F-2026-08-12-DESCUENTOS-TAB: submissions con descuento propuesto > 0
     # que aun requieren accion del EC (estado 'pendiente' o 'aprobado').
     # Excluimos las rechazadas (ya fueron revisadas).
-    descuentos_pendientes = await PreRegistration.find(
-        PreRegistration.form_id.in_(form_ids),  # type: ignore
-        PreRegistration.estado.in_(["pendiente", "aprobado"]),  # type: ignore
-        {"data.descuento_porcentaje": {"$gt": 0}},
-    ).count()
+    # Mismo fix que arriba: query dict nativo.
+    descuentos_pendientes = await PreRegistration.find({
+        "form_id": {"$in": form_ids},
+        "estado": {"$in": ["pendiente", "aprobado"]},
+        "data.descuento_porcentaje": {"$gt": 0},
+    }).count()
 
     return {
         "forms_total": forms_total,
