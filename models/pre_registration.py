@@ -47,6 +47,10 @@ class PreRegistrationForm(MongoBaseModel):
             [("estado", pymongo.ASCENDING), ("fecha_fin", pymongo.ASCENDING)],
             "programa_id",
             [("created_at", pymongo.DESCENDING)],
+            # B-2026-08-22-PRE-REG-BATCH-ENRICH: indice compuesto para que
+            # el aggregation de /counters (match por programa_id + group por
+            # estado) use el indice en vez de hacer COLLSCAN.
+            [("programa_id", pymongo.ASCENDING), ("estado", pymongo.ASCENDING)],
         ]
 
 
@@ -75,4 +79,8 @@ class PreRegistration(MongoBaseModel):
         indexes = [
             [("estado", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)],
             "form_id",
+            # B-2026-08-22-PRE-REG-BATCH-ENRICH: indice compuesto (form_id, estado)
+            # para que el aggregation de /forms y /counters use el indice en vez
+            # de COLLSCAN. Cubre $match por form_id + $group por estado.
+            [("form_id", pymongo.ASCENDING), ("estado", pymongo.ASCENDING)],
         ]
