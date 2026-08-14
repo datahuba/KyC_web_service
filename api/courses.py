@@ -182,8 +182,13 @@ async def read_courses(
 
     total_pages = math.ceil(total_count / per_page) if total_count > 0 else 0
 
+    # FIX-ISSUE-250 (2026-08-14): el frontend lee `items` (consistente con
+    # /calendario y /disponibles). Antes retornaba solo `data` y el EC veia
+    # panel vacio. Ahora retornamos `items` (campo principal) Y `data` (alias
+    # para retro-compatibilidad) para no romper consumidores que ya leen data.
     return {
-        "data": courses,
+        "items": courses,
+        "data": courses,  # alias retro-compat
         "meta": PaginationMeta(
             page=page,
             limit=per_page,

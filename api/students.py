@@ -58,8 +58,11 @@ async def read_students(
     )
 
     total_pages = math.ceil(total_count / per_page) if total_count > 0 else 0
+    # FIX-ISSUE-250 (2026-08-14): items + data (retro-compat) para que el
+    # frontend lea `items` consistente con /calendario y /disponibles.
     return {
-        "data": students,
+        "items": students,
+        "data": students,  # alias retro-compat
         "meta": PaginationMeta(
             page=page, limit=per_page, totalItems=total_count, totalPages=total_pages,
             hasNextPage=(page < total_pages), hasPrevPage=(page > 1)
