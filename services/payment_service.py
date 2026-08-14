@@ -1824,10 +1824,18 @@ async def get_matriz_pagos(
     enrollments_task = enrollment_coll.find(match_enroll, ENROLLMENT_MATRIZ_PROJECTION).to_list(length=None)
     # F-CXC-FILTRO-PROGRAMA: si hay curso_id especifico, NO traer todos los
     # cursos (optimizacion + consistencia con lo que ve el usuario).
+    # F-2026-08-13-FIX-CURSOS-MATRIZ-FILTRO (Kevin 2026-08-13): si hay
+    # cursos_permitidos (EC/COORD con cursos_asignados), filtrar courses
+    # por ese alcance, no traer TODOS los cursos del sistema. Antes el EC
+    # veia 9 cursos en la lista aunque solo tuviera 1 asignado, lo cual
+    # confundia al usuario.
     if curso_id is not None:
-        courses_task = course_coll.find({"_id": curso_id}, COURSE_MATRIZ_PROJECTION).to_list(length=None)
+        courses_query = {"_id": curso_id}
+    elif cursos_permitidos is not None:
+        courses_query = {"_id": {"$in": cursos_permitidos}}
     else:
-        courses_task = course_coll.find({}, COURSE_MATRIZ_PROJECTION).to_list(length=None)
+        courses_query = {}
+    courses_task = course_coll.find(courses_query, COURSE_MATRIZ_PROJECTION).to_list(length=None)
     enrollments, courses = await asyncio.gather(enrollments_task, courses_task)
 
     # F-2026-08-22-PAYMENTS-MATRIZ-PERF: enrollments y courses ahora son
@@ -2036,6 +2044,15 @@ async def get_matriz_pagos(
             "modulos": modulos_out,
             "total_ingresos": round(total_ingresos_e, 2),
             "por_cobrar": round(por_cobrar_e, 2),
+            # F-2026-08-13-FIX-TOTAL-A-PAGAR-OUTPUT (Kevin 2026-08-13): el
+            # frontend esperaba `total_a_pagar`, `total_pagado` y
+            # `saldo_pendiente` en cada estudiante pero el service solo
+            # exponia `total_ingresos` y `por_cobrar`. Resultado: el badge
+            # "Total" del modal Inscritos mostraba 0/N. Ahora se exponen
+            # los 3 campos crudos de la BD.
+            "total_a_pagar": round(total_a_pagar_e, 2),
+            "total_pagado": round(total_ingresos_e, 2),
+            "saldo_pendiente": round(float(e.get("saldo_pendiente") or 0.0), 2),
             # F-074-FIX-4: campos de auditoria de descuentos
             "beca_porcentaje": round(beca_porcentaje, 1),
             "ahorro": round(ahorro_e, 2),
