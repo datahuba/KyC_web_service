@@ -11,6 +11,7 @@ Flujo:
      y se le envía un email de bienvenida con su contraseña inicial
 """
 
+import asyncio
 import math
 import re
 from datetime import datetime
@@ -115,6 +116,10 @@ async def get_forms_for_admin(
       "responsable" CPD (no aplica por ahora, así que solo los generales)
     - encargado_curso / coordinador: ve los delegados a sus cursos_asignados
     - admin: ve todos (como superadmin pero sin permisos de crear/eliminar)
+
+    B-2026-08-22-PRE-REG-BATCH-ENRICH: count + find corren en paralelo
+    con asyncio.gather (en vez de serial). Como MongoDB Atlas tiene
+    ~200ms de latencia por round trip, esto ahorra ~200ms.
     """
     query: dict = {}
     if current_user.rol == UserRole.CPD:
@@ -127,9 +132,11 @@ async def get_forms_for_admin(
     elif current_user.rol not in (UserRole.SUPERADMIN, UserRole.ADMIN):
         return [], 0
 
-    total = await PreRegistrationForm.find(query).count()
     skip = (page - 1) * per_page
-    items = await PreRegistrationForm.find(query).sort("-created_at").skip(skip).limit(per_page).to_list()
+    total, items = await asyncio.gather(
+        PreRegistrationForm.find(query).count(),
+        PreRegistrationForm.find(query).sort("-created_at").skip(skip).limit(per_page).to_list(),
+    )
     return items, total
 
 
@@ -349,7 +356,7 @@ async def get_submissions_for_admin(
     page: int = 1,
     per_page: int = 20,
     con_descuento: bool = False,
-) -> Tuple[List[PreRegistration], int]:
+) -> Tuple[List[PreRegistration], int, dict]:
     """Lista submissions visibles para el usuario actual.
 
     F-2026-08-12-DESCUENTOS-TAB (Kevin 2026-08-12 post-reunion): si
@@ -357,6 +364,10 @@ async def get_submissions_for_admin(
     de vicerrectorado (> 0). Usado por la pestana "Descuentos" del panel
     de pre-registros para que el EC tenga una vista unificada de todos
     los descuentos pendientes/aprobados/rechazados.
+
+    B-2026-08-22-PRE-REG-BATCH-ENRICH: devuelve (items, total, forms_by_id)
+    con los forms ya cargados para que el enrich NO tenga que re-query.
+    count + find corren en paralelo con asyncio.gather.
     """
     # Primero, set de form_ids visibles
     form_query: dict = {}
@@ -365,38 +376,40 @@ async def get_submissions_for_admin(
     elif current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
         cursos = current_user.cursos_asignados or []
         if not cursos:
-            return [], 0
+            return [], 0, {}
         form_query = {"programa_id": {"$in": cursos}}
     elif current_user.rol not in (UserRole.SUPERADMIN, UserRole.ADMIN):
-        return [], 0
+        return [], 0, {}
 
     # Si se filtró por form_id, validar que el form sea visible
     if form_id:
         try:
             form_oid = PydanticObjectId(form_id)
         except Exception:
-            return [], 0
+            return [], 0, {}
         form = await PreRegistrationForm.get(form_oid)
         if not form:
-            return [], 0
+            return [], 0, {}
         # Chequear visibilidad del form individual contra el rol
         if current_user.rol == UserRole.CPD and form.programa_id is not None:
-            return [], 0
+            return [], 0, {}
         if current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
             cursos = current_user.cursos_asignados or []
             if form.programa_id not in cursos:
-                return [], 0
+                return [], 0, {}
         form_query = {"_id": form_oid}
 
     # B-2026-08-22-PRE-REG-BATCH-ENRICH: si la query ya fija un _id
     # (caso form_id pasado y validado), no hace falta re-leer todos los
     # forms. Si la query es por programa_id, si.
     if "_id" in form_query:
-        form_ids_oid = [form_query["_id"]]
+        forms = await PreRegistrationForm.find(form_query).to_list()
     else:
-        form_ids_oid = [f.id for f in await PreRegistrationForm.find(form_query).to_list()]
+        forms = await PreRegistrationForm.find(form_query).to_list()
+    forms_by_id: dict = {f.id: f for f in forms}
+    form_ids_oid = list(forms_by_id.keys())
     if not form_ids_oid:
-        return [], 0
+        return [], 0, {}
 
     sub_query: dict = {"form_id": {"$in": form_ids_oid}}
     if estado and estado in ("pendiente", "aprobado", "rechazado"):
@@ -406,10 +419,13 @@ async def get_submissions_for_admin(
     if con_descuento:
         sub_query["data.descuento_porcentaje"] = {"$gt": 0}
 
-    total = await PreRegistration.find(sub_query).count()
     skip = (page - 1) * per_page
-    items = await PreRegistration.find(sub_query).sort("-created_at").skip(skip).limit(per_page).to_list()
-    return items, total
+    # B-2026-08-22-PRE-REG-BATCH-ENRICH: count + find en paralelo
+    total, items = await asyncio.gather(
+        PreRegistration.find(sub_query).count(),
+        PreRegistration.find(sub_query).sort("-created_at").skip(skip).limit(per_page).to_list(),
+    )
+    return items, total, forms_by_id
 
 
 def _normalize_descuento(value) -> Optional[float]:

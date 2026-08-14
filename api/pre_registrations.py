@@ -398,11 +398,11 @@ async def list_submissions(
     con_descuento: bool = Query(False, description="F-2026-08-12-DESCUENTOS-TAB: solo submissions con descuento propuesto > 0"),
     current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-FIX-COUNTERS-403: encargado_curso/coordinador tambien pueden listar submissions
 ) -> Any:
-    items, total = await pre_registration_service.get_submissions_for_admin(
+    items, total, forms_by_id = await pre_registration_service.get_submissions_for_admin(
         current_user=current_user, form_id=form_id, estado=estado,
         page=page, per_page=per_page, con_descuento=con_descuento,
     )
-    enriched = await _enrich_submissions_batch(items)
+    enriched = await _enrich_submissions_batch(items, preloaded_forms=forms_by_id)
     total_pages = math.ceil(total / per_page) if total > 0 else 0
     return {
         "data": enriched,
@@ -561,26 +561,27 @@ async def _enrich_forms_batch(forms: List[PreRegistrationForm]) -> List[PreRegis
     return enriched
 
 
-async def _enrich_submissions_batch(subs) -> List[PreRegistrationResponse]:
-    """B-2026-08-22-PRE-REG-BATCH-ENRICH: enrich N submissions en 2 queries
-    (1 para forms, 1 para courses) en vez de 2N awaits serial.
-    Reduce /submissions de ~8.3s a <1s.
+async def _enrich_submissions_batch(subs, preloaded_forms: Optional[dict] = None) -> List[PreRegistrationResponse]:
+    """B-2026-08-22-PRE-REG-BATCH-ENRICH: enrich N submissions en 1 sola
+    query (1 para courses) en vez de 2N awaits serial. Acepta
+    preloaded_forms para ahorrarse el find de forms cuando el service
+    ya los cargo. Reduce /submissions de ~8.3s a <1s.
     """
     if not subs:
         return []
 
-    # 1) Recolectar form_ids unicos
-    form_ids: List[PydanticObjectId] = list({
-        s.form_id for s in subs if s.form_id is not None
+    # 1) Si el service ya cargo los forms, usarlos. Si no, 1 query.
+    forms_by_id: dict = dict(preloaded_forms) if preloaded_forms else {}
+    missing_form_ids: List[PydanticObjectId] = list({
+        s.form_id for s in subs
+        if s.form_id is not None and s.form_id not in forms_by_id
     })
+    if missing_form_ids:
+        forms = await PreRegistrationForm.find({"_id": {"$in": missing_form_ids}}).to_list()
+        for f in forms:
+            forms_by_id[f.id] = f
 
-    # 2) UN query para todos los forms
-    forms_by_id: dict = {}
-    if form_ids:
-        forms = await PreRegistrationForm.find({"_id": {"$in": form_ids}}).to_list()
-        forms_by_id = {f.id: f for f in forms}
-
-    # 3) Recolectar programa_ids unicos (de los forms) y UN query para courses
+    # 2) Recolectar programa_ids unicos (de los forms) y UN query para courses
     programa_ids: List[PydanticObjectId] = list({
         f.programa_id for f in forms_by_id.values() if f.programa_id is not None
     })
@@ -589,7 +590,7 @@ async def _enrich_submissions_batch(subs) -> List[PreRegistrationResponse]:
         courses = await Course.find({"_id": {"$in": programa_ids}}).to_list()
         courses_by_id = {c.id: c for c in courses}
 
-    # 4) Construir respuestas en memoria
+    # 3) Construir respuestas en memoria
     enriched: List[PreRegistrationResponse] = []
     for sub in subs:
         data = PreRegistrationResponse.model_validate(sub, from_attributes=True)
