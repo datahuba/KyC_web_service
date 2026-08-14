@@ -43,6 +43,8 @@ async def get_courses(
     tipo_curso: Optional[TipoCurso] = None,
     modalidad: Optional[Modalidad] = None,
     estado: Optional[str] = None,
+    # FIX-ISSUE-272 (2026-08-14): filtro por es_historico.
+    es_historico: Optional[bool] = None,
     # F-2026-08-12-EC-CURSOS-FILTRO (Kevin 2026-08-12): si llega una lista
     # de cursos_asignados, filtra la query a SOLO esos cursos. Usado por
     # EC/COORDINADOR/COBRANZA-segmentado para ver solo SUS cursos.
@@ -63,6 +65,7 @@ async def get_courses(
             (programado | en_ejecucion | cerrado). Como el estado se
             calcula en runtime según fechas, se trae un set más amplio
             y se filtra en memoria (es aceptable hasta ~500 cursos).
+        es_historico: FIX-ISSUE-272 - filtrar por es_historico=true/false.
         cursos_asignados: F-2026-08-12-EC-CURSOS-FILTRO - si no es None,
             filtra a solo los cursos en esta lista (usado para EC).
     """
@@ -90,7 +93,11 @@ async def get_courses(
     if modalidad:
         query = query.find(Course.modalidad == modalidad)
 
-    # 5. F-2026-08-12-EC-CURSOS-FILTRO: si cursos_asignados es lista vacia,
+    # 5. FIX-ISSUE-272: Filtro es_historico
+    if es_historico is not None:
+        query = query.find(Course.es_historico == es_historico)
+
+    # 6. F-2026-08-12-EC-CURSOS-FILTRO: si cursos_asignados es lista vacia,
     # retornar 0 resultados (no exponer todos los cursos).
     if cursos_asignados is not None:
         if not cursos_asignados:
@@ -101,7 +108,8 @@ async def get_courses(
     skip = (page - 1) * per_page
     courses = await query.sort("-created_at").skip(skip).limit(per_page).to_list()
 
-    # F-080: filtro en memoria por estado calculado
+    # F-080: filtro en memoria por estado calculado (no se puede hacer
+    # en la query porque es un calculo runtime segun fechas).
     if estado:
         courses = [c for c in courses if c.get_estado_actual() == estado]
 
