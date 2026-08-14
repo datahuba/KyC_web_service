@@ -9,7 +9,7 @@ from services import student_service
 from beanie import PydanticObjectId
 
 # IMPORTAMOS NUESTRAS LLAVES DE SEGURIDAD GRANULARES DE LA UAGRM
-from api.dependencies import require_superadmin, require_cpd, require_staff, require_cobranza, get_current_user, require_encargado_curso, filtro_cursos_por_rol, require_cpd_or_encargado_curso_or_coordinador
+from api.dependencies import require_superadmin, require_cpd, require_staff, require_cobranza, get_current_user, require_encargado_curso, filtro_cursos_por_rol
 
 router = APIRouter()
 
@@ -58,11 +58,8 @@ async def read_students(
     )
 
     total_pages = math.ceil(total_count / per_page) if total_count > 0 else 0
-    # FIX-ISSUE-250 (2026-08-14): items + data (retro-compat) para que el
-    # frontend lea `items` consistente con /calendario y /disponibles.
     return {
-        "items": students,
-        "data": students,  # alias retro-compat
+        "data": students,
         "meta": PaginationMeta(
             page=page, limit=per_page, totalItems=total_count, totalPages=total_pages,
             hasNextPage=(page < total_pages), hasPrevPage=(page > 1)
@@ -740,27 +737,12 @@ async def validar_descuento_vicerrectorado(
 # ============================================================================
 @router.post("/import/excel", summary="Importar Estudiantes de forma Masiva desde Excel")
 async def import_students(
-    file: UploadFile = File(...),
+    file: UploadFile = File(...), 
     curso_id: Optional[PydanticObjectId] = Form(None), # Curso opcional para auto-inscribir a los estudiantes importados
-    # FIX-ISSUE-253 (2026-08-14): permitir a EC/COORD/CPD/ADMIN/SUPERADMIN
-    # usar Excel upload. Antes SOLO CPD, lo que contradice la feature
-    # F-HISTORICO-AUTOSERVICIO-EXCEL. Si EC/COORD trae curso_id, se valida
-    # que sea uno de sus cursos_asignados.
-    current_user: User = Depends(require_cpd_or_encargado_curso_or_coordinador)
+    current_user: User = Depends(require_cpd)
 ) -> Any:
     if not file.filename.lower().endswith(('.xlsx', '.xls', '.csv')):
         raise HTTPException(400, "Formato no permitido. Sube un archivo .xlsx, .xls o .csv")
-    # FIX-ISSUE-253: validar que el EC solo pueda importar a SUS cursos.
-    from models.enums import UserRole
-    if curso_id and current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
-        if curso_id not in (current_user.cursos_asignados or []):
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    "No tienes asignado este curso. Solo puedes importar "
-                    "estudiantes a cursos en tu lista de cursos asignados."
-                ),
-            )
     contents = await file.read()
     try:
         return await student_service.import_students_from_excel(contents, curso_id, file.filename)

@@ -323,10 +323,8 @@ async def list_enrollments(
         # tambien para estudiantes (sus propias inscripciones) para que
         # vean el nombre del curso (no "Desconocido").
         enriched_enrollments = await enrollment_service.enrich_enrollments_batch(enrollments)
-        # FIX-ISSUE-250 (2026-08-14): items + data (retro-compat).
         return {
-            "items": enriched_enrollments,
-            "data": enriched_enrollments,  # alias retro-compat
+            "data": enriched_enrollments,
             "meta": PaginationMeta(
                 page=page, limit=per_page, totalItems=total_count,
                 totalPages=total_pages, hasNextPage=has_next, hasPrevPage=has_prev
@@ -346,9 +344,7 @@ async def list_enrollments(
     enriched_enrollments = await enrollment_service.enrich_enrollments_batch(enrollments)
 
     return {
-        # FIX-ISSUE-250 (2026-08-14): items + data (retro-compat).
-        "items": enriched_enrollments,
-        "data": enriched_enrollments,  # alias retro-compat
+        "data": enriched_enrollments,
         "meta": PaginationMeta(
             page=page, limit=per_page, totalItems=total_count,
             totalPages=total_pages, hasNextPage=has_next, hasPrevPage=has_prev

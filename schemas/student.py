@@ -15,7 +15,7 @@ Schemas incluidos:
 from datetime import datetime
 from typing import Optional, List
 import re
-from pydantic import BaseModel, Field, EmailStr, field_validator, AliasChoices
+from pydantic import BaseModel, Field, EmailStr, field_validator
 from models.enums import Sexo, EstadoCivil, TipoSangre
 from models.base import PyObjectId
 
@@ -71,32 +71,15 @@ class StudentCreate(BaseModel):
     """
     
     # Campos obligatorios
-    # FIX-ISSUE-260 (2026-08-14): aceptar `carnet_identidad` (lo que envia
-    # el frontend UI) como alias de `carnet`. Asi no rompe el schema.
-    registro: str = Field(
-        ...,
-        description="Número de registro único del estudiante (usado como username)",
-        validation_alias=AliasChoices("registro", "registro_universitario"),
-    )
-    carnet: str = Field(
-        ...,
-        description="Carnet de identidad (será usado como contraseña inicial y almacenado si no se provee un password)",
-        validation_alias=AliasChoices("carnet", "carnet_identidad", "ci"),
-    )
-
+    registro: str = Field(..., description="Número de registro único del estudiante (usado como username)")
+    carnet: str = Field(..., description="Carnet de identidad (será usado como contraseña inicial y almacenado si no se provee un password)")
+    
     # Campos opcionales nuevos (Para formulario rápido)
     password: Optional[str] = Field(None, min_length=5, description="Contraseña inicial del estudiante (opcional, fallback a carnet)")
     course_id: Optional[PyObjectId] = Field(None, description="ID del curso para inscripción inicial (opcional)")
-
+    
     # Campos opcionales estándar
-    # FIX-ISSUE-260: aceptar `nombre_completo` como alias de `nombre`.
-    nombre: Optional[str] = Field(
-        None,
-        min_length=1,
-        max_length=200,
-        description="Nombre completo del estudiante",
-        validation_alias=AliasChoices("nombre", "nombre_completo", "full_name"),
-    )
+    nombre: Optional[str] = Field(None, min_length=1, max_length=200, description="Nombre completo del estudiante")
     email: Optional[EmailStr] = Field(None, description="Correo electrónico")
     complemento_carnet: Optional[str] = Field(None, max_length=10, description="Complemento del CI (ej. '1D', '1J'), distinto de la extensión/lugar de expedición.")
     extension: Optional[str] = Field(None, description="Extension del carnet de identidad")

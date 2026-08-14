@@ -4,7 +4,6 @@ import sys
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import ORJSONResponse  # FIX-ISSUE-201-EXT
 from core.config import settings
 from core.database import init_db
 from api.api import api_router
@@ -85,12 +84,7 @@ async def _job_verificar_inactividad_periodico():
 
 app = FastAPI(
     title=settings.APP_NAME,
-    openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    # FIX-ISSUE-201-EXT (2026-08-14): usar ORJSONResponse como default.
-    # orjson serializa UTF-8 sin escapar (ensure_ascii=False) y es mas
-    # rapido que el json standard. Esto arregla el problema de caracteres
-    # acentuados como "VERSIÃ"N" -> "VERSIÓN" en /courses/calendario.
-    default_response_class=ORJSONResponse,
+    openapi_url=f"{settings.API_V1_STR}/openapi.json"
 )
 
 # Compresión Gzip para todas las respuestas mayores a 1000 bytes (1 KB)

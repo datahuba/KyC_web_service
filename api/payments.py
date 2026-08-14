@@ -456,11 +456,9 @@ async def list_payments(
     has_prev = page > 1
     
     enriched_payments = await payment_service.enrich_payments_with_details_bulk(payments)
-
+    
     return {
-        # FIX-ISSUE-250 (2026-08-14): items + data (retro-compat).
-        "items": enriched_payments,
-        "data": enriched_payments,  # alias retro-compat
+        "data": enriched_payments,
         "meta": PaginationMeta(
             page=page,
             limit=per_page,
@@ -602,9 +600,7 @@ async def get_reporte_caja_endpoint(
     has_prev = page > 1
 
     return {
-        # FIX-ISSUE-250 (2026-08-14): items + data (retro-compat).
-        "items": enriched,
-        "data": enriched,  # alias retro-compat
+        "data": enriched,
         "meta": PaginationMeta(
             page=page,
             limit=per_page,
@@ -664,9 +660,7 @@ async def get_lista_habilitados(
     # explícitamente o FastAPI falla con PydanticSerializationError.
     return jsonable_encoder(
         {
-            # FIX-ISSUE-250 (2026-08-14): items + data (retro-compat).
-            "items": enriched,
-            "data": enriched,  # alias retro-compat
+            "data": enriched,
             "resumen": resultado["resumen"],
             "meta": PaginationMeta(
                 page=page, limit=per_page, totalItems=resultado["total_count"], totalPages=total_pages,
