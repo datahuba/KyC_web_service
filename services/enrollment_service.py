@@ -572,13 +572,16 @@ async def get_all_enrollments(
     (True) o no (False), y opcionalmente por un Discount específico.
     """
     query = Enrollment.find()
-    
+
     if estado:
         query = query.find(Enrollment.estado == estado)
     if curso_id:
-        query = query.find(Enrollment.curso_id == curso_id)
+        # FIX-ISSUE-254 (2026-08-14): antes usaba `==` que en Beanie+Mongo
+        # a veces no matchea con PydanticObjectId. Ahora usamos `In([id])`
+        # que es consistente con la lista de cursos_permitidos.
+        query = query.find(In(Enrollment.curso_id, [curso_id]))
     if estudiante_id:
-        query = query.find(Enrollment.estudiante_id == estudiante_id)
+        query = query.find(In(Enrollment.estudiante_id, [estudiante_id]))
     if cursos_permitidos is not None:
         query = query.find(In(Enrollment.curso_id, cursos_permitidos))
     if descuento_id:

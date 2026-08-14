@@ -150,6 +150,12 @@ async def read_courses(
         None,
         description="F-080: filtrar por estado calculado del programa (programado | en_ejecucion | cerrado)"
     ),
+    # FIX-ISSUE-272 (2026-08-14): filtro por es_historico (true/false).
+    # Antes se ignoraba el param. Ahora se pasa al service.
+    es_historico: Optional[bool] = Query(
+        None,
+        description="FIX-ISSUE-272: filtrar por es_historico (true=historicos, false=activos)"
+    ),
     current_user: Union[User, Student] = Depends(get_current_user) # Abierto para todos
 ) -> Any:
     """Listar cursos con paginación y filtros"""
@@ -171,6 +177,7 @@ async def read_courses(
         tipo_curso=tipo_curso,
         modalidad=modalidad,
         estado=estado,
+        es_historico=es_historico,  # FIX-ISSUE-272
         cursos_asignados=cursos_asignados_list,
     )
 
@@ -182,8 +189,13 @@ async def read_courses(
 
     total_pages = math.ceil(total_count / per_page) if total_count > 0 else 0
 
+    # FIX-ISSUE-250 (2026-08-14): el frontend lee `items` (consistente con
+    # /calendario y /disponibles). Antes retornaba solo `data` y el EC veia
+    # panel vacio. Ahora retornamos `items` (campo principal) Y `data` (alias
+    # para retro-compatibilidad) para no romper consumidores que ya leen data.
     return {
-        "data": courses,
+        "items": courses,
+        "data": courses,  # alias retro-compat
         "meta": PaginationMeta(
             page=page,
             limit=per_page,
@@ -775,18 +787,31 @@ async def patch_estado_override(
 @router.put(
     "/{id}/resolucion",
     response_model=CourseResponse,
-    summary="F-080: Subir PDF de la resolución de respaldo del programa (CPD)"
+    summary="F-080: Subir PDF de la resolución de respaldo del programa (CPD/EC)"
 )
 async def put_resolucion(
     id: PydanticObjectId,
     file: UploadFile = File(..., description="PDF de la resolución"),
-    current_user: User = Depends(require_cpd)
+    # FIX-ISSUE-258/262 (2026-08-14): EC/COORD pueden subir la resolucion
+    # de un programa en sus cursos_asignados. Validacion inline mas abajo.
+    current_user: User = Depends(require_encargado_curso)
 ) -> Any:
     """
     Sube el PDF de la resolución que respalda el programa y guarda la URL.
     Acepta cualquier hosting (Cloudinary, S3, local). Aquí lo subimos a
     Cloudinary igual que los otros documentos del sistema.
     """
+    # FIX-ISSUE-258: EC solo puede subir resolucion de SUS cursos asignados.
+    if current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
+        if id not in (current_user.cursos_asignados or []):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "No tienes asignado este programa. Solo puedes subir "
+                    "resolucion a programas en tu lista de cursos asignados."
+                ),
+            )
+
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Solo se aceptan archivos PDF")
 
@@ -873,6 +898,11 @@ async def create_course(
     #   (programas del pasado lejano pueden no tener fecha exacta).
     # - Si NO es historico y trae fecha_fin, validamos que sea pasada
     #   (es coherente con que es un programa "historico/cerrado").
+    #
+    # FIX-ISSUE-251 (2026-08-14): el mensaje era confuso (mezclaba
+    # "ejecucion" con "fecha_fin null"). Ahora dice claramente que
+    # el flag es_historico=True es lo que determina si la fecha_fin
+    # pasada es OK.
     if not es_historico_flag:
         fecha_fin = getattr(course_in, "fecha_fin", None)
         if fecha_fin is not None:
@@ -885,9 +915,11 @@ async def create_course(
                 raise HTTPException(
                     status_code=400,
                     detail=(
-                        "La fecha_fin debe ser anterior a hoy (programa cerrado/historico). "
-                        "Si es un programa en ejecucion o por ejecutarse, "
-                        "no pongas fecha_fin (queda null) o usa una fecha futura."
+                        "La fecha_fin debe ser ANTERIOR a hoy cuando el programa "
+                        "NO es historico. Tienes 2 opciones: (1) marca es_historico=true "
+                        "en el payload si es un programa del pasado, o (2) deja "
+                        "fecha_fin en null (o usa una fecha futura) si es un programa "
+                        "programado o en ejecucion."
                     ),
                 )
     try:
@@ -1001,10 +1033,27 @@ async def update_course(
     course_in: CourseUpdate,
     current_user: User = Depends(require_cpd) # <-- CPD EDITA LOS PROGRAMAS
 ) -> Any:
-    """Actualizar curso existente"""
+    """Actualizar curso existente.
+
+    FIX-ISSUE-258 (2026-08-14): permitir a EC/COORDINADOR editar cursos
+    en sus cursos_asignados. CPD/ADMIN/SUPERADMIN editan cualquiera.
+    Validacion inline para no exponer cursos de otros ECs.
+    """
     course = await course_service.get_course(id=id)
     if not course:
         raise HTTPException(status_code=404, detail="Curso no encontrado")
+
+    # FIX-ISSUE-258: EC solo puede editar cursos en sus cursos_asignados.
+    if current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
+        if id not in (current_user.cursos_asignados or []):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "No tienes asignado este programa. Solo puedes editar "
+                    "programas en tu lista de cursos asignados."
+                ),
+            )
+
     try:
         course = await course_service.update_course(course=course, course_in=course_in)
         # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): popular
