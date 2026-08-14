@@ -1006,27 +1006,10 @@ async def update_course(
     course_in: CourseUpdate,
     current_user: User = Depends(require_cpd) # <-- CPD EDITA LOS PROGRAMAS
 ) -> Any:
-    """Actualizar curso existente.
-
-    FIX-ISSUE-258 (2026-08-14): permitir a EC/COORDINADOR editar cursos
-    en sus cursos_asignados. CPD/ADMIN/SUPERADMIN editan cualquiera.
-    Validacion inline para no exponer cursos de otros ECs.
-    """
+    """Actualizar curso existente"""
     course = await course_service.get_course(id=id)
     if not course:
         raise HTTPException(status_code=404, detail="Curso no encontrado")
-
-    # FIX-ISSUE-258: EC solo puede editar cursos en sus cursos_asignados.
-    if current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
-        if id not in (current_user.cursos_asignados or []):
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    "No tienes asignado este programa. Solo puedes editar "
-                    "programas en tu lista de cursos asignados."
-                ),
-            )
-
     try:
         course = await course_service.update_course(course=course, course_in=course_in)
         # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): popular
