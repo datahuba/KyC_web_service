@@ -84,7 +84,15 @@ async def _job_verificar_inactividad_periodico():
 
 app = FastAPI(
     title=settings.APP_NAME,
-    openapi_url=f"{settings.API_V1_STR}/openapi.json"
+    openapi_url=f"{settings.API_V1_STR}/openapi.json",
+    # F-2026-08-13-FIX-307-REDIRECT (Kevin): el frontend llama
+    # /api/v1/courses sin trailing slash, y FastAPI por default redirige
+    # a /api/v1/courses/ con 307. El cliente (axios) NO sigue el redirect
+    # porque la respuesta original es 307, no 200. Resultado: el frontend
+    # ve una respuesta vacia y la UI no muestra datos.
+    # Fix: desactivar el redirect automatico. El endpoint / sigue siendo
+    # accesible tanto con como sin trailing slash.
+    redirect_slashes=False,
 )
 
 # Compresión Gzip para todas las respuestas mayores a 1000 bytes (1 KB)
