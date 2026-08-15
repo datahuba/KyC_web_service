@@ -277,7 +277,13 @@ class TestAprobarSolicitud:
             return self
         monkeypatch.setattr(TramiteSolicitud, "save", fake_save)
 
-        staff = _make_staff(UserRole.CPD)
+        # F-CERT-APROBACION (Kevin 2026-07-30): _puede_aprobar_esta_solicitud
+        # restringe quien puede aprobar/rechazar. CPD figura en STAFF_ROLES_REVISION
+        # (puede listar, para auditoria) pero NO puede aprobar — solo
+        # ADMIN/SUPERADMIN (cualquier solicitud) o ENCARGADO_CURSO (si el
+        # course_id esta en sus cursos_asignados). Usamos ADMIN aca porque
+        # este test no ejercita el alcance por curso.
+        staff = _make_staff(UserRole.ADMIN)
         result = await tramite_service.aprobar_solicitud(str(sol_mock.id), staff)
 
         assert result.estado == "aprobada"
@@ -291,7 +297,9 @@ class TestAprobarSolicitud:
             return sol_mock
         monkeypatch.setattr(tramite_service, "obtener_solicitud", fake_get)
 
-        staff = _make_staff(UserRole.CPD)
+        # F-CERT-APROBACION: mismo motivo que el test anterior, ADMIN puede
+        # aprobar cualquier solicitud sin depender de cursos_asignados.
+        staff = _make_staff(UserRole.ADMIN)
         with pytest.raises(HTTPException) as exc:
             await tramite_service.aprobar_solicitud(str(sol_mock.id), staff)
         assert exc.value.status_code == 409
