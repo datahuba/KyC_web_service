@@ -50,4 +50,5 @@ _test_*.mjs
 _list_*.py
 _set_*.py
 _commit_msg.txt
+commit-msg-*.txt
 .gitignore.append
