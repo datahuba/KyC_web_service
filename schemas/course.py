@@ -85,6 +85,21 @@ class CourseCreate(BaseModel):
     costo_total_interno: float = Field(default=0, ge=0, description="Costo total (colegiatura) del programa. Obligatorio > 0 si NO es historico.")
     matricula_interno: float = Field(default=0, ge=0, description="Matrícula institucional del programa. Obligatorio si NO es historico.")
 
+    # F-FIX-MATRICULA-DIFERENCIADA (2026-08-16): estos dos overrides existen
+    # en `models/course.py` desde F-2026-08-12-DESCUENTO-BECA y los consume
+    # `services/matricula_helper.py`, pero NINGUN schema los declaraba. Como
+    # Pydantic v2 descarta los campos extra, lo que el admin cargaba en el
+    # formulario se perdia y TODOS los estudiantes terminaban pagando el
+    # default global. Es un bug de dinero, no cosmetico.
+    matricula_primer_carrera: Optional[float] = Field(
+        None, ge=0,
+        description="Override de matricula para estudiantes de PRIMERA CARRERA. Si None, usa MATRICULA_PRIMER_CARRERA_DEFAULT."
+    )
+    matricula_profesional: Optional[float] = Field(
+        None, ge=0,
+        description="Override de matricula para estudiantes CON TITULO PROFESIONAL. Si None, usa MATRICULA_PROFESIONAL_DEFAULT."
+    )
+
     # ISSUE-P-CARGO-MULTIITEM: lista de ítems de cargo adicional/complementario
     # al programa (ej. varios talleres, cada uno con su propio costo).
     cargo_adicional_items: Optional[List[CargoAdicionalItemCreate]] = Field(default_factory=list)
@@ -184,6 +199,11 @@ class CourseResponse(BaseModel):
     
     costo_total_interno: float
     matricula_interno: float
+    # F-FIX-MATRICULA-DIFERENCIADA (2026-08-16): sin esto el frontend no
+    # podia leer de vuelta lo guardado y el formulario de edicion los
+    # mostraba siempre vacios.
+    matricula_primer_carrera: Optional[float] = None
+    matricula_profesional: Optional[float] = None
 
     cargo_adicional_items: List[CargoAdicionalItemCreate] = Field(default_factory=list)
     
@@ -271,6 +291,9 @@ class CourseUpdate(BaseModel):
     
     costo_total_interno: Optional[float] = Field(None, ge=0)
     matricula_interno: Optional[float] = Field(None, ge=0)
+    # F-FIX-MATRICULA-DIFERENCIADA (2026-08-16): ver nota en CourseCreate.
+    matricula_primer_carrera: Optional[float] = Field(None, ge=0)
+    matricula_profesional: Optional[float] = Field(None, ge=0)
 
     cargo_adicional_items: Optional[List[CargoAdicionalItemCreate]] = None
 
