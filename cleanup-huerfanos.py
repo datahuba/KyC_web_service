@@ -5,12 +5,29 @@ Uso:
     python cleanup-huerfanos.py --dry-run    # solo muestra que se borraria
     python cleanup-huerfanos.py --apply      # aplica los cambios
 """
-import asyncio
 import argparse
+import asyncio
+import os
+import sys
 from motor.motor_asyncio import AsyncIOMotorClient
 
 
-MONGODB_URL = "mongodb+srv://joelgonzalesdmc:yBSZrAirOJXt0J6T@kyc.eflzqkm.mongodb.net/?appName=KyC"
+# F-SEC-CREDENCIALES (2026-08-16): antes esta cadena venia HARDCODEADA con
+# usuario y contrasena de Atlas, y el archivo estaba commiteado en el repo.
+# Ahora se lee del entorno, igual que `core/config.py`.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
+MONGODB_URL = os.getenv("MONGODB_URL")
+if not MONGODB_URL:
+    sys.exit(
+        "ERROR: falta la variable de entorno MONGODB_URL. "
+        "Defini el .env del proyecto o exportala antes de correr este script."
+    )
 DB_NAME = "KyC"
 
 
