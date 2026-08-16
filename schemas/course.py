@@ -36,6 +36,27 @@ class ModuloCreate(BaseModel):
             return None
         return v
 
+    # F-FIX-ESTADO-OPERACIONAL (2026-08-16): sin este campo aca, Pydantic
+    # descartaba lo que mandaba el <select> del CourseForm y el cronograma
+    # del programa cargado en ejecucion quedaba vacio. Ver models/course.py.
+    estado_operacional: Optional[str] = Field(
+        None,
+        description="Estado en el cronograma: 'Pendiente' | 'En Ejecucion' | 'Ejecutado'"
+    )
+
+    @field_validator('estado_operacional', mode='before')
+    @classmethod
+    def _validar_estado_operacional(cls, v):
+        """Acepta vacio como None y valida contra los 3 valores del selector."""
+        if v is None or v == '' or v == 'null' or v == 'undefined':
+            return None
+        permitidos = {'Pendiente', 'En Ejecucion', 'Ejecutado'}
+        if v not in permitidos:
+            raise ValueError(
+                f"estado_operacional invalido: {v!r}. Valores permitidos: {sorted(permitidos)}"
+            )
+        return v
+
 
 class CargoAdicionalItemCreate(BaseModel):
     """ISSUE-P-CARGO-MULTIITEM: un ítem individual de cargo adicional (nombre + costo)."""

@@ -56,6 +56,22 @@ class Modulo(BaseModel):
         description="Fecha de fin del módulo (UTC). Usado para Certificados de Notas y calendario por módulo."
     )
 
+    # F-FIX-ESTADO-OPERACIONAL (2026-08-16): el frontend ya ofrecia este
+    # selector desde hacia tiempo (CourseForm, solo visible al cargar un
+    # programa con tipo_programa='en_ejecucion'), pero el campo NO existia
+    # aca. Pydantic v2 descarta los campos extra, asi que lo que el
+    # encargado elegia — que modulos ya se dictaron y cuales faltan al
+    # cargar un programa a mitad de camino — se perdia en SILENCIO al
+    # guardar. Opcional para no romper los cursos ya existentes.
+    estado_operacional: Optional[str] = Field(
+        default=None,
+        description=(
+            "Estado del módulo en el cronograma al cargar un programa ya en "
+            "ejecución: 'Pendiente' | 'En Ejecucion' | 'Ejecutado'. None en "
+            "programas nuevos, donde todos los módulos arrancan sin dictar."
+        )
+    )
+
 
 # ========================================================================
 # SUB-MODELO: CARGO ADICIONAL MULTI-ÍTEM (ISSUE-P-CARGO-MULTIITEM, 2026-07-08)
