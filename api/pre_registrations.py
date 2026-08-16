@@ -261,7 +261,8 @@ async def list_forms(
     enriched = await _enrich_forms_batch(items)
     total_pages = math.ceil(total / per_page) if total > 0 else 0
     return {
-        "data": enriched,
+        "items": enriched,
+        "data": enriched,  # alias retro-compat
         "meta": PaginationMeta(
             page=page, limit=per_page, totalItems=total, totalPages=total_pages,
             hasNextPage=(page < total_pages), hasPrevPage=(page > 1),
@@ -405,7 +406,8 @@ async def list_submissions(
     enriched = await _enrich_submissions_batch(items, preloaded_forms=forms_by_id)
     total_pages = math.ceil(total / per_page) if total > 0 else 0
     return {
-        "data": enriched,
+        "items": enriched,
+        "data": enriched,  # alias retro-compat
         "meta": PaginationMeta(
             page=page, limit=per_page, totalItems=total, totalPages=total_pages,
             hasNextPage=(page < total_pages), hasPrevPage=(page > 1),

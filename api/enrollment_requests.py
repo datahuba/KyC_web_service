@@ -108,7 +108,8 @@ async def list_requests(
     enriched = await _enrich_requests(items)
     total_pages = math.ceil(total / per_page) if total > 0 else 0
     return {
-        "data": enriched,
+        "items": enriched,
+        "data": enriched,  # alias retro-compat
         "meta": PaginationMeta(
             page=page,
             limit=per_page,
