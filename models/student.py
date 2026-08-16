@@ -142,10 +142,166 @@ class Student(MongoBaseModel):
     
     # INFORMACIÓN ACADÉMICA DEL TÍTULO PROFESIONAL
     titulo: Optional[dict] = Field(
-        default=None, 
+        default=None,
         description="Información completa del título profesional: {titulo, numero_titulo, año_expedicion, universidad, estado, url, motivo_rechazo}"
     )
-    
+
+    # ========================================================================
+    # F-2026-08-11-CAMPOS-EC: Datos específicos del Diplomado Gestión Tributaria
+    # y demás programas de EDUCACIÓN CONTINUA (reunión UAGRM 2026-08-11).
+    # Todos opcionales porque no aplican a estudiantes profesionales (maestría,
+    # doctorado) que usan otros campos.
+    #
+    # Reunion Kevin 2026-08-11: Lisa/encargada diplomados UAGRM maneja planillas
+    # Excel con estos datos y los necesita persistidos al aprobar el form de
+    # preinscripción. Se reusan campos del modelo cuando existen (departamento,
+    # carrera, modalidad_ingreso) para no duplicar.
+    # ========================================================================
+
+    # Número de REGISTRO UNIVERSITARIO (de la UAGRM, distinto del `registro`
+    # que es el username de login). Ej: "220000123" del kardex UAGRM.
+    registro_universitario: Optional[str] = Field(
+        None, max_length=30,
+        description="Registro universitario UAGRM (de la ficha del estudiante, NO es el username de login).",
+    )
+
+    # Código de AVANCE ACADÉMICO (campo numérico del Excel de Lisa). Indica
+    # cuántos créditos/módulos ha completado el estudiante a nivel UAGRM.
+    avance_academico_codigo: Optional[int] = Field(
+        None, ge=0,
+        description="Código de avance académico del estudiante (nivel UAGRM, planilla de Lisa).",
+    )
+
+    # Número de FORMULARIO DE DESCUENTO (campo del Excel de Lisa). El
+    # estudiante trajo este formulario físico firmado por el director.
+    formulario_descuento_numero: Optional[int] = Field(
+        None, ge=0,
+        description="Número del formulario de descuento (planilla de Lisa). Indica que el estudiante trae descuento pre-aprobado.",
+    )
+
+    # Código de CARRERA (del Excel, ej: "CONT-001"). Distinto de `carrera`
+    # que es el nombre libre de la carrera. Sirve para vincular con sistemas
+    # externos UAGRM.
+    carrera_codigo: Optional[str] = Field(
+        None, max_length=20,
+        description="Código de carrera (de la planilla de Lisa). Distinto del campo `carrera` que es el nombre libre.",
+    )
+
+    # Descuento pre-aprobado del Excel EC (formato 0.0-1.0, ej: 0.5 = 50%).
+    # Aplica SOLO a módulos, NUNCA a matrícula (regla F-074-FIX-4 Kevin 2026-07-23).
+    descuento_porcentaje: Optional[float] = Field(
+        None, ge=0, le=1,
+        description="Descuento pre-aprobado del Excel EC (0.0-1.0). Aplica SOLO a módulos, NO a matrícula.",
+    )
+
+    # ========================================================================
+    # F-2026-08-11-CAMPOS-EC-MODALIDAD (reunion UAGRM 2026-08-11, seccion 4):
+    # Modalidad de estudio + carta firmada por el director.
+    # Si el estudiante es de PROVINCIA (procedencia != SCZ) o eligio VIRTUAL,
+    # debe subir la carta firmada por el director (decision de la reunion).
+    # ========================================================================
+
+    # Modalidad de estudio. 'presencial' = asiste fisicamente, 'virtual' = online.
+    # Distinto de `modalidad_ingreso` (P.S.A. y similares) que es el canal de ADMISION.
+    modalidad: Optional[str] = Field(
+        None, max_length=20,
+        description="Modalidad de estudio del programa ('presencial' | 'virtual'). Distinto de modalidad_ingreso (P.S.A.).",
+    )
+
+    # URL o identificador de la carta firmada por el director. Requerida para
+    # estudiantes de provincia o modalidad virtual. El estudiante sube el PDF
+    # a Google Drive / OneDrive / Dropbox y pega el link aca.
+    carta_firmada_url: Optional[str] = Field(
+        None, max_length=500,
+        description="URL de la carta firmada por el director (PDF en Google Drive, OneDrive, Dropbox). Requerida si el estudiante es de provincia o modalidad virtual.",
+    )
+
+    # F-2026-08-11-CAMPOS-EC-RESOLUCION (Kevin 22:37): URL de la resolucion
+    # del programa (PDF que emite la UAGRM aprobando el programa). Es OPCIONAL:
+    # el estudiante puede incluirla al preinscribirse o el admin la sube
+    # despues via /app/courses. Cuando se aprueba la submission y la URL está
+    # presente, se copia a Course.resolucion_pdf_url.
+    resolucion_url: Optional[str] = Field(
+        None, max_length=500,
+        description="URL de la resolucion del programa (PDF que emite la UAGRM). OPCIONAL.",
+    )
+
+    # ========================================================================
+    # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12, reunion UAGRM):
+    # Discriminacion PRIMERA CARRERA vs PROFESIONAL CON TITULO.
+    # - es_primer_carrera=True: el estudiante NO tiene titulo profesional
+    #   previo, esta cursando su primera carrera en la UAGRM. Cobra
+    #   matricula_primer_carrera (default global 200 Bs).
+    # - es_primer_carrera=False: ya tiene titulo profesional, viene por
+    #   posgrado/segunda carrera. Cobra matricula_profesional (default
+    #   global 500 Bs).
+    # Default True (primer carrera) por seguridad: si el dato no esta
+    # claro, cobra menos, nunca mas.
+    # El descuento_porcentaje (de EC, si lo trae) sigue aplicando SOLO
+    # a modulos, NUNCA a matricula (regla F-074-FIX-4 Kevin 2026-07-23).
+    # Un primer carrera PUEDE tener descuento en modulos (Kevin 2026-08-12).
+    # ========================================================================
+    es_primer_carrera: bool = Field(
+        default=True,
+        description="F-2026-08-12-DESCUENTO-BECA: True si es primera carrera en la UAGRM "
+                    "(sin titulo profesional previo, cobra matricula primer carrera). "
+                    "False si ya tiene titulo profesional (cobra matricula profesional). "
+                    "Default True por seguridad: si no se sabe, cobra menos."
+    )
+
+    # F-2026-08-12-DESCUENTO-BECA: si el estudiante NO es primer carrera,
+    # debe subir una foto del titulo profesional. El encargado EC valida
+    # ese titulo desde el panel de pre-registros (modal de detalle).
+    # Estado: 'pendiente' | 'verificado' | 'rechazado'.
+    titulo_profesional_url: Optional[str] = Field(
+        None, max_length=500,
+        description="F-2026-08-12-DESCUENTO-BECA: URL de la foto del titulo profesional "
+                    "(PDF/JPG/PNG en Cloudinary). Requerida si es_primer_carrera=False. "
+                    "El encargado EC valida este documento al aprobar la pre-inscripcion."
+    )
+    titulo_profesional_estado: str = Field(
+        default="pendiente",
+        description="F-2026-08-12-DESCUENTO-BECA: estado de validacion del titulo profesional. "
+                    "'pendiente' (recien subido, sin revisar), 'verificado' (encargado EC confirmo), "
+                    "'rechazado' (encargado EC lo rechazo). Default 'pendiente'."
+    )
+    titulo_profesional_motivo_rechazo: Optional[str] = Field(
+        None, max_length=500,
+        description="F-2026-08-12-DESCUENTO-BECA: motivo del rechazo si el encargado EC determino "
+                    "que el titulo no es valido. Null si fue verificado o sigue pendiente."
+    )
+
+    # F-2026-08-12-DESCUENTO-BECA-VALIDACION (Kevin 2026-08-12, post-reunion UAGRM):
+    # El descuento de vicerrectorado que el estudiante propuso (via descuento_porcentaje
+    # en la submission) NO se aplica automaticamente. El encargado EC debe validarlo
+    # explicitamente DESPUES de aprobar la pre-inscripcion (mismo patron que el titulo
+    # profesional). Estado: 'no_aplica' (no hay descuento propuesto) | 'pendiente' (sin
+    # revisar) | 'aprobado' (encargado confirmo, el descuento se aplica) | 'rechazado'
+    # (encargado determino que el descuento no corresponde, se cobra precio completo).
+    # NOTA: si el rechazo es del descuento, el estudiante sigue matriculado, solo se
+    # cobra el modulo completo.
+    descuento_vicerrectorado_monto: Optional[float] = Field(
+        None, ge=0, le=1,
+        description="F-2026-08-12-DESCUENTO-BECA-VALIDACION: monto del descuento de "
+                    "vicerrectorado que el estudiante propuso (0.0-1.0). Aplica SOLO a modulos. "
+                    "Null si el estudiante no propuso descuento. Se setea automaticamente al "
+                    "aprobar la submission si hay descuento_porcentaje."
+    )
+    descuento_vicerrectorado_estado: str = Field(
+        default="no_aplica",
+        description="F-2026-08-12-DESCUENTO-BECA-VALIDACION: estado de validacion del "
+                    "descuento de vicerrectorado. 'no_aplica' (no hay descuento), 'pendiente' "
+                    "(sin revisar), 'aprobado' (encargado lo confirmo, se aplica), 'rechazado' "
+                    "(encargado determino que no corresponde, se cobra precio completo). "
+                    "Default 'no_aplica'."
+    )
+    descuento_vicerrectorado_motivo_rechazo: Optional[str] = Field(
+        None, max_length=500,
+        description="F-2026-08-12-DESCUENTO-BECA-VALIDACION: motivo del rechazo si el "
+                    "encargado determino que el descuento de vicerrectorado no corresponde. "
+                    "Null si fue aprobado o sigue pendiente."
+    )
+
     class Settings:
         name = "students"
         indexes = [

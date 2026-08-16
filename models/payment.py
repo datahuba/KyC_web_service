@@ -151,7 +151,26 @@ class Payment(MongoBaseModel):
         None,
         description="Razón de la anulación (si estado_pago = ANULADO, e.j: Cheque sin fondos)"
     )
-    
+
+    # F-087 (2026-07-28): Quién subió el comprobante. None para pagos antiguos
+    # (previos a este feature), "estudiante" cuando lo subió el propio estudiante
+    # via /payments/, "encargado" cuando lo subió personal de Cobranza via
+    # /payments/{id}/upload-by-encargado. La UI muestra "—" cuando es null.
+    subido_por: Optional[str] = Field(
+        None,
+        description='Quién subió el comprobante: "estudiante" | "encargado" | None (pagos antiguos)'
+    )
+
+    # R35-FASE2-RECONCILIATION (2026-08-05): origen del pago. None = pago real
+    # cargado por usuario. "reconciliacion_restore_2026-08-05" = pago sintetico
+    # generado por el script de reconciliacion post-perdida-de-datos. Permite
+    # distinguir pagos reconstructivos de pagos reales en auditoria, sin perder
+    # la informacion de que el dinero si fue cobrado (estado_pago=aprobado).
+    origen: Optional[str] = Field(
+        None,
+        description='Origen del pago. None=pago real. "reconciliacion_*"=pago sintetico'
+    )
+
     # ========================================================================
     # MÉTODOS
     # ========================================================================

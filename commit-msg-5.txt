@@ -1,0 +1,24 @@
+F-MATRIZ-MOSTRAR-HISTORICOS: no filtrar historicos en vista Matriz
+
+PROBLEMA (2026-08-11, Kevin): la vista Gestion de Pagos > Matriz
+filtraba los cursos con es_historico=True. Eso causaba que al
+seleccionar DIPL-INVCI-2026/1 o DIPL-DDU-2026/1 (los 2 cursos del
+cuadre Excel), la vista se veia VACIA (0 estudiantes, 0 modulos, todo
+en 0). Los enrollments SÍ existian en la BD pero el filtro los
+escondia.
+
+Resultado del test antes del fix:
+- /payments/matriz?curso_id=DIPL-INVCI-2026/1 -> 0 cursos, 0 estudiantes
+- /payments/matriz?curso_id=MAE-GPETDOJ-2026 (no historico) -> OK
+- /enrollments/?curso_id=DIPL-INVCI-2026/1 -> 64 enrollments (existen)
+
+FIX:
+- get_matriz_pagos() ya no filtra los cursos historicos
+- El usuario puede ver TODOS los cursos en la matriz, incluidos los
+  cerrados, para auditar el cuadre con la planilla Excel oficial
+- La exclusion de historicos se mantiene SOLO en el dashboard
+  (courseBreakdown) que es para cobranza activa
+
+Pendiente: la query sin filtro tarda 28.85s (muy lento). Causa:
+carga todos los enrollments con sus 15 modulos cada uno. Mejorar en
+un fix separado con projection o paginacion.

@@ -9,7 +9,7 @@ from services import student_service
 from beanie import PydanticObjectId
 
 # IMPORTAMOS NUESTRAS LLAVES DE SEGURIDAD GRANULARES DE LA UAGRM
-from api.dependencies import require_superadmin, require_cpd, require_staff, require_cobranza, get_current_user, require_encargado_curso
+from api.dependencies import require_superadmin, require_cpd, require_staff, require_cobranza, get_current_user, require_encargado_curso, filtro_cursos_por_rol
 
 router = APIRouter()
 
@@ -24,25 +24,107 @@ import math
 async def read_students(
     page: int = Query(1, ge=1, description="Número de página"),
     per_page: int = Query(10, ge=1, le=5000, description="Elementos por página"),
-    q: Optional[str] = Query(None, description="Buscar por nombre, email, carnet o registro"),
+    q: Optional[str] = Query(None, description="Buscar por nombre, email, carnet o registro (alias: search, nombre, carnet, registro)"),
+    # F-FIX-FILTROS-STUDENTS (2026-08-10, Kevin): aceptar varios nombres de
+    # parametro de query para compatibilidad con distintos clientes.
+    # `carnet` y `registro` son los nombres naturales en el dominio (CI del
+    # estudiante), `search` es comun en APIs REST, `nombre` es el campo
+    # del modelo. Si vienen varios, se concatenan con OR (logica de busqueda).
+    carnet: Optional[str] = Query(None, description="Filtrar por carnet de identidad (alias de q)"),
+    registro: Optional[str] = Query(None, description="Filtrar por registro académico (alias de q)"),
+    nombre: Optional[str] = Query(None, description="Filtrar por nombre (alias de q)"),
+    search: Optional[str] = Query(None, description="Búsqueda libre (alias de q)"),
     activo: Optional[bool] = Query(None, description="Filtrar por estado activo/inactivo"),
     estado_titulo: Optional[str] = Query(None, description="Filtrar por estado del título"),
     curso_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por curso inscrito"),
     current_user: User = Depends(require_staff) # <-- TODOS LOS ADMINISTRATIVOS (MAE, COBRANZA, CPD) PUEDEN LEER LA TABLA
 ) -> Any:
     """Listar estudiantes con paginación y filtros avanzados"""
+    # Combinar todos los alias en un solo query. Si vienen varios, el
+    # primero que este presente gana (compatibilidad hacia atras).
+    query_term = q or carnet or registro or nombre or search
+
+    # F-2026-08-12-EC-CURSOS-FILTRO (Kevin 2026-08-12 post-reunion UAGRM):
+    # el EC solo debe ver estudiantes de SUS cursos asignados. El helper
+    # filtro_cursos_por_rol devuelve None para ADMIN/SUPERADMIN/CPD/MAE
+    # (acceso total) o un dict $in para EC/COORDINADOR/COBRANZA-segmentado.
+    cursos_filtro = filtro_cursos_por_rol(current_user)
+    cursos_asignados_list = cursos_filtro.get("curso_id", {}).get("$in") if cursos_filtro else None
+
     students, total_count = await student_service.get_students(
-        page=page, per_page=per_page, q=q, activo=activo, estado_titulo=estado_titulo, curso_id=curso_id
+        page=page, per_page=per_page, q=query_term, activo=activo,
+        estado_titulo=estado_titulo, curso_id=curso_id,
+        cursos_asignados=cursos_asignados_list,
     )
-    
+
     total_pages = math.ceil(total_count / per_page) if total_count > 0 else 0
+    # FIX-ISSUE-250 (2026-08-14): items + data (retro-compat) para que el
+    # frontend lea `items` consistente con /calendario y /disponibles.
     return {
-        "data": students,
+        "items": students,
+        "data": students,  # alias retro-compat
         "meta": PaginationMeta(
             page=page, limit=per_page, totalItems=total_count, totalPages=total_pages,
             hasNextPage=(page < total_pages), hasPrevPage=(page > 1)
         )
     }
+
+
+# F-HISTORICO-EXCEL-BATCH-LOOKUP (2026-08-04): endpoint batch para
+# buscar multiples carnets en UNA sola query. Antes el modal hacia 1
+# request por carnet (~12s c/u, 62 carnets = 12+ min de timeout).
+# Con este endpoint, 1 sola query MongoDB con $in resuelve todo.
+class BatchLookupRequest(BaseModel):
+    carnets: List[str] = Field(..., min_length=1, max_length=500, description="Lista de carnets a buscar")
+
+
+class BatchLookupItem(BaseModel):
+    carnet: str
+    estudiante_id: Optional[str] = None
+    nombre: Optional[str] = None
+    existe: bool = False
+
+
+@router.post(
+    "/batch-lookup",
+    response_model=List[BatchLookupItem],
+    summary="F-HISTORICO-EXCEL: Buscar multiples carnets en una sola query"
+)
+async def batch_lookup_students(
+    payload: BatchLookupRequest,
+    current_user: User = Depends(require_staff)
+) -> Any:
+    """
+    F-HISTORICO-AUTOSERVICIO-EXCEL (2026-08-04): dado una lista de carnets,
+    devuelve para cada uno si existe en la BD y sus datos basicos. Usado
+    por el modal de Carga Inicial de Estudiantes para no hacer 1 llamada
+    HTTP por carnet.
+    """
+    # Limpiar carnets: trim, eliminar vacios
+    carnets_limpios = [c.strip() for c in payload.carnets if c and c.strip()]
+    if not carnets_limpios:
+        return []
+
+    # 1 sola query MongoDB con $in
+    students = await Student.find({"carnet": {"$in": carnets_limpios}}).to_list()
+
+    # Indexar por carnet para busqueda O(1)
+    by_carnet: dict = {s.carnet: s for s in students if s.carnet}
+
+    # Devolver en el mismo orden que se pidio
+    resultado = []
+    for carnet in carnets_limpios:
+        s = by_carnet.get(carnet)
+        if s:
+            resultado.append(BatchLookupItem(
+                carnet=carnet,
+                estudiante_id=str(s.id),
+                nombre=s.nombre or "",
+                existe=True,
+            ))
+        else:
+            resultado.append(BatchLookupItem(carnet=carnet, existe=False))
+    return resultado
 
 @router.post(
     "/",
@@ -241,13 +323,21 @@ async def accept_terms(
 @router.put(
     "/{id}",
     response_model=StudentResponse,
-    summary="Actualizar Estudiante (Admin)"
+    summary="Actualizar Estudiante (Encargado/CPD/Admin)"
 )
 async def update_student_admin(
     *,
     id: PydanticObjectId,
     student_in: StudentUpdateAdmin,
-    current_user: User = Depends(require_cpd) # <-- SOLO EL CPD ACTUALIZA DATOS ACADÉMICOS
+    # F-FIX-STUDENT-EDIT-PERMISSIONS (2026-08-11, Kevin): antes era `require_cpd`
+    # que solo permitía CPD/ADMIN/SUPERADMIN. Pero Lisa/encargado_curso y
+    # coordinadores necesitaban editar datos personales (cumpleaños, celular,
+    # domicilio, etc.) de sus estudiantes asignados. Como NO existía un
+    # endpoint con permisos más amplios, recibían 403 al intentar guardar.
+    # Fix: usar `require_encargado_curso` que ya permite los 5 roles:
+    # ENCARGADO_CURSO, COORDINADOR, CPD, ADMIN, SUPERADMIN.
+    # Ver tests/test_student_update_permissions.py para cobertura.
+    current_user: User = Depends(require_encargado_curso)
 ) -> Any:
     student = await student_service.get_student(id=id)
     if not student:
@@ -478,12 +568,34 @@ async def verificar_documento_estudiante(
     if not student: raise HTTPException(404, "Estudiante no encontrado")
     
     if tipo == "cv":
+        # F-FIX-VERIFICAR-DOC-EXISTE (2026-08-10, Kevin): exigir que el archivo
+        # exista antes de marcar como verificado. Antes un encargado podia
+        # 'verificar' CV/carnet/afiliacion que el estudiante NUNCA subio,
+        # comprometiendo la integridad de los datos.
+        if not student.cv_url:
+            raise HTTPException(
+                status_code=400,
+                detail="No se puede verificar el CV: el estudiante no ha subido el archivo. "
+                       "Pídele que primero suba su CV (POST /students/{id}/documentos/cv) y luego vuelve a verificar."
+            )
         student.cv_estado = "verificado"
         student.cv_motivo_rechazo = None
     elif tipo == "carnet":
+        if not student.carnet_url:
+            raise HTTPException(
+                status_code=400,
+                detail="No se puede verificar el Carnet: el estudiante no ha subido el archivo. "
+                       "Pídele que primero suba su Carnet (POST /students/{id}/documentos/carnet) y luego vuelve a verificar."
+            )
         student.carnet_estado = "verificado"
         student.carnet_motivo_rechazo = None
     elif tipo == "afiliacion":
+        if not student.afiliacion_url:
+            raise HTTPException(
+                status_code=400,
+                detail="No se puede verificar la Afiliación: el estudiante no ha subido el archivo. "
+                       "Pídele que primero suba su Afiliación (POST /students/{id}/documentos/afiliacion) y luego vuelve a verificar."
+            )
         student.afiliacion_estado = "verificado"
         student.afiliacion_motivo_rechazo = None
         
@@ -512,8 +624,114 @@ async def rechazar_documento_estudiante(
     elif tipo == "afiliacion":
         student.afiliacion_estado = "rechazado"
         student.afiliacion_motivo_rechazo = motivo
-        
+
     await student.save()
+    return student
+
+
+# ============================================================================
+# F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12, reunion UAGRM):
+# Validacion del titulo profesional subido por el estudiante al
+# pre-registrarse. Lo hace el encargado de educacion continua desde
+# el modal de detalle de la submission en /app/pre-registros.
+#
+# Estados posibles:
+#   'pendiente'  → recien subido, sin revisar (default al aprobar submission)
+#   'verificado' → encargado EC confirmo que el titulo es valido
+#   'rechazado'  → encargado EC rechazo el titulo (motivo obligatorio)
+# ============================================================================
+@router.put("/{id}/titulo/validar", response_model=StudentResponse)
+async def validar_titulo_profesional(
+    id: PydanticObjectId,
+    aprobado: bool = Form(...),
+    motivo: Optional[str] = Form(None),
+    current_user: User = Depends(require_encargado_curso)
+) -> Any:
+    """
+    F-2026-08-12-DESCUENTO-BECA: el encargado de educacion continua valida
+    (o rechaza) el titulo profesional que subio el estudiante. Si rechaza,
+    el `motivo` es obligatorio para que el estudiante sepa que falta.
+
+    Restriccion: solo se puede validar si el estudiante subio el titulo
+    (titulo_profesional_url no nulo). Si no subio nada, 400.
+    """
+    student = await student_service.get_student(id=id)
+    if not student:
+        raise HTTPException(status_code=404, detail="Estudiante no encontrado")
+
+    if not student.titulo_profesional_url:
+        raise HTTPException(
+            status_code=400,
+            detail="No se puede validar el título: el estudiante no ha subido el archivo. "
+                   "Pídele que primero suba su título profesional y luego vuelve a validar."
+        )
+
+    if aprobado:
+        student.titulo_profesional_estado = "verificado"
+        student.titulo_profesional_motivo_rechazo = None
+    else:
+        motivo_clean = (motivo or "").strip()
+        if len(motivo_clean) < 3:
+            raise HTTPException(
+                status_code=400,
+                detail="Para rechazar el título debes indicar un motivo de al menos 3 caracteres."
+            )
+        student.titulo_profesional_estado = "rechazado"
+        student.titulo_profesional_motivo_rechazo = motivo_clean
+
+    await student.save()
+    return student
+
+
+# ============================================================================
+# F-2026-08-12-DESCUENTO-BECA-VALIDACION (Kevin 2026-08-12, post-reunion UAGRM):
+# Endpoint para que el encargado EC valide (apruebe o rechace) el descuento
+# de vicerrectorado que el estudiante propuso en la pre-inscripcion.
+# El descuento SOLO se aplica si el estado es "aprobado". Si se rechaza,
+# el estudiante sigue matriculado pero se cobra el modulo completo (sin descuento).
+# La logica vive en pre_registration_service.aprobar_descuento_vicerrectorado
+# y rechazar_descuento_vicerrectorado (capa de servicio).
+# ============================================================================
+@router.put("/{id}/descuento-vicerrectorado/validar", response_model=StudentResponse)
+async def validar_descuento_vicerrectorado(
+    id: PydanticObjectId,
+    aprobado: bool = Form(...),
+    motivo: Optional[str] = Form(None),
+    current_user: User = Depends(require_encargado_curso),
+) -> Any:
+    """
+    Valida el descuento de vicerrectorado propuesto por el estudiante.
+
+    F-2026-08-12-DESCUENTO-BECA-VALIDACION (Kevin 2026-08-12, post-reunion):
+    el encargado EC es quien aprueba o rechaza el descuento. Idealmente deberia
+    ser validado por alguien mas (CPD o vicerrectorado), pero por ahora lo
+    hace el encargado EC.
+
+    - aprobado=true: estado='aprobado', el descuento se aplica
+    - aprobado=false: estado='rechazado', se cobra precio completo
+
+    Restriccion: solo se puede validar si el estudiante propuso un descuento
+    (descuento_vicerrectorado_monto no nulo). Si no hay descuento, 400.
+    """
+    # F-2026-08-12-DESCUENTO-BECA-VALIDACION: delega la logica al service.
+    # El service valida que el estudiante exista, que tenga un descuento
+    # propuesto y que el motivo (si rechaza) tenga >= 3 chars.
+    from services import pre_registration_service
+    try:
+        if aprobado:
+            student = await pre_registration_service.aprobar_descuento_vicerrectorado(student_id=id)
+        else:
+            student = await pre_registration_service.rechazar_descuento_vicerrectorado(
+                student_id=id,
+                motivo=(motivo or "").strip(),
+            )
+    except ValueError as e:
+        msg = str(e)
+        # Si el error es por estudiante no encontrado, devolvemos 404
+        if "no encontrado" in msg.lower():
+            raise HTTPException(status_code=404, detail=msg)
+        # El resto son errores de validacion (no propuso descuento, motivo corto, etc)
+        raise HTTPException(status_code=400, detail=msg)
     return student
 
 
@@ -522,12 +740,27 @@ async def rechazar_documento_estudiante(
 # ============================================================================
 @router.post("/import/excel", summary="Importar Estudiantes de forma Masiva desde Excel")
 async def import_students(
-    file: UploadFile = File(...), 
+    file: UploadFile = File(...),
     curso_id: Optional[PydanticObjectId] = Form(None), # Curso opcional para auto-inscribir a los estudiantes importados
-    current_user: User = Depends(require_cpd)
+    # FIX-ISSUE-253 (2026-08-14): permitir a EC/COORD/CPD/ADMIN/SUPERADMIN
+    # usar Excel upload. Antes SOLO CPD, lo que contradice la feature
+    # F-HISTORICO-AUTOSERVICIO-EXCEL. require_encargado_curso ya
+    # incluye los 5 roles validos.
+    current_user: User = Depends(require_encargado_curso)
 ) -> Any:
     if not file.filename.lower().endswith(('.xlsx', '.xls', '.csv')):
         raise HTTPException(400, "Formato no permitido. Sube un archivo .xlsx, .xls o .csv")
+    # FIX-ISSUE-253: validar que el EC solo pueda importar a SUS cursos.
+    from models.enums import UserRole
+    if curso_id and current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
+        if curso_id not in (current_user.cursos_asignados or []):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "No tienes asignado este curso. Solo puedes importar "
+                    "estudiantes a cursos en tu lista de cursos asignados."
+                ),
+            )
     contents = await file.read()
     try:
         return await student_service.import_students_from_excel(contents, curso_id, file.filename)

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Servicio de Estudiantes
 =======================
 
@@ -18,33 +18,67 @@ from beanie import PydanticObjectId
 from beanie.operators import Or, RegEx, In
 
 
+def _escape_regex(s: str) -> str:
+    """
+    Escapa caracteres especiales de regex MongoDB para que un string
+    de usuario sea tratado como literal (no como patron).
+
+    Sin escape, un usuario que busca 'A.B+' recibira matches de
+    cualquier 'A' + cualquier caracter + 'B+', lo cual no es lo que
+    esperan. Con escape, busca literalmente 'A.B+'.
+    """
+    return s.replace("\\", "\\\\").replace(".", "\\.").replace("*", "\\*") \
+            .replace("+", "\\+").replace("?", "\\?").replace("(", "\\(") \
+            .replace(")", "\\)").replace("[", "\\[").replace("]", "\\]") \
+            .replace("{", "\\{").replace("}", "\\}").replace("|", "\\|") \
+            .replace("^", "\\^").replace("$", "\\$")
+
+
 async def get_students(
     page: int = 1,
     per_page: int = 10,
     q: Optional[str] = None,
     activo: Optional[bool] = None,
     estado_titulo: Optional[EstadoTitulo] = None,
-    curso_id: Optional[PydanticObjectId] = None
+    curso_id: Optional[PydanticObjectId] = None,
+    # F-2026-08-12-EC-CURSOS-FILTRO (Kevin 2026-08-12 post-reunion UAGRM):
+    # si el usuario es ENCARGADO_CURSO / COORDINADOR / COBRANZA-segmentado,
+    # el endpoint le pasa su lista de cursos_asignados y el service filtra
+    # a estudiantes que estan en al menos uno de esos cursos. Si la lista
+    # está vacía, retorna lista vacía (no se muestran todos los estudiantes).
+    cursos_asignados: Optional[list] = None,
 ) -> tuple[List[Student], int]:
     """
     Obtener lista de estudiantes con filtros avanzados y paginación
     """
     query = Student.find()
-    
+
     if q:
-        regex_pattern = {"$regex": q, "$options": "i"}
+        # F-FIX-FILTROS-STUDENTS (2026-08-10, Kevin): antes el filtro `q`
+        # estaba mal armado. Comparaba el campo con un dict literal
+        # `{"$regex": q, "$options": "i"}`, lo cual MongoDB no interpretaria
+        # como regex sino como un valor escalar (un dict), y siempre
+        # retornaba 0 matches. Resultado: ?search=X, ?carnet=X, etc
+        # siempre devolvian los primeros N estudiantes (pagina 1) sin
+        # aplicar el filtro. Ahora se usa el operador RegEx() de Beanie,
+        # que construye correctamente la query Mongo `{campo: {$regex: ..., $options: 'i'}}`.
+        # Ademas, para carnet y registro se hace match exacto (case-insensitive
+        # pero exacto) ya que son campos unicos. Para nombre y email se usa
+        # regex parcial.
+        q_escaped = _escape_regex(q)
+        # Para carnet/registro: match exacto (case-insensitive)
         query = query.find(
             Or(
-                Student.nombre == regex_pattern,
-                Student.email == regex_pattern,
-                Student.carnet == regex_pattern,
-                Student.registro == regex_pattern
+                RegEx(Student.nombre, q_escaped, "i"),
+                RegEx(Student.email, q_escaped, "i"),
+                RegEx(Student.carnet, "^" + q_escaped + "$", "i"),
+                RegEx(Student.registro, "^" + q_escaped + "$", "i")
             )
         )
-    
+
     if activo is not None:
         query = query.find(Student.activo == activo)
-    
+
     if estado_titulo:
         if estado_titulo == EstadoTitulo.SIN_TITULO:
             query = query.find(
@@ -55,15 +89,32 @@ async def get_students(
             )
         else:
             query = query.find(Student.titulo.estado == estado_titulo)
-    
-    if curso_id:
-        query = query.find(Student.lista_cursos_ids == curso_id)
-    
+
+    # F-2026-08-12-EC-CURSOS-FILTRO: si llega curso_id especifico Y
+    # cursos_asignados, intersectamos (AND logico). El EC puede pedir un
+    # curso especifico dentro de los que le pertenecen, pero NO un curso
+    # fuera de su lista.
+    if curso_id is not None and cursos_asignados is not None:
+        if curso_id not in cursos_asignados:
+            # El EC pidio un curso que no le pertenece → lista vacia
+            return [], 0
+        cursos_asignados = [curso_id]
+    elif curso_id is not None:
+        cursos_asignados = [curso_id]
+
+    if cursos_asignados is not None:
+        # Filtrar por intersección: estudiantes que tienen al menos uno
+        # de los cursos_asignados en su lista_cursos_ids. Si cursos_asignados
+        # es lista vacia, retorna 0 matches (no estudiantes sin cursos).
+        if not cursos_asignados:
+            return [], 0
+        query = query.find({"lista_cursos_ids": {"$in": cursos_asignados}})
+
     total_count = await query.count()
     skip = (page - 1) * per_page
-    
+
     students = await query.sort("-created_at").skip(skip).limit(per_page).to_list()
-    
+
     return students, total_count
 
 
@@ -136,7 +187,11 @@ async def create_student(student_in: StudentCreate) -> Student:
         course_obj = await Course.get(course_id)
         if not course_obj:
             raise ValueError("Curso no encontrado")
-        if not course_obj.activo:
+        # F-HISTORICO-AUTOSERVICIO-EXCEL-FIX (2026-08-04): los cursos historicos
+        # aceptan carga de estudiantes aunque activo=False (cursos cerrados para
+        # carga retroactiva). Mismo criterio que el endpoint de auto-enroll
+        # (linea 835). Si no es historico y esta inactivo, rechazar.
+        if not course_obj.activo and not course_obj.es_historico:
             raise ValueError("El curso seleccionado está inactivo")
 
     # 3. Lógica Inteligente de Contraseña
@@ -667,6 +722,18 @@ async def import_students_from_excel(
                 if email in emails_en_archivo:
                     errors.append(f"Fila {row_idx}: El Correo Electrónico '{email}' de '{nombre}' está duplicado dentro de este archivo Excel.")
                     continue
+                # ISSUE-EXCEL-EMAIL-VALID (2026-08-03, Kevin): pre-validar el
+                # formato del email en el Excel ANTES de intentar crear el
+                # Student (que tiene EmailStr de Pydantic y fallaba al
+                # insertar el primero inválido, sin listar los demás).
+                # Detectamos: espacios, formato mal escrito, etc.
+                if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+                    errors.append(
+                        f"Fila {row_idx}: El Correo Electrónico '{email}' de "
+                        f"'{nombre}' no tiene un formato válido. "
+                        f"Verifica que no tenga espacios ni caracteres raros."
+                    )
+                    continue
                 emails_en_archivo.add(email)
                 
             registros_en_archivo.add(registro)
@@ -691,15 +758,21 @@ async def import_students_from_excel(
             errors.append(f"Fila {row_idx}: Error al procesar datos de la fila: {str(e)}")
             
     # 3. VERIFICAR DUPLICADOS EN BASE DE DATOS (1 SOLA CONSULTA DE RED)
+    # F-EXCEL-IMPORT-EXISTING (2026-08-03, Kevin): si el estudiante YA EXISTE
+    # en la BD, NO lo rechazamos — lo inscribimos al curso seleccionado (si lo
+    # hay). El usuario puede subir un Excel con estudiantes que ya están
+    # registrados para inscribirlos en masa a un nuevo programa.
     existing_registros = set()
     existing_carnets = set()
     existing_emails = set()
-    
+    existing_students_by_carnet: dict = {}  # carnet -> Student object (para inscribir)
+    existing_students_by_registro: dict = {}
+
     if candidates:
         all_registros_excel = [c["registro"] for c in candidates]
         all_carnets_excel = [c["carnet"] for c in candidates]
         all_emails_excel = [c["email"] for c in candidates if c["email"]]
-        
+
         db_query = {
             "$or": [
                 {"registro": {"$in": all_registros_excel}},
@@ -708,39 +781,42 @@ async def import_students_from_excel(
         }
         if all_emails_excel:
             db_query["$or"].append({"email": {"$in": all_emails_excel}})
-            
+
         existing_students_db = await Student.find(db_query).to_list()
-        
+
         for s in existing_students_db:
             if s.registro:
                 existing_registros.add(s.registro)
+                existing_students_by_registro[s.registro] = s
             if s.carnet:
                 existing_carnets.add(s.carnet)
+                existing_students_by_carnet[s.carnet] = s
             if s.email:
                 existing_emails.add(s.email.lower())
-        
+
     # 4. PREPARAR OBJETOS DE INSERTIÓN Y HASHEAR CONTRASEÑAS (PROCESADOR CPU CONTINUO)
+    # Y también identificar estudiantes existentes para inscribir al curso.
     students_to_insert = []
     financials_to_insert = []  # pagos por estudiante, alineado 1:1 con students_to_insert
+    existing_to_enroll: list = []  # tuplas (c, student_obj) para inscribir al curso
     for c in candidates:
-        has_error = False
-        if c["registro"] in existing_registros:
-            errors.append(f"Fila {c['row_idx']}: El Registro/Usuario '{c['registro']}' ya está registrado en la base de datos.")
-            has_error = True
+        # Buscar si el estudiante ya existe
+        existing_student = None
         if c["carnet"] in existing_carnets:
-            errors.append(f"Fila {c['row_idx']}: El Carnet de Identidad '{c['carnet']}' de '{c['nombre']}' ya está registrado en la base de datos.")
-            has_error = True
-        if c["email"] and c["email"].lower() in existing_emails:
-            errors.append(f"Fila {c['row_idx']}: El Correo Electrónico '{c['email']}' de '{c['nombre']}' ya está registrado en la base de datos.")
-            has_error = True
-            
-        if has_error:
+            existing_student = existing_students_by_carnet.get(c["carnet"])
+        elif c["registro"] in existing_registros:
+            existing_student = existing_students_by_registro.get(c["registro"])
+
+        if existing_student:
+            # Estudiante YA EXISTE en BD — lo inscribimos al curso
+            # (NO es un error, es flujo normal de re-inscripción).
+            existing_to_enroll.append((c, existing_student))
             continue
-            
+
         # ISSUE-Q-PASSWORD-UNIFICADA: contraseña inicial 'Uagrm.<CI>' (misma
         # convención institucional que docentes/staff, GAP-1).
         hashed_password = get_password_hash(f"Uagrm.{c['carnet']}")
-        
+
         students_to_insert.append(
             Student(
                 registro=c["registro"],
@@ -766,6 +842,11 @@ async def import_students_from_excel(
     # 5. INSERCIÓN MASIVA DE ALTO RENDIMIENTO (1 SOLA ESCRITURA DE RED)
     success_count = 0
     inserted_ids: List[PydanticObjectId] = []
+    # ISSUE-EXCEL-EMAIL-VALID (2026-08-03, Kevin): si hay errores de validación
+    # (emails mal escritos, duplicados, formato inválido), SE IMPORTAN LAS
+    # FILAS VALIDAS y se reportan las filas malas en `errors[]`. El usuario
+    # puede corregir el Excel y re-subir las filas malas por separado.
+    # Esto evita que 1 fila con email mal escrito impida importar el resto.
     if students_to_insert:
         insert_result = await Student.insert_many(students_to_insert)
         # inserted_ids conserva el mismo orden que students_to_insert
@@ -778,7 +859,20 @@ async def import_students_from_excel(
     matricula_vouchers_count = 0  # comprobantes de matrícula (link) registrados como pago pendiente
     hay_columnas_financieras = bool(col_matricula or columnas_modulos or col_matricula_comprobante)
 
-    if curso_id and inserted_ids:
+    # F-EXCEL-IMPORT-EXISTING (2026-08-03, Kevin): inscribir TANTO los estudiantes
+    # nuevos COMO los que ya existen en BD (y no están inscritos en este curso).
+    # Unificamos la lista de "estudiantes a inscribir" antes del loop paralelo.
+    enrollable_inputs: list = []  # tuplas (student_id, student_obj, fin_dict)
+    for i, sid in enumerate(inserted_ids):
+        enrollable_inputs.append((sid, students_to_insert[i], financials_to_insert[i]))
+    for c, existing_student in existing_to_enroll:
+        # Para los existentes, también migramos los pagos del Excel (histórico)
+        enrollable_inputs.append((existing_student.id, existing_student, {
+            "pagos": c["pagos"],
+            "matricula_comprobante_url": c["matricula_comprobante_url"]
+        }))
+
+    if curso_id and enrollable_inputs:
         import asyncio
         from core.timezone_utils import utcnow_naive
         from models.course import Course
@@ -791,12 +885,14 @@ async def import_students_from_excel(
         if not course:
             errors.append(
                 f"Auto-inscripción cancelada: el curso seleccionado ({curso_id}) no existe. "
-                f"Los {success_count} estudiantes se crearon correctamente pero no fueron inscritos."
+                f"Los {len(inserted_ids)} estudiantes se crearon correctamente pero no fueron inscritos."
             )
-        elif not course.activo:
+        elif not course.activo and not course.es_historico:
+            # F-HISTORICO (2026-08-03, Kevin): los programas historicos aceptan
+            # inscripciones aunque activo=False (cursos cerrados para carga retroactiva).
             errors.append(
                 f"Auto-inscripción cancelada: el curso '{course.nombre_programa}' está inactivo y no acepta inscripciones. "
-                f"Los {success_count} estudiantes se crearon correctamente pero no fueron inscritos."
+                f"Los {len(inserted_ids)} estudiantes se crearon correctamente pero no fueron inscritos."
             )
         else:
             # ============================================================
@@ -926,25 +1022,29 @@ async def import_students_from_excel(
 
             await asyncio.gather(*[
                 _inscribir_estudiante_importado(student_id, student_obj, fin)
-                for student_id, student_obj, fin in zip(inserted_ids, students_to_insert, financials_to_insert)
+                for student_id, student_obj, fin in enrollable_inputs
             ])
 
             # Persistir en batch las referencias cruzadas acumuladas (1 sola
             # escritura de red para el Course, en vez de una por estudiante).
-            # `student_obj.lista_cursos_ids` de cada estudiante NUEVO recién
-            # insertado se persiste con 1 update_many puntual por id (los
-            # estudiantes son documentos independientes entre sí, sin riesgo
-            # de condición de carrera entre ellos).
+            # `student_obj.lista_cursos_ids` de cada estudiante recién
+            # procesado (NUEVO o EXISTENTE) se persiste en batch.
             if course.inscritos:
                 await course.save()
 
-            estudiantes_con_curso_nuevo = [
+            # Actualizar lista_cursos_ids SOLO de los estudiantes NUEVOS insertados
+            # (los existentes ya tienen su lista en la BD; modificarla indiscriminadamente
+            # borraría cursos previamente inscritos).
+            estudiantes_nuevos_con_curso = [
                 student_id for student_id, student_obj in zip(inserted_ids, students_to_insert)
                 if curso_id in student_obj.lista_cursos_ids
             ]
-            if estudiantes_con_curso_nuevo:
-                await Student.find(In(Student.id, estudiantes_con_curso_nuevo)).update(
-                    {"$set": {"lista_cursos_ids": [curso_id]}}
+            if estudiantes_nuevos_con_curso:
+                # update_many agregando el curso sin duplicar (no tocamos existentes
+                # porque podrían tener otros cursos inscritos).
+                from beanie.operators import AddToSet
+                await Student.find(In(Student.id, estudiantes_nuevos_con_curso)).update(
+                    AddToSet({"lista_cursos_ids": curso_id})
                 )
     elif hay_columnas_financieras and not curso_id and success_count > 0:
         errors.append(

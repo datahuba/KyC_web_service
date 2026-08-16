@@ -172,7 +172,15 @@ async def _persist_error_log(request: Request, exc: Exception, status_code: int 
             pass
 
         msg_detail = getattr(exc, "detail", str(exc))
+        # F-085 (2026-07-28): SIEMPRE setear `timestamp` al crear el ErrorLog.
+        # El default del modelo es `Indexed(datetime, expireAfterSeconds=604800)`
+        # que es un wrapper de Beanie (NewType), no un datetime. Sin este set
+        # explícito, Pydantic acepta el wrapper como default pero Beanie no
+        # puede serializarlo a BSON → `Cannot encode Indexed.NewType` y el
+        # handler falla silenciosamente dejando el visor de errores VACIO.
+        from datetime import datetime as _dt
         error_log = ErrorLog(
+            timestamp=_dt.utcnow(),
             path=str(request.url.path),
             method=request.method,
             status_code=status_code,
@@ -263,6 +271,12 @@ async def start_db():
         logger.info("[job-congelado] task creada y referenciada")
     else:
         logger.warning("[job-congelado] DESACTIVADO por JOB_CONGELADO_ACTIVO=False")
+
+    # F-PERF-DASHBOARD-PRECOMPUTE (2026-08-08, Kevin): pre-computa el dashboard
+    # cada 4 min para usuarios activos. Elimina el cold (1-13s) en la mayoria
+    # de los casos. El job vive en core/dashboard_precomputer.py.
+    from core.dashboard_precomputer import start_precomputer
+    start_precomputer()
 
 @app.get("/")
 async def root():

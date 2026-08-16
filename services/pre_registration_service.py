@@ -11,6 +11,7 @@ Flujo:
      y se le envía un email de bienvenida con su contraseña inicial
 """
 
+import asyncio
 import math
 import re
 from datetime import datetime
@@ -115,6 +116,10 @@ async def get_forms_for_admin(
       "responsable" CPD (no aplica por ahora, así que solo los generales)
     - encargado_curso / coordinador: ve los delegados a sus cursos_asignados
     - admin: ve todos (como superadmin pero sin permisos de crear/eliminar)
+
+    B-2026-08-22-PRE-REG-BATCH-ENRICH: count + find corren en paralelo
+    con asyncio.gather (en vez de serial). Como MongoDB Atlas tiene
+    ~200ms de latencia por round trip, esto ahorra ~200ms.
     """
     query: dict = {}
     if current_user.rol == UserRole.CPD:
@@ -127,9 +132,11 @@ async def get_forms_for_admin(
     elif current_user.rol not in (UserRole.SUPERADMIN, UserRole.ADMIN):
         return [], 0
 
-    total = await PreRegistrationForm.find(query).count()
     skip = (page - 1) * per_page
-    items = await PreRegistrationForm.find(query).sort("-created_at").skip(skip).limit(per_page).to_list()
+    total, items = await asyncio.gather(
+        PreRegistrationForm.find(query).count(),
+        PreRegistrationForm.find(query).sort("-created_at").skip(skip).limit(per_page).to_list(),
+    )
     return items, total
 
 
@@ -247,6 +254,29 @@ async def submit_public_form(slug: str, data: PreRegistrationSubmit) -> PreRegis
         "sexo": data.sexo,
         "domicilio": (data.domicilio or "").strip() or None,
         "mensaje": (data.mensaje or "").strip() or None,
+        # F-2026-08-11-CAMPOS-EC: campos educación continua (planilla de Lisa).
+        # Se persisten en el data dict y se copian al Student al aprobar.
+        "registro_universitario": (data.registro_universitario or "").strip() or None,
+        "avance_academico_codigo": data.avance_academico_codigo,
+        "formulario_descuento_numero": data.formulario_descuento_numero,
+        "carrera_codigo": (data.carrera_codigo or "").strip() or None,
+        "descuento_porcentaje": data.descuento_porcentaje,
+        # F-2026-08-11-CAMPOS-EC-MODALIDAD (reunion UAGRM 2026-08-11, seccion 4):
+        # procedencia (codigo departamento) + modalidad (presencial/virtual)
+        # + carta_firmada_url (URL del PDF firmado por el director).
+        "procedencia": (data.procedencia or "").strip().upper() or None,
+        "modalidad": (data.modalidad or "").strip().lower() or None,
+        "carta_firmada_url": (data.carta_firmada_url or "").strip() or None,
+        # F-2026-08-11-CAMPOS-EC-RESOLUCION (Kevin 22:37): la resolucion del
+        # programa es OPCIONAL pero se persiste aca para que el admin la vea
+        # al aprobar y la copie a Course.resolucion_pdf_url.
+        "resolucion_url": (data.resolucion_url or "").strip() or None,
+        # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12): discriminacion
+        # primera carrera vs profesional con titulo. es_primer_carrera default
+        # True (mas seguro, cobra menos si no se sabe). titulo_profesional_url
+        # es OBLIGATORIO si es_primer_carrera=False (validado en el schema).
+        "es_primer_carrera": bool(data.es_primer_carrera) if data.es_primer_carrera is not None else True,
+        "titulo_profesional_url": (data.titulo_profesional_url or "").strip() or None,
     }
 
     sub = PreRegistration(
@@ -290,6 +320,28 @@ async def submit_public_form(slug: str, data: PreRegistrationSubmit) -> PreRegis
     except Exception as e:
         print(f"[pre-registration] Error notificando revisores: {e}")
 
+    # F-2026-08-22-PRE-REG-EMAIL-CONFIRM (Kevin 2026-08-22): email de confirmacion
+    # inmediata al visitante. Le confirma que su solicitud fue recibida y le
+    # da el numero para seguimiento. Best-effort: si falla SMTP, no bloquea
+    # el submit (el visitante ya vio la pantalla de exito en el wizard).
+    try:
+        from core.config import settings
+        from core.email_utils import send_email, build_pre_registration_received_email
+
+        html = build_pre_registration_received_email(
+            nombre=payload["nombre"],
+            nombre_programa=form.nombre,
+            submission_id=str(sub.id),
+            admin_url=f"{settings.FRONTEND_URL.rstrip('/')}/app/pre-registros",
+        )
+        await send_email(
+            payload["email"],
+            f"Recibimos tu pre-inscripción a {form.nombre}",
+            html,
+        )
+    except Exception as e:
+        print(f"[pre-registration] Error enviando email de confirmacion al visitante: {e}")
+
     return sub
 
 
@@ -303,8 +355,20 @@ async def get_submissions_for_admin(
     estado: Optional[str] = None,
     page: int = 1,
     per_page: int = 20,
-) -> Tuple[List[PreRegistration], int]:
-    """Lista submissions visibles para el usuario actual."""
+    con_descuento: bool = False,
+) -> Tuple[List[PreRegistration], int, dict]:
+    """Lista submissions visibles para el usuario actual.
+
+    F-2026-08-12-DESCUENTOS-TAB (Kevin 2026-08-12 post-reunion): si
+    `con_descuento=True`, filtra a submissions que propusieron descuento
+    de vicerrectorado (> 0). Usado por la pestana "Descuentos" del panel
+    de pre-registros para que el EC tenga una vista unificada de todos
+    los descuentos pendientes/aprobados/rechazados.
+
+    B-2026-08-22-PRE-REG-BATCH-ENRICH: devuelve (items, total, forms_by_id)
+    con los forms ya cargados para que el enrich NO tenga que re-query.
+    count + find corren en paralelo con asyncio.gather.
+    """
     # Primero, set de form_ids visibles
     form_query: dict = {}
     if current_user.rol == UserRole.CPD:
@@ -312,42 +376,81 @@ async def get_submissions_for_admin(
     elif current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
         cursos = current_user.cursos_asignados or []
         if not cursos:
-            return [], 0
+            return [], 0, {}
         form_query = {"programa_id": {"$in": cursos}}
     elif current_user.rol not in (UserRole.SUPERADMIN, UserRole.ADMIN):
-        return [], 0
+        return [], 0, {}
 
     # Si se filtró por form_id, validar que el form sea visible
     if form_id:
         try:
             form_oid = PydanticObjectId(form_id)
         except Exception:
-            return [], 0
+            return [], 0, {}
         form = await PreRegistrationForm.get(form_oid)
         if not form:
-            return [], 0
+            return [], 0, {}
         # Chequear visibilidad del form individual contra el rol
         if current_user.rol == UserRole.CPD and form.programa_id is not None:
-            return [], 0
+            return [], 0, {}
         if current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
             cursos = current_user.cursos_asignados or []
             if form.programa_id not in cursos:
-                return [], 0
+                return [], 0, {}
         form_query = {"_id": form_oid}
 
-    form_ids = [f.id for f in await PreRegistrationForm.find(form_query).to_list()]
-    form_ids_oid = form_ids
+    # B-2026-08-22-PRE-REG-BATCH-ENRICH: si la query ya fija un _id
+    # (caso form_id pasado y validado), no hace falta re-leer todos los
+    # forms. Si la query es por programa_id, si.
+    if "_id" in form_query:
+        forms = await PreRegistrationForm.find(form_query).to_list()
+    else:
+        forms = await PreRegistrationForm.find(form_query).to_list()
+    forms_by_id: dict = {f.id: f for f in forms}
+    form_ids_oid = list(forms_by_id.keys())
     if not form_ids_oid:
-        return [], 0
+        return [], 0, {}
 
     sub_query: dict = {"form_id": {"$in": form_ids_oid}}
     if estado and estado in ("pendiente", "aprobado", "rechazado"):
         sub_query["estado"] = estado
+    # F-2026-08-12-DESCUENTOS-TAB: filtro para que la pestana "Descuentos"
+    # muestre solo submissions con descuento propuesto > 0.
+    if con_descuento:
+        sub_query["data.descuento_porcentaje"] = {"$gt": 0}
 
-    total = await PreRegistration.find(sub_query).count()
     skip = (page - 1) * per_page
-    items = await PreRegistration.find(sub_query).sort("-created_at").skip(skip).limit(per_page).to_list()
-    return items, total
+    # B-2026-08-22-PRE-REG-BATCH-ENRICH: count + find en paralelo
+    total, items = await asyncio.gather(
+        PreRegistration.find(sub_query).count(),
+        PreRegistration.find(sub_query).sort("-created_at").skip(skip).limit(per_page).to_list(),
+    )
+    return items, total, forms_by_id
+
+
+def _normalize_descuento(value) -> Optional[float]:
+    """
+    F-FIX-DESCUENTO-DOBLE-DIVISION (Kevin 2026-08-22): normaliza un valor de
+    descuento (puede llegar como string '50' o 0.5) al formato canonico 0-1
+    que requiere el modelo Student.descuento_vicerrectorado_monto.
+
+    - Si el valor es None o vacio: retorna None (sin descuento).
+    - Si el valor es > 1.0: se interpreta como porcentaje 0-100 y se divide
+      entre 100 (compatibilidad con campos legacy `descuentoPorcentaje` del form).
+    - Si el valor es <= 1.0: se asume que ya esta en formato 0-1 (lo que manda
+      el frontend actual `kyc-client/.../[slug]/+page.svelte:408`).
+    """
+    if value is None or value == "":
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if f < 0:
+        return None
+    if f > 1.0:
+        return round(f / 100.0, 4)
+    return round(f, 4)
 
 
 async def approve_submission(submission_id: PydanticObjectId, admin_username: str) -> Student:
@@ -396,6 +499,49 @@ async def approve_submission(submission_id: PydanticObjectId, admin_username: st
         sexo=data.get("sexo"),
         activo=True,
         lista_cursos_ids=[],
+        # F-2026-08-11-CAMPOS-EC: campos específicos educación continua
+        # (planilla de Lisa). Se persisten desde el data dict del form
+        # si el estudiante los lleno al pre-registrarse.
+        registro_universitario=(data.get("registro_universitario") or None),
+        avance_academico_codigo=data.get("avance_academico_codigo") or None,
+        formulario_descuento_numero=data.get("formulario_descuento_numero") or None,
+        carrera_codigo=(data.get("carrera_codigo") or None),
+        descuento_porcentaje=data.get("descuento_porcentaje") or None,
+        # F-2026-08-11-CAMPOS-EC-MODALIDAD (reunion UAGRM 2026-08-11, seccion 4).
+        procedencia=(data.get("procedencia") or None),
+        modalidad=(data.get("modalidad") or None),
+        carta_firmada_url=(data.get("carta_firmada_url") or None),
+        # F-2026-08-11-CAMPOS-EC-RESOLUCION (Kevin 22:37).
+        resolucion_url=(data.get("resolucion_url") or None),
+        # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12): discriminacion
+        # primera carrera vs profesional con titulo. se persiste tal cual
+        # el data dict (que ya fue validado en el schema).
+        es_primer_carrera=bool(data.get("es_primer_carrera", True)),
+        titulo_profesional_url=(data.get("titulo_profesional_url") or None),
+        titulo_profesional_estado="pendiente",  # el encargado EC lo valida despues
+        # F-2026-08-12-DESCUENTO-BECA-VALIDACION (Kevin 2026-08-12, post-reunion):
+        # Si el estudiante propuso un descuento (campo descuentoPorcentaje del
+        # wizard, 0-100%), se persiste como descuento_vicerrectorado_monto
+        # (convertido a 0-1) con estado "pendiente". El encargado EC debe
+        # validarlo explicitamente despues (mismo patron que el titulo).
+        # Si rechazo: el estudiante sigue matriculado pero se cobra el modulo
+        # completo (sin descuento).
+        # Si no propuso descuento: queda en "no_aplica".
+        # F-FIX-DESCUENTO-DOBLE-DIVISION (Kevin 2026-08-22): el frontend ya divide
+        # entre 100 al enviar (kyc-client/src/routes/pre-registro/[slug]/+page.svelte
+        # linea 408: `Number(v)/100`), por lo que `data.descuento_porcentaje` llega
+        # en formato 0-1 (ej: 0.5 para 50%). El backend dividia OTRA VEZ entre 100,
+        # guardando 0.005 en vez de 0.5, y por eso `aprobar_descuento_vicerrectorado`
+        # aplicaba un descuento del 0.5% (invisible). Usamos `_normalize_descuento`
+        # que acepta ambos formatos (>1 se interpreta como 0-100 y se divide).
+        descuento_vicerrectorado_monto=_normalize_descuento(
+            data.get("descuentoPorcentaje") or data.get("descuento_porcentaje")
+        ),
+        descuento_vicerrectorado_estado=(
+            "pendiente"
+            if (data.get("descuentoPorcentaje") or data.get("descuento_porcentaje"))
+            else "no_aplica"
+        ),
     )
     await student.insert()
 
@@ -405,6 +551,61 @@ async def approve_submission(submission_id: PydanticObjectId, admin_username: st
     sub.fecha_revision = utcnow_naive()
     sub.migrated_to_student_id = student.id
     await sub.save()
+
+    # F-2026-08-12-PRE-INSCRIPCION-AUTO-ENROLL (Kevin 2026-08-12 post-reunion):
+    # al aprobar una pre-inscripcion, ademas de crear el Student, inscribirlo
+    # automaticamente en el programa del formulario. Asi el estudiante
+    # aparece inmediatamente en la lista de inscritos del programa y el
+    # panel /app/inscripciones lo muestra sin tener que hacer
+    # Inscripcion Individual manual.
+    #
+    # Solo se crea el Enrollment (sin pagos), porque Kevin decidio que los
+    # pagos se confirman despues del pago real (no se asume que el
+    # estudiante ya pago). El Enrollment queda en PENDIENTE_PAGO.
+    #
+    # Si el form no tiene programa_id o el curso esta cerrado, NO se
+    # falla el approve (solo se loguea warning). El estudiante queda
+    # creado, pero sin inscripcion. El EC puede inscribirlo manualmente
+    # despues desde Inscripcion Individual.
+    if sub.form_id:
+        try:
+            from models.pre_registration import PreRegistrationForm
+            from schemas.enrollment import EnrollmentCreate
+            from services import enrollment_service
+
+            form = await PreRegistrationForm.get(sub.form_id)
+            if form and form.programa_id:
+                try:
+                    # Reutilizamos el service de enrollment, que ya calcula
+                    # matricula diferenciada (primer carrera vs profesional),
+                    # descuentos, requisitos, modulos, etc.
+                    enrollment_in = EnrollmentCreate(
+                        estudiante_id=student.id,
+                        curso_id=form.programa_id,
+                        # NO pasamos descuento_id ni descuento_personalizado
+                        # porque la pre-inscripcion usa el campo
+                        # descuento_porcentaje del Student (que se valida
+                        # por separado en el modal "Validar descuento").
+                    )
+                    await enrollment_service.create_enrollment(
+                        enrollment_in=enrollment_in,
+                        admin_username=admin_username,
+                        student=student,
+                    )
+                except ValueError as ve:
+                    # El curso esta cerrado/inactivo, o ya esta inscrito, etc.
+                    # No fallamos el approve, solo logueamos.
+                    print(
+                        f"[pre-registration] No se pudo inscribir automáticamente "
+                        f"al estudiante {student.nombre} en el programa {form.programa_id}: {ve}"
+                    )
+        except Exception as e:
+            # Cualquier error inesperado en la inscripcion NO debe tumbar el
+            # approve (el Student ya esta creado). Logueamos y seguimos.
+            print(
+                f"[pre-registration] Error inesperado inscribiendo automáticamente "
+                f"al estudiante {student.id} en el programa del form {sub.form_id}: {e}"
+            )
 
     # Email de bienvenida con contraseña inicial (best-effort, no bloqueante)
     try:
@@ -448,16 +649,230 @@ async def reject_submission(
 
 
 # ============================================================================
+# F-2026-08-12-DESCUENTO-BECA-VALIDACION (Kevin 2026-08-12, post-reunion
+# UAGRM): el descuento de vicerrectorado que el estudiante propuso en el
+# wizard NO se aplica automaticamente al aprobar la pre-inscripcion. Queda
+# en estado "pendiente" y el encargado EC debe aprobarlo o rechazarlo
+# explicitamente desde el panel. Si se rechaza, el estudiante sigue
+# matriculado pero se cobra el modulo completo (sin descuento).
+# ============================================================================
+
+async def aprobar_descuento_vicerrectorado(student_id: PydanticObjectId) -> Student:
+    """
+    Aprueba el descuento de vicerrectorado de un estudiante. El descuento
+    ya debio haber sido propuesto al aprobar la submission (estado
+    "pendiente"). Si no hay descuento propuesto, lanza ValueError.
+
+    F-2026-08-12-DESCUENTO-RECALC (Kevin 2026-08-12 post-reunion B1):
+    ademas de cambiar el estado a 'aprobado', recalcula el `total_a_pagar`
+    del Enrollment activo del estudiante aplicando el descuento SOLO a:
+    - Modulos no pagados (los ya pagados conservan su costo original)
+    - Monto restante despues de la matricula (la matricula ya se cobro
+      al aprobar la pre-inscripcion, no se toca)
+
+    Asi, si el estudiante ya pago la matricula de 200 Bs y le aprueban
+    un descuento del 50% sobre los 3000 Bs de colegiatura, su nuevo
+    `total_a_pagar` = 200 + 1500 = 1700 Bs (en lugar de 200 + 3000 = 3200).
+    """
+    from models.enrollment import Enrollment
+    from models.enums import EstadoInscripcion
+
+    student = await Student.get(student_id)
+    if not student:
+        raise ValueError("Estudiante no encontrado.")
+    if (
+        student.descuento_vicerrectorado_monto is None
+        or student.descuento_vicerrectorado_estado == "no_aplica"
+    ):
+        raise ValueError(
+            "El estudiante no propuso un descuento de vicerrectorado. "
+            "Solo se puede validar un descuento pendiente de aprobacion."
+        )
+    student.descuento_vicerrectorado_estado = "aprobado"
+    student.descuento_vicerrectorado_motivo_rechazo = None
+    await student.save()
+
+    # F-2026-08-12-DESCUENTO-RECALC: recalcular total_a_pagar del Enrollment
+    # activo (si existe) aplicando el descuento. Si no hay enrollment todavia
+    # (caso raro donde se aprobo descuento antes de aprobar submission), no
+    # hay nada que recalcular: cuando se apruebe la submission, el Enrollment
+    # se creara con el descuento aplicado via el campo descuento_curso.
+    descuento_pct = float(student.descuento_vicerrectorado_monto or 0.0)
+    if descuento_pct <= 0:
+        return student
+
+    enrollment = await Enrollment.find_one(
+        Enrollment.estudiante_id == student_id,
+        Enrollment.estado != EstadoInscripcion.CANCELADO,
+    )
+    if not enrollment:
+        return student
+
+    # Aplicar el descuento SOLO a los modulos no pagados.
+    # La matricula NO se modifica (ya fue cobrada al aprobar la submission).
+    ahorro_total = 0.0
+    for mod in (enrollment.modulos or []):
+        if mod.estado == "Pagado":
+            continue
+        costo_original = float(mod.costo or 0.0)
+        if costo_original <= 0:
+            continue
+        descuento_aplicado = round(costo_original * descuento_pct, 2)
+        # El costo del modulo es lo que el estudiante DEBE pagar (no el original).
+        # Actualizar `costo` baja el monto pendiente; mantener `costo_original`
+        # para auditoria (campo nuevo si se quiere agregar en el futuro).
+        mod.costo = round(costo_original - descuento_aplicado, 2)
+        ahorro_total += descuento_aplicado
+
+    # Recalcular total_a_pagar: matricula + modulos (con descuento aplicado)
+    # NO tocar total_pagado (lo ya pagado se respeta).
+    if ahorro_total > 0:
+        total_modulos_nuevo = sum(float(m.costo or 0.0) for m in (enrollment.modulos or []))
+        costo_matricula = float(getattr(enrollment, "costo_matricula", 0) or 0)
+        enrollment.total_a_pagar = round(costo_matricula + total_modulos_nuevo, 2)
+        # saldo_pendiente se mantiene derivado (Pydantic validator lo calcula)
+        enrollment.saldo_pendiente = max(
+            0.0, enrollment.total_a_pagar - float(enrollment.total_pagado or 0)
+        )
+        # Anotar el descuento aplicado en el snapshot del enrollment para
+        # que sea visible en listados y reportes. Usamos descuento_personalizado
+        # (que ya existe) para representar el % del vicerrectorado.
+        from models.enrollment import Enrollment as _E
+        enrollment.descuento_personalizado = descuento_pct * 100
+        await enrollment.save()
+
+    return student
+
+
+async def rechazar_descuento_vicerrectorado(
+    student_id: PydanticObjectId,
+    motivo: str,
+) -> Student:
+    """
+    Rechaza el descuento de vicerrectorado. El estudiante sigue matriculado
+    pero se cobra el modulo completo (sin descuento). El motivo se guarda
+    para trazabilidad.
+    """
+    student = await Student.get(student_id)
+    if not student:
+        raise ValueError("Estudiante no encontrado.")
+    if (
+        student.descuento_vicerrectorado_monto is None
+        or student.descuento_vicerrectorado_estado == "no_aplica"
+    ):
+        raise ValueError(
+            "El estudiante no propuso un descuento de vicerrectorado. "
+            "Solo se puede rechazar un descuento pendiente de aprobacion."
+        )
+    motivo_clean = (motivo or "").strip()
+    if len(motivo_clean) < 3:
+        raise ValueError(
+            "Para rechazar el descuento debes indicar un motivo de al menos 3 caracteres."
+        )
+    student.descuento_vicerrectorado_estado = "rechazado"
+    student.descuento_vicerrectorado_motivo_rechazo = motivo_clean
+    await student.save()
+    return student
+
+
+# ============================================================================
 # Métricas (para badges y dashboard)
 # ============================================================================
 
-async def get_forms_counters() -> dict:
-    """Conteos globales (para badges en sidebar)."""
-    forms_total = await PreRegistrationForm.find().count()
-    forms_activos = await PreRegistrationForm.find(PreRegistrationForm.estado == "activo").count()
-    subs_pendientes = await PreRegistration.find(PreRegistration.estado == "pendiente").count()
+async def get_forms_counters(current_user: User) -> dict:
+    """Conteos globales (para badges en sidebar).
+
+    F-2026-08-11-EC-FIX-COUNTERS-403: encargado_curso y coordinador ven
+    solo counts de SUS cursos asignados. Antes este service no recibia
+    el user y retornaba el total global (lo que hacia parecer a un EC
+    que tenia 0 submissions cuando en realidad tenia 5 en su curso).
+
+    F-2026-08-12-DESCUENTOS-TAB (Kevin 2026-08-12): nuevo campo
+    `descuentos_pendientes` = submissions con descuento propuesto > 0
+    que aun NO fueron migradas a Student o que fueron migradas pero el
+    descuento sigue en estado 'pendiente'. Usado para el badge de la
+    pestana "Descuentos".
+
+    B-2026-08-22-PRE-REG-BATCH-ENRICH: reescrito para usar 2 aggregations
+    (1 para forms agrupados por estado + form_ids, 1 para subs agrupados
+    por estado + has_descuento) en vez de 5 queries separadas. Reduce
+    /counters de ~1.74s a <0.5s.
+    """
+    empty = {
+        "forms_total": 0,
+        "forms_activos": 0,
+        "submissions_pendientes": 0,
+        "descuentos_pendientes": 0,
+    }
+
+    # F-2026-08-11-EC-FIX-COUNTERS-403: set de form_ids visibles
+    form_query: dict = {}
+    if current_user.rol == UserRole.CPD:
+        form_query = {"programa_id": None}
+    elif current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
+        cursos = current_user.cursos_asignados or []
+        if not cursos:
+            return empty
+        form_query = {"programa_id": {"$in": cursos}}
+    elif current_user.rol not in (UserRole.SUPERADMIN, UserRole.ADMIN):
+        return empty
+
+    # 1 sola aggregation: forms agrupados por estado (y aprovecha para
+    # traer todos los _id en un solo push, sin un to_list() extra).
+    forms_pipeline = [
+        {"$match": form_query},
+        {"$group": {
+            "_id": "$estado",
+            "count": {"$sum": 1},
+            "ids": {"$push": "$_id"},
+        }},
+    ]
+    forms_total = 0
+    forms_activos = 0
+    form_ids: list = []
+    async for row in PreRegistrationForm.aggregate(forms_pipeline):
+        forms_total += row.get("count", 0)
+        if row.get("_id") == "activo":
+            forms_activos = row.get("count", 0)
+        form_ids.extend(row.get("ids", []))
+
+    if not form_ids:
+        return {
+            "forms_total": forms_total,
+            "forms_activos": forms_activos,
+            "submissions_pendientes": 0,
+            "descuentos_pendientes": 0,
+        }
+
+    # 1 sola aggregation: subs agrupados por (estado, has_descuento) en vez
+    # de 2 count() separados. has_descuento > 0 AND estado in (pendiente, aprobado)
+    # = descuentos pendientes. estado = pendiente = subs_pendientes.
+    subs_pipeline = [
+        {"$match": {"form_id": {"$in": form_ids}}},
+        {"$group": {
+            "_id": {
+                "estado": "$estado",
+                "has_descuento": {
+                    "$gt": [{"$ifNull": ["$data.descuento_porcentaje", 0]}, 0]
+                },
+            },
+            "count": {"$sum": 1},
+        }},
+    ]
+    subs_pendientes = 0
+    descuentos_pendientes = 0
+    async for row in PreRegistration.aggregate(subs_pipeline):
+        estado = row["_id"].get("estado")
+        has_descuento = row["_id"].get("has_descuento", False)
+        cnt = row.get("count", 0)
+        if estado == "pendiente":
+            subs_pendientes += cnt
+        if has_descuento and estado in ("pendiente", "aprobado"):
+            descuentos_pendientes += cnt
+
     return {
         "forms_total": forms_total,
         "forms_activos": forms_activos,
         "submissions_pendientes": subs_pendientes,
+        "descuentos_pendientes": descuentos_pendientes,
     }

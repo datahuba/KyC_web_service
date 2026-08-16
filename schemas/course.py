@@ -23,7 +23,18 @@ class ModuloCreate(BaseModel):
     nombre: str
     costo: float
     # ISSUE R: PERMITIR QUE EL BACKEND RECIBA Y VALIDE EL DOCENTE_ID
+    # F-FIX-CREAR-PROGRAMA-422 (2026-08-09, Kevin): aceptar "" como None
+    # para que el frontend pueda enviar el campo vacio sin causar 422.
+    # Tambien aceptar string que no es un ObjectId valido: si falla la
+    # conversion, lo dejamos como None (no se asigna docente).
     docente_id: Optional[PyObjectId] = Field(None, description="ID del docente asignado al módulo")
+
+    @field_validator('docente_id', mode='before')
+    @classmethod
+    def _empty_docente_to_none(cls, v):
+        if v is None or v == '' or v == 'null' or v == 'undefined':
+            return None
+        return v
 
 
 class CargoAdicionalItemCreate(BaseModel):
@@ -46,15 +57,19 @@ class CourseCreate(BaseModel):
     
     # Precio único del programa (ISSUE-P-PRECIO-UNICO, 2026-07-08): mismo
     # costo para todos los estudiantes, sin distinción de procedencia.
-    costo_total_interno: float = Field(..., gt=0, description="Costo total (colegiatura) del programa")
-    matricula_interno: float = Field(..., ge=0, description="Matrícula institucional del programa")
+    # F-HISTORICO (2026-07-31): en programas historicos estos campos pueden
+    # ser 0 (no se exige costo/matricula/cuotas porque son datos pasados
+    # que no necesariamente se conocen exactos). El frontend valida que
+    # para programas en ejecucion sean > 0.
+    costo_total_interno: float = Field(default=0, ge=0, description="Costo total (colegiatura) del programa. Obligatorio > 0 si NO es historico.")
+    matricula_interno: float = Field(default=0, ge=0, description="Matrícula institucional del programa. Obligatorio si NO es historico.")
 
     # ISSUE-P-CARGO-MULTIITEM: lista de ítems de cargo adicional/complementario
     # al programa (ej. varios talleres, cada uno con su propio costo).
     cargo_adicional_items: Optional[List[CargoAdicionalItemCreate]] = Field(default_factory=list)
 
     # Estructura de pago y módulos
-    cantidad_cuotas: int = Field(..., ge=1)
+    cantidad_cuotas: int = Field(default=0, ge=0, description="Cantidad de cuotas/modulos. Obligatorio >= 1 si NO es historico.")
     modulos: Optional[List[ModuloCreate]] = Field(
         default_factory=list,
         description="Lista generada dinámicamente de módulos y sus costos"
@@ -73,6 +88,39 @@ class CourseCreate(BaseModel):
     requisitos: List[RequisitoTemplateCreate] = Field(
         default_factory=list,
         description="Lista de requisitos que debe cumplir el estudiante al inscribirse"
+    )
+
+    # F-HISTORICO (2026-07-31): marca el programa como historico. Si es True,
+    # no se exige estructura operacional (docentes/modulos/notas/pagos).
+    es_historico: bool = Field(
+        default=False,
+        description="F-HISTORICO: True si es programa historico (solo datos basicos + resolucion)."
+    )
+
+    # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): override manual del
+    # estado calculado por fechas. Sin esto, si el usuario crea un programa
+    # con fecha_inicio futura, el calculo automatico dira 'programado' y no
+    # 'en_ejecucion' como el usuario queria. Valores: 'programado' |
+    # 'en_ejecucion' | 'cerrado'. None = calcular segun fechas.
+    estado_override: Optional[str] = Field(
+        default=None,
+        description="F-CREAR-PROGRAMA-EN-EJECUCION: override del estado calculado. None=calcular por fechas. 'programado'|'en_ejecucion'|'cerrado'=forzar."
+    )
+
+    @field_validator('fecha_inicio', 'fecha_fin', mode='before')
+    @classmethod
+    def _empty_date_to_none(cls, v):
+        # F-FIX-CREAR-PROGRAMA-422 (2026-08-09, Kevin): aceptar "" como None
+        # para que el frontend pueda enviar fechas vacias (ej. en programas
+        # historicos donde las fechas son opcionales).
+        if v is None or v == '' or v == 'null' or v == 'undefined':
+            return None
+        return v
+
+    # Resolucion de respaldo (opcional para todos los programas)
+    resolucion_pdf_url: Optional[str] = Field(
+        default=None,
+        description="URL del PDF de la resolucion que respalda el programa (F-080). Opcional."
     )
     
     model_config = {
@@ -135,7 +183,24 @@ class CourseResponse(BaseModel):
         default_factory=list,
         description="Requisitos del curso"
     )
-    
+
+    es_historico: bool = False
+    resolucion_pdf_url: Optional[str] = None
+
+    # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): expone el estado
+    # calculado (programado/en_ejecucion/cerrado) y el override manual.
+    # El frontend prefiere el calculado pero el override es util para
+    # debugging.
+    estado: Optional[str] = None
+    estado_override: Optional[str] = None
+    estado_calculado: Optional[str] = None
+
+    # FIX-F-2026-08-12-EC-CREADO-POR (Kevin 2026-08-12): ID del User que
+    # creo el programa. None para cursos pre-existentes. El frontend lo usa
+    # en listados para mostrar "Creado por: <username>" y como dato de
+    # auditoria.
+    creado_por_id: Optional[PyObjectId] = None
+
     created_at: datetime
     updated_at: datetime
     
@@ -183,12 +248,15 @@ class CourseUpdate(BaseModel):
     tipo_curso: Optional[TipoCurso] = None
     modalidad: Optional[Modalidad] = None
     
-    costo_total_interno: Optional[float] = Field(None, gt=0)
+    costo_total_interno: Optional[float] = Field(None, ge=0)
     matricula_interno: Optional[float] = Field(None, ge=0)
 
     cargo_adicional_items: Optional[List[CargoAdicionalItemCreate]] = None
-    
-    cantidad_cuotas: Optional[int] = Field(None, ge=1)
+
+    # F-FIX-EDITAR-HISTORICO-422 (2026-08-08, Kevin): permitir 0 para que el
+    # frontend pueda guardar un programa historico con costo 0 y 0 modulos
+    # (son solo archivo, no se venden). Antes era ge=1, daba 422 al guardar.
+    cantidad_cuotas: Optional[int] = Field(None, ge=0)
     modulos: Optional[List[ModuloCreate]] = None
 
     descuento_curso: Optional[float] = Field(None, ge=0, le=100)
@@ -200,8 +268,27 @@ class CourseUpdate(BaseModel):
     fecha_inicio: Optional[datetime] = None
     fecha_fin: Optional[datetime] = None
     activo: Optional[bool] = None
-    
+
+    # F-FIX-CREAR-PROGRAMA-422 (2026-08-09, Kevin): aceptar "" como None
+    # para que el frontend pueda editar programas historicos sin fecha
+    # sin causar 422.
+    @field_validator('fecha_inicio', 'fecha_fin', mode='before')
+    @classmethod
+    def _empty_date_to_none(cls, v):
+        if v is None or v == '' or v == 'null' or v == 'undefined':
+            return None
+        return v
+
     requisitos: Optional[List[RequisitoTemplateCreate]] = None
+
+    es_historico: Optional[bool] = None
+    resolucion_pdf_url: Optional[str] = None
+
+    # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): ver CourseCreate.
+    estado_override: Optional[str] = Field(
+        default=None,
+        description="F-CREAR-PROGRAMA-EN-EJECUCION: override del estado calculado."
+    )
     
     model_config = {
         "json_schema_extra": {
@@ -225,12 +312,28 @@ class EnrollmentInfo(BaseModel):
     id: PyObjectId
     fecha_inscripcion: datetime
     estado: EstadoInscripcion
+    # F-HISTORICO-EXCEL-ESTADO (2026-08-04): exponer matricula_pagada
+    # para que el frontend pueda mostrar el badge correcto en la UI.
+    matricula_pagada: bool = False
 
 class FinancialInfo(BaseModel):
     total_a_pagar: float
     total_pagado: float
     saldo_pendiente: float
     avance_pago: float = Field(..., description="Porcentaje de pago completado (0-100)")
+    # F-2026-08-22-PRE-REG-BADGE-DESCUENTO (Kevin 2026-08-22): exponer el
+    # descuento aplicado al enrollment para que el frontend pueda mostrar
+    # el badge "X% descuento" en el modal de Estudiantes Inscritos.
+    # - `descuento_personalizado` viene de Enrollment (snapshot, en % 0-100)
+    # - `descuento_origen` indica si fue por vicerrectorado, EC, o ninguno
+    descuento_personalizado: Optional[float] = Field(
+        None, ge=0, le=100,
+        description="% de descuento aplicado (0-100). Null si no tiene descuento."
+    )
+    descuento_origen: Optional[str] = Field(
+        None,
+        description="Origen del descuento: 'vicerrectorado' | 'ec' | 'mixto' | None"
+    )
 
 class CourseEnrolledStudent(BaseModel):
     """

@@ -14,9 +14,18 @@ Schemas incluidos:
 
 from datetime import datetime
 from typing import Optional, List
-from pydantic import BaseModel, Field, EmailStr, field_validator
+import re
+from pydantic import BaseModel, Field, EmailStr, field_validator, AliasChoices
 from models.enums import Sexo, EstadoCivil, TipoSangre
 from models.base import PyObjectId
+
+# Helper para validar carnets con formato boliviano
+# Acepta carnet puro (8130604) o con sufijo (8099472-1A, 8130604-1J) o float mal exportado (8130604.0)
+_CARNET_RE = re.compile(r'^\d{5,12}([.\-,/][A-Z0-9]{1,3})?$')
+
+def _carnet_valido_boliviano(v: str) -> bool:
+    """True si el carnet tiene formato valido de Bolivia (con o sin sufijo de letra, float mal exportado)."""
+    return bool(_CARNET_RE.match(v))
 
 
 class ChangePassword(BaseModel):
@@ -62,15 +71,32 @@ class StudentCreate(BaseModel):
     """
     
     # Campos obligatorios
-    registro: str = Field(..., description="Número de registro único del estudiante (usado como username)")
-    carnet: str = Field(..., description="Carnet de identidad (será usado como contraseña inicial y almacenado si no se provee un password)")
-    
+    # FIX-ISSUE-260 (2026-08-14): aceptar `carnet_identidad` (UI) como
+    # alias de `carnet`. Y `registro_universitario` como alias de `registro`.
+    registro: str = Field(
+        ...,
+        description="Número de registro único del estudiante (usado como username)",
+        validation_alias=AliasChoices("registro", "registro_universitario"),
+    )
+    carnet: str = Field(
+        ...,
+        description="Carnet de identidad (será usado como contraseña inicial y almacenado si no se provee un password)",
+        validation_alias=AliasChoices("carnet", "carnet_identidad", "ci"),
+    )
+
     # Campos opcionales nuevos (Para formulario rápido)
     password: Optional[str] = Field(None, min_length=5, description="Contraseña inicial del estudiante (opcional, fallback a carnet)")
     course_id: Optional[PyObjectId] = Field(None, description="ID del curso para inscripción inicial (opcional)")
-    
+
     # Campos opcionales estándar
-    nombre: Optional[str] = Field(None, min_length=1, max_length=200, description="Nombre completo del estudiante")
+    # FIX-ISSUE-260: aceptar `nombre_completo` como alias de `nombre`.
+    nombre: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=200,
+        description="Nombre completo del estudiante",
+        validation_alias=AliasChoices("nombre", "nombre_completo", "full_name"),
+    )
     email: Optional[EmailStr] = Field(None, description="Correo electrónico")
     complemento_carnet: Optional[str] = Field(None, max_length=10, description="Complemento del CI (ej. '1D', '1J'), distinto de la extensión/lugar de expedición.")
     extension: Optional[str] = Field(None, description="Extension del carnet de identidad")
@@ -90,6 +116,52 @@ class StudentCreate(BaseModel):
     periodo: Optional[str] = None
     tipo_sangre: Optional[TipoSangre] = None
     titulo_bachiller: Optional[str] = None
+
+    # F-2026-08-11-CAMPOS-EC: campos específicos del Diplomado Gestión
+    # Tributaria y demás programas de educación continua (planilla de Lisa).
+    registro_universitario: Optional[str] = Field(None, max_length=30)
+    avance_academico_codigo: Optional[int] = Field(None, ge=0)
+    formulario_descuento_numero: Optional[int] = Field(None, ge=0)
+    carrera_codigo: Optional[str] = Field(None, max_length=20)
+    descuento_porcentaje: Optional[float] = Field(None, ge=0, le=1)
+
+    # F-2026-08-11-CAMPOS-EC-MODALIDAD (reunion UAGRM 2026-08-11).
+    # procedencia (codigo departamento Bolivia), modalidad (presencial/virtual),
+    # carta_firmada_url (PDF firmado por el director). Validacion detallada en
+    # schemas/pre_registration.py al enviar el form publico.
+    procedencia: Optional[str] = Field(None, max_length=10)
+    modalidad: Optional[str] = Field(None, max_length=20)
+    carta_firmada_url: Optional[str] = Field(None, max_length=500)
+
+    # F-2026-08-11-CAMPOS-EC-RESOLUCION (Kevin 22:37): URL de la resolucion
+    # del programa que el estudiante subio al preinscribirse. Es OPCIONAL
+    # (tambien el admin puede subirla despues via /app/courses).
+    resolucion_url: Optional[str] = Field(None, max_length=500)
+
+    # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12, reunion UAGRM):
+    # Discriminacion primera carrera vs profesional con titulo.
+    # es_primer_carrera=True: cobra matricula primer carrera (default 200).
+    # es_primer_carrera=False: cobra matricula profesional (default 500) Y
+    # titulo_profesional_url es OBLIGATORIA (validado por el encargado EC).
+    es_primer_carrera: bool = Field(
+        default=True,
+        description="F-2026-08-12-DESCUENTO-BECA: True=primera carrera (cobra menos matricula), "
+                    "False=ya tiene titulo profesional (cobra mas matricula)."
+    )
+    titulo_profesional_url: Optional[str] = Field(
+        None, max_length=500,
+        description="F-2026-08-12-DESCUENTO-BECA: URL de la foto del titulo profesional "
+                    "(PDF/JPG/PNG en Cloudinary). Requerida si es_primer_carrera=False."
+    )
+    titulo_profesional_estado: str = Field(
+        default="pendiente",
+        description="F-2026-08-12-DESCUENTO-BECA: 'pendiente'|'verificado'|'rechazado'. "
+                    "Lo setea el encargado EC al revisar el documento."
+    )
+    titulo_profesional_motivo_rechazo: Optional[str] = Field(
+        None, max_length=500,
+        description="F-2026-08-12-DESCUENTO-BECA: motivo si el encargado EC rechazo el titulo."
+    )
 
     @field_validator('sexo', 'estado_civil', 'tipo_sangre', mode='before')
     @classmethod
@@ -118,8 +190,19 @@ class StudentCreate(BaseModel):
         if v is None:
             return v
         v = str(v).strip()
-        if v and not v.isdigit():
-            raise ValueError('El carnet debe contener solo números.')
+        # F-CARNET-BOLIVIANO (2026-08-05, Kevin): aceptar carnet con:
+        # - Solo digitos: '8130604'
+        # - Sufijo de letra: '8099472-1A', '8130604-1J' (comun en Bolivia)
+        # - Float mal exportado de Excel: '8130604.0' o '8130604,0'
+        # Rechaza: texto, simbolos raros, letras sueltas
+        if v and not _carnet_valido_boliviano(v):
+            raise ValueError('El carnet debe contener solo numeros (admite sufijo tipo 1234567-1A).')
+        # Normalizar float mal exportado: '8130604.0' -> '8130604'
+        # y '8130604,0' -> '8130604' (algunos Excels usan coma como decimal)
+        if v.endswith('.0') and v[:-2].isdigit():
+            v = v[:-2]
+        elif v.endswith(',0') and v[:-2].isdigit():
+            v = v[:-2]
         return v
 
     @field_validator('celular', 'telefono')
@@ -196,7 +279,36 @@ class StudentResponse(BaseModel):
     
     # OBJETO ANIDADO DEL TÍTULO PROFESIONAL
     titulo: Optional[dict] = None
-    
+
+    # F-2026-08-11-CAMPOS-EC: campos específicos educación continua
+    registro_universitario: Optional[str] = None
+    avance_academico_codigo: Optional[int] = None
+    formulario_descuento_numero: Optional[int] = None
+    carrera_codigo: Optional[str] = None
+    descuento_porcentaje: Optional[float] = None
+
+    # F-2026-08-11-CAMPOS-EC-MODALIDAD
+    procedencia: Optional[str] = None
+    modalidad: Optional[str] = None
+    carta_firmada_url: Optional[str] = None
+    # F-2026-08-11-CAMPOS-EC-RESOLUCION
+    resolucion_url: Optional[str] = None
+
+    # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12): discriminacion
+    # primera carrera vs profesional con titulo.
+    es_primer_carrera: bool = True
+    titulo_profesional_url: Optional[str] = None
+    titulo_profesional_estado: str = "pendiente"
+    titulo_profesional_motivo_rechazo: Optional[str] = None
+
+    # F-2026-08-12-DESCUENTO-BECA-VALIDACION (Kevin 2026-08-12, post-reunion UAGRM):
+    # descuento de vicerrectorado que el estudiante propuso. El encargado EC
+    # debe validarlo explicitamente (mismo patron que el titulo profesional).
+    # Si estado=aprobado, el descuento se aplica. Si rechazado, se cobra completo.
+    descuento_vicerrectorado_monto: Optional[float] = None
+    descuento_vicerrectorado_estado: str = "no_aplica"
+    descuento_vicerrectorado_motivo_rechazo: Optional[str] = None
+
     # Estado y Metadata
     activo: bool
     lista_cursos_ids: List[PyObjectId] = []
@@ -313,6 +425,33 @@ class StudentUpdateAdmin(BaseModel):
     periodo: Optional[str] = None
     tipo_sangre: Optional[TipoSangre] = None
     titulo_bachiller: Optional[str] = None
+
+    # F-2026-08-11-CAMPOS-EC
+    registro_universitario: Optional[str] = Field(None, max_length=30)
+    avance_academico_codigo: Optional[int] = Field(None, ge=0)
+    formulario_descuento_numero: Optional[int] = Field(None, ge=0)
+    carrera_codigo: Optional[str] = Field(None, max_length=20)
+    descuento_porcentaje: Optional[float] = Field(None, ge=0, le=1)
+
+    # F-2026-08-11-CAMPOS-EC-MODALIDAD
+    procedencia: Optional[str] = Field(None, max_length=10)
+    modalidad: Optional[str] = Field(None, max_length=20)
+    carta_firmada_url: Optional[str] = Field(None, max_length=500)
+    # F-2026-08-11-CAMPOS-EC-RESOLUCION
+    resolucion_url: Optional[str] = Field(None, max_length=500)
+    # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12)
+    es_primer_carrera: Optional[bool] = Field(
+        default=None,
+        description="F-2026-08-12-DESCUENTO-BECA: True=primera carrera, False=profesional con titulo. "
+                    "Si no se envia, se conserva el valor actual del Student."
+    )
+    titulo_profesional_url: Optional[str] = Field(None, max_length=500)
+    titulo_profesional_estado: Optional[str] = Field(
+        default=None,
+        description="F-2026-08-12-DESCUENTO-BECA: 'pendiente'|'verificado'|'rechazado'. "
+                    "Si no se envia, se conserva el valor actual."
+    )
+    titulo_profesional_motivo_rechazo: Optional[str] = Field(None, max_length=500)
 
     @field_validator('sexo', 'estado_civil', 'tipo_sangre', mode='before')
     @classmethod

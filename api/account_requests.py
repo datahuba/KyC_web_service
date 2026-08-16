@@ -58,7 +58,8 @@ async def list_requests(
     )
     total_pages = math.ceil(total / per_page) if total > 0 else 0
     return {
-        "data": items,
+        "items": items,
+        "data": items,  # alias retro-compat
         "meta": PaginationMeta(
             page=page,
             limit=per_page,

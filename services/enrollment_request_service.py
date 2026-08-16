@@ -49,15 +49,33 @@ async def create_enrollment_request(
     if not course.activo:
         raise ValueError("Este curso no está activo actualmente y no acepta solicitudes")
 
-    # F-080: bloquear inscripción a programas CERRADOS (por fecha o por override).
-    # PROGRAMADO y EN_EJECUCION sí aceptan solicitudes.
+    # F-080 + F-US-006-3TIPOS (2026-08-04): bloquear inscripción a programas
+    # que NO aceptan nuevas solicitudes. Tras el cambio de Kevin, SOLO los
+    # programas en estado PROGRAMADO aceptan inscripciones de estudiantes;
+    # en_ejecucion, cerrado e histórico NO (los ya inscritos se mantienen,
+    # pero nadie nuevo puede entrar por su cuenta). El admin/encargado puede
+    # añadirlos manualmente a un módulo futuro (en_ejecucion) o al programa
+    # completo (histórico retroactivo).
     from models.enums import EstadoPrograma
-    estado_actual = course.get_estado_actual()
-    if estado_actual == EstadoPrograma.CERRADO.value:
-        raise ValueError(
-            "Este programa ya fue cerrado y no acepta nuevas solicitudes de inscripción. "
-            "Para más información contacta a la oficina de posgrado."
-        )
+    if not course.acepta_inscripciones():
+        estado_actual = course.get_estado_actual()
+        if estado_actual == EstadoPrograma.CERRADO.value:
+            msg = (
+                "Este programa ya fue cerrado y no acepta nuevas solicitudes de inscripción. "
+                "Para más información contacta a la oficina de posgrado."
+            )
+        elif estado_actual == EstadoPrograma.EN_EJECUCION.value:
+            msg = (
+                "Este programa ya está en ejecución y no acepta nuevas solicitudes de "
+                "inscripción. Si deseas unirte, contacta a la oficina de posgrado para "
+                "que te asignen a un módulo futuro."
+            )
+        else:
+            msg = (
+                "Este programa no acepta nuevas solicitudes de inscripción en este momento. "
+                "Para más información contacta a la oficina de posgrado."
+            )
+        raise ValueError(msg)
 
     # No permitir duplicar solicitud pendiente para el mismo curso
     existente = await EnrollmentRequest.find_one(

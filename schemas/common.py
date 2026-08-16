@@ -15,12 +15,25 @@ class PaginationMeta(BaseModel):
 class PaginatedResponse(BaseModel, Generic[T]):
     """
     Respuesta genérica paginada.
-    
+
     Estructura:
     {
-        "data": [...],
+        "items": [...],  # FIX-ISSUE-250 (2026-08-14): estandarizar en `items`
+                          # para que el frontend (SvelteKit) pueda leer
+                          # el mismo campo en TODOS los endpoints paginados.
+        "data": [...],   # alias retro-compat
         "meta": { ... }
     }
+
+    Pydantic v2 por defecto EXCLUYE campos no declarados. Para que
+    `items` llegue al cliente, lo declaramos explicitamente. Tambien
+    mantenemos `data` como alias retro-compat (mismo valor que `items`).
     """
-    data: List[T] = Field(..., description="Lista de resultados")
+    items: List[T] = Field(..., description="Lista de resultados (canonico)")
+    data: List[T] = Field(..., description="Alias retro-compat de items")
     meta: PaginationMeta = Field(..., description="Metadatos de paginación")
+
+    @classmethod
+    def from_response(cls, items: List[T], meta: PaginationMeta) -> "PaginatedResponse":
+        """Helper para construir con items=data."""
+        return cls(items=items, data=items, meta=meta)

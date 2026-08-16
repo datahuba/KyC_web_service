@@ -1,4 +1,4 @@
-from typing import List, Any, Union, Optional
+from typing import List, Any, Union, Optional, Dict
 import asyncio
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
@@ -8,13 +8,36 @@ from models.course import Course
 from models.user import User
 from models.student import Student
 from models.enrollment import Enrollment
-from models.enums import UserRole
+from models.estado_programa import EstadoPrograma
+from models.enums import UserRole, EstadoInscripcion
 from schemas.course import CourseCreate, CourseResponse, CourseUpdate, CourseEnrolledStudent
+from schemas.enrollment import EnrollmentCreate
 from services import course_service
 from beanie import PydanticObjectId
 
 # Nuevas dependencias de seguridad del ISSUE L
 from api.dependencies import require_superadmin, require_cpd, require_staff, get_current_user, require_encargado_curso
+
+
+# F-US-006-3TIPOS-3A (2026-08-04): dependencia que permite a CPD, admin,
+# superadmin, encargado_curso o coordinador realizar operaciones de carga
+# inicial. La verificacion de si el encargado tiene asignado el curso
+# especifico se hace DENTRO del endpoint (no en la dep) porque depende del
+# id del curso en el path.
+def require_cpd_or_encargado_curso_or_coordinador(current_user: User = Depends(get_current_user)) -> User:
+    """F-US-006-3TIPOS: permite a CPD/ADMIN/SUPERADMIN/ENCARGADO_CURSO/COORDINADOR."""
+    if current_user.rol not in (
+        UserRole.SUPERADMIN,
+        UserRole.ADMIN,
+        UserRole.CPD,
+        UserRole.ENCARGADO_CURSO,
+        UserRole.COORDINADOR,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Solo CPD, admin, superadmin, encargado de curso o coordinador pueden realizar esta accion.",
+        )
+    return current_user
 
 router = APIRouter()
 
@@ -127,9 +150,24 @@ async def read_courses(
         None,
         description="F-080: filtrar por estado calculado del programa (programado | en_ejecucion | cerrado)"
     ),
+    # FIX-ISSUE-272 (2026-08-14): filtro por es_historico.
+    es_historico: Optional[bool] = Query(
+        None,
+        description="FIX-ISSUE-272: filtrar por es_historico (true=historicos, false=activos)"
+    ),
     current_user: Union[User, Student] = Depends(get_current_user) # Abierto para todos
 ) -> Any:
     """Listar cursos con paginación y filtros"""
+    # F-2026-08-12-EC-CURSOS-FILTRO (Kevin 2026-08-12 post-reunion UAGRM):
+    # el EC solo debe ver SUS cursos asignados. Esto filtra el dropdown
+    # de cursos en el frontend (cursos del EC, no todos). Si no es User
+    # (es Student) o no tiene cursos_asignados, ve todos (acceso normal).
+    cursos_asignados_list = None
+    if isinstance(current_user, User):
+        from api.dependencies import filtro_cursos_por_rol
+        cursos_filtro = filtro_cursos_por_rol(current_user)
+        cursos_asignados_list = cursos_filtro.get("curso_id", {}).get("$in") if cursos_filtro else None
+
     courses, total_count = await course_service.get_courses(
         page=page,
         per_page=per_page,
@@ -138,12 +176,25 @@ async def read_courses(
         tipo_curso=tipo_curso,
         modalidad=modalidad,
         estado=estado,
+        es_historico=es_historico,  # FIX-ISSUE-272
+        cursos_asignados=cursos_asignados_list,
     )
+
+    # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): popular
+    # `estado_calculado` para cada curso (no es un campo del modelo, es
+    # un metodo). El frontend lo usa para mostrar el badge correcto.
+    for c in courses:
+        c.estado_calculado = c.get_estado_actual()
 
     total_pages = math.ceil(total_count / per_page) if total_count > 0 else 0
 
+    # FIX-ISSUE-250 (2026-08-14): el frontend lee `items` (consistente con
+    # /calendario y /disponibles). Antes retornaba solo `data` y el EC veia
+    # panel vacio. Ahora retornamos `items` (campo principal) Y `data` (alias
+    # para retro-compatibilidad) para no romper consumidores que ya leen data.
     return {
-        "data": courses,
+        "items": courses,
+        "data": courses,  # alias retro-compat
         "meta": PaginationMeta(
             page=page,
             limit=per_page,
@@ -197,9 +248,15 @@ async def get_disponibles(
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
     """
-    Devuelve SOLO los cursos en estado PROGRAMADO o EN_EJECUCION (F-080).
-    Es el endpoint que consume el dashboard del estudiante para mostrar
-    los cursos donde podría pedir inscripción. Los CERRADOS no aparecen.
+    F-080 + F-US-006-3TIPOS (2026-08-04): devuelve SOLO los cursos en
+    estado PROGRAMADO (los únicos que aceptan nuevas inscripciones de
+    estudiantes). Es el endpoint que consume el dashboard del estudiante
+    para mostrar los cursos donde podría pedir inscripción.
+
+    Antes retornaba PROGRAMADO + EN_EJECUCION. Tras el cambio de Kevin, un
+    programa en ejecución ya cerró inscripciones — los rezagados los mete
+    el admin/encargado manualmente. Los CERRADOS e HISTÓRICOS nunca
+    aparecen aquí.
     """
     courses = await course_service.get_courses_disponibles_para_estudiante()
     return {
@@ -222,6 +279,477 @@ async def get_disponibles(
             for c in courses
         ],
     }
+
+
+# ============================================================================
+# F-US-006-3TIPOS-3A (2026-08-04): CARGA INICIAL DE ESTUDIANTES
+# ============================================================================
+# Cuando se crea un programa en_ejecucion o historico, el admin/encargado
+# debe poder cargar la lista de estudiantes que ya estaban/estan en el
+# programa (sin pasar por el flujo de inscripcion normal, que ya cerro).
+# Este endpoint reutiliza la logica del bulk enrollment pero:
+#   - NO valida que el curso este activo (puede estar cerrado/historico)
+#   - NO valida que el curso acepte inscripciones nuevas (es carga retroactiva)
+#   - Marca cada inscripcion con el flag `es_carga_inicial` para auditoria
+class InitialEnrollmentItem(BaseModel):
+    """Un estudiante a inscribir en la carga inicial."""
+    estudiante_id: str = Field(..., description="ID del estudiante (PydanticObjectId)")
+    # Opcional para en_ejecucion: modulo desde el cual se inscribe
+    modulo_inicial_index: Optional[int] = Field(
+        None,
+        ge=0,
+        description="Indice del modulo desde el cual entra el estudiante (0-based). Solo para programas en_ejecucion."
+    )
+    # Opcional: si ya pago la matricula
+    matricula_pagada: bool = Field(
+        default=False,
+        description="Si el estudiante ya pago la matricula (caso retroactivo/historico)."
+    )
+    # Opcional: pagos por modulo del Excel del CPD (carga retroactiva).
+    # Llave = indice del modulo en el curso (0-based string), valor = monto pagado.
+    # F-HISTORICO-AUTOSERVICIO-EXCEL (2026-08-04): al subir el Excel, el sistema
+    # detecta "Pago Modulo1", "Pago Modulo2", etc. y los envia aqui para que
+    # el estado del modulo se registre como Pagado/Parcial segun corresponda.
+    pagos_modulos: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Dict {modulo_index_str: monto_pagado} del Excel del CPD. Ej: {'0': 294, '1': 294}."
+    )
+    # F-FIX-DESCUENTO-ITEM (2026-08-05, Kevin): el item puede traer el descuento
+    # individual del estudiante. Esto permite re-aplicar el descuento del 50%
+    # institucional a los 64 inscritos sin tener que borrar y re-cargar.
+    # Si el item NO trae descuento, el backend usa el descuento del CURSO.
+    descuento_id: Optional[str] = Field(
+        None,
+        description="ID del descuento individual del estudiante (PydanticObjectId). Si se pasa, se aplica al enrollment."
+    )
+    descuento_personalizado: Optional[float] = Field(
+        None,
+        ge=0, le=100,
+        description="Porcentaje de descuento personalizado (0-100). Se usa si no hay descuento_id."
+    )
+
+
+class InitialEnrollmentRequest(BaseModel):
+    """Lista de estudiantes a inscribir como carga inicial del programa."""
+    estudiantes: List[InitialEnrollmentItem] = Field(..., min_length=1, max_length=200)
+
+
+class InitialEnrollmentResultado(BaseModel):
+    """Resultado de inscribir a un estudiante en la carga inicial."""
+    estudiante_id: str
+    success: bool
+    message: str
+    enrollment_id: Optional[str] = None
+
+
+class InitialEnrollmentResponse(BaseModel):
+    total_solicitados: int
+    exitosos: int
+    ya_inscritos: int
+    fallidos: int
+    resultados: List[InitialEnrollmentResultado]
+
+
+@router.post(
+    "/{id}/initial-enrollments",
+    response_model=InitialEnrollmentResponse,
+    status_code=200,
+    summary="F-US-006-3TIPOS: Carga inicial de estudiantes para programas en_ejecucion o historicos",
+)
+async def post_initial_enrollments(
+    id: PydanticObjectId,
+    payload: InitialEnrollmentRequest,
+    current_user: User = Depends(require_cpd_or_encargado_curso_or_coordinador),
+) -> Any:
+    """
+    F-US-006-3TIPOS-3A (2026-08-04): carga la lista inicial de estudiantes
+    para un programa en_ejecucion (los que ya estan inscritos) o historico
+    (los que cursaron en el pasado). NO valida acepta_inscripciones() ni
+    que el curso este activo: es una operacion administrativa de carga
+    retroactiva.
+
+    Permisos:
+    - superadmin / admin / cpd: cualquier curso.
+    - encargado_curso: solo cursos en cursos_asignados.
+    - coordinador: cualquier curso.
+
+    Para programas en_ejecucion, se puede especificar el modulo_inicial_index
+    desde el cual se inscribe el estudiante (los modulos anteriores ya los
+    curso/pago, este es desde donde arranca en el sistema). Para historicos,
+    no se usa este campo.
+    """
+    from services import enrollment_service
+
+    # 1. Verificar permisos del encargado_curso
+    if (
+        current_user.rol == UserRole.ENCARGADO_CURSO
+        and id not in (current_user.cursos_asignados or [])
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="No tienes asignado este curso (encargado_curso).",
+        )
+
+    # 2. Cargar el curso
+    course = await Course.get(id)
+    if not course:
+        raise HTTPException(status_code=404, detail="Curso no encontrado")
+
+    # 3. Validar tipo de programa
+    es_historico = getattr(course, "es_historico", False)
+    estado_actual = course.get_estado_actual()
+    if estado_actual == EstadoPrograma.PROGRAMADO.value:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Este endpoint es SOLO para programas en_ejecucion o historicos. "
+                "Para programas en estado programado usa el flujo normal de "
+                "inscripcion (el estudiante se inscribe por su cuenta desde "
+                "su dashboard)."
+            ),
+        )
+
+    # 4. Pre-cargar estudiantes
+    estudiante_ids_unicos = list({item.estudiante_id for item in payload.estudiantes})
+    try:
+        estudiante_obj_ids = [PydanticObjectId(sid) for sid in estudiante_ids_unicos]
+    except Exception:
+        raise HTTPException(status_code=400, detail="estudiante_id invalido (debe ser PydanticObjectId)")
+
+    students = await Student.find({"_id": {"$in": estudiante_obj_ids}}).to_list()
+    student_map: dict = {str(s.id): s for s in students}
+
+    exitosos = 0
+    ya_inscritos_count = 0
+    fallidos = 0
+    resultados: List[InitialEnrollmentResultado] = []
+
+    # F-HISTORICO-EXCEL-PARALLEL (2026-08-04): procesar items en paralelo
+    # con asyncio.gather y un semaforo para no saturar la BD. El loop
+    # serial anterior tomaba ~2s por item, total 62 items = 2 min = timeout.
+    # Con gather (sem=5), el total se reduce a ~25s para 62 items.
+    async def procesar_item(item: InitialEnrollmentItem) -> InitialEnrollmentResultado:
+        est_id_str = item.estudiante_id
+        try:
+            student = student_map.get(est_id_str)
+            if not student:
+                raise ValueError(f"Estudiante {est_id_str} no encontrado")
+
+            # Verificar si ya esta inscrito en este curso
+            existing = await Enrollment.find_one(
+                Enrollment.estudiante_id == student.id,
+                Enrollment.curso_id == course.id,
+            )
+            if existing:
+                # F-HISTORICO-AUTOSERVICIO-EXCEL-PAGOS2 (2026-08-04): si el item
+                # trae pagos_modulos o matricula_pagada, actualizar el enrollment
+                # existente en vez de saltar. Esto cubre el caso donde el CPD
+                # volvio a subir el Excel despues de un intento parcial.
+                # F-HISTORICO-EXCEL-TOTAL-PAGADO-FIX2 (2026-08-04): el flag
+                # 'actualizado' debe dispararse SIEMPRE que el item traiga
+                # pagos_modulos, no solo si el monto del modulo cambia.
+                # Razon: los modulos pueden ya estar Pagado (de intentos
+                # anteriores que no actualizaron total_pagado), pero igual
+                # necesitamos recalcular el total del enrollment.
+                # F-FIX-DESCUENTO-ITEM (2026-08-05, Kevin): ademas actualizar
+                # el descuento individual del estudiante si el item lo trae.
+                actualizado = False
+                if item.matricula_pagada and not existing.matricula_pagada:
+                    existing.matricula_pagada = True
+                    actualizado = True
+                # F-FIX-MATRICULA-TOTAL-PAGADO (2026-08-05, Kevin): si la matricula
+                # vale > 0 y el item dice que ya esta pagada, sumar el costo
+                # de la matricula al total_pagado. Antes solo se seteaba el flag
+                # sin actualizar el saldo, dejando el estado en PENDIENTE_PAGO.
+                if (
+                    item.matricula_pagada
+                    and (existing.costo_matricula or 0) > 0
+                    and (existing.matricula_pagada or False)
+                ):
+                    # Sumar la matricula al total_pagado si no estaba ya sumado
+                    if (existing.total_pagado or 0) < (existing.costo_matricula or 0):
+                        existing.actualizar_saldo(existing.costo_matricula)
+                        actualizado = True
+                # F-FIX-DESCUENTO-ITEM: actualizar descuento individual si viene
+                if item.descuento_id is not None or item.descuento_personalizado is not None:
+                    if item.descuento_id:
+                        try:
+                            disc = await Discount.get(PydanticObjectId(item.descuento_id))
+                            if disc and disc.activo:
+                                existing.descuento_estudiante_id = disc.id
+                                existing.descuento_personalizado = float(disc.porcentaje)
+                                actualizado = True
+                        except Exception:
+                            pass
+                    elif item.descuento_personalizado is not None:
+                        existing.descuento_estudiante_id = None
+                        existing.descuento_personalizado = float(item.descuento_personalizado)
+                        actualizado = True
+                    # Recalcular el total_a_pagar con la nueva logica MAX
+                    from services.enrollment_service import _recalcular_total_enrollment
+                    try:
+                        _recalcular_total_enrollment(existing, course)
+                        actualizado = True
+                    except Exception as e:
+                        # Si falla, no romper
+                        pass
+                total_pagos_a_aplicar = 0.0
+                if item.pagos_modulos and existing.modulos:
+                    for idx_str, monto in item.pagos_modulos.items():
+                        try:
+                            idx = int(idx_str)
+                        except (ValueError, TypeError):
+                            continue
+                        if 0 <= idx < len(existing.modulos):
+                            mod = existing.modulos[idx]
+                            monto_aplicar = float(monto or 0.0)
+                            nuevo_pagado = (mod.monto_pagado or 0.0) + monto_aplicar
+                            if mod.costo and nuevo_pagado > mod.costo + 0.01:
+                                monto_aplicar = max(0.0, mod.costo - (mod.monto_pagado or 0.0))
+                                nuevo_pagado = mod.costo
+                            if nuevo_pagado != (mod.monto_pagado or 0.0):
+                                mod.monto_pagado = nuevo_pagado
+                                if mod.costo and nuevo_pagado >= mod.costo - 0.01:
+                                    mod.estado = "Pagado"
+                                elif nuevo_pagado > 0:
+                                    mod.estado = "Parcial"
+                            # Marcar actualizado siempre que el item TRAIGA pagos_modulos,
+                            # asi recalculamos total_pagado aunque los modulos no cambien
+                            actualizado = True
+                            total_pagos_a_aplicar += monto_aplicar
+                # F-HISTORICO-EXCEL-TOTAL-PAGADO (2026-08-04): recalcular
+                # total_pagado y saldo_pendiente a partir de los modulos,
+                # porque el endpoint /courses/{id}/students los lee de ahi.
+                if actualizado:
+                    total_pagado_de_modulos = sum(
+                        (m.monto_pagado or 0.0) for m in (existing.modulos or [])
+                    )
+                    if total_pagado_de_modulos > existing.total_pagado:
+                        diferencia = total_pagado_de_modulos - existing.total_pagado
+                        existing.actualizar_saldo(diferencia)
+                    elif total_pagos_a_aplicar > 0:
+                        existing.actualizar_saldo(total_pagos_a_aplicar)
+                    # F-FIX-MATRICULA: si matricula_pagada=True y no hay modulos
+                    # (programa historico SIN modulos), pasar a ACTIVO
+                    if (
+                        existing.matricula_pagada
+                        and (existing.costo_matricula or 0) > 0
+                        and (existing.costo_matricula or 0) >= (existing.total_pagado or 0)
+                    ):
+                        # La matricula cubre el total
+                        if existing.estado == EstadoInscripcion.PENDIENTE_PAGO.value:
+                            existing.estado = EstadoInscripcion.ACTIVO.value
+                    # F-HISTORICO-EXCEL-ESTADO (2026-08-04): si ya pago todo,
+                    # pasar de PENDIENTE_PAGO a ACTIVO.
+                    if (
+                        existing.estado == EstadoInscripcion.PENDIENTE_PAGO.value
+                        and existing.esta_completamente_pagado()
+                    ):
+                        existing.estado = EstadoInscripcion.ACTIVO.value
+                    await existing.save()
+                return InitialEnrollmentResultado(
+                    estudiante_id=est_id_str,
+                    success=True,
+                    message="Ya estaba inscrito; se actualizaron pagos" if actualizado else "Ya esta inscrito en este curso",
+                    enrollment_id=str(existing.id),
+                )
+
+            # Crear la inscripcion (carga inicial, bypasea validaciones de
+            # acepta_inscripciones porque es una operacion administrativa)
+            enrollment_in = EnrollmentCreate(
+                estudiante_id=student.id,
+                curso_id=course.id,
+            )
+            enrollment = await enrollment_service.create_enrollment(
+                enrollment_in=enrollment_in,
+                admin_username=current_user.nombre_visible,
+                student=student,
+                course=course,
+                skip_link_updates=True,
+            )
+
+            # Marcar la carga inicial (auditoria)
+            enrollment.es_carga_inicial = True
+            # Si es historico o si el item lo pide, marcar matricula como pagada
+            if es_historico or item.matricula_pagada:
+                enrollment.matricula_pagada = True
+            # F-FIX-DESCUENTO-ITEM (2026-08-05, Kevin): aplicar descuento
+            # individual del item al enrollment nuevo. Si el item NO trae
+            # descuento, el create_enrollment ya leyo el descuento del CURSO.
+            if item.descuento_id is not None or item.descuento_personalizado is not None:
+                if item.descuento_id:
+                    try:
+                        disc = await Discount.get(PydanticObjectId(item.descuento_id))
+                        if disc and disc.activo:
+                            enrollment.descuento_estudiante_id = disc.id
+                            enrollment.descuento_personalizado = float(disc.porcentaje)
+                    except Exception:
+                        pass
+                elif item.descuento_personalizado is not None:
+                    enrollment.descuento_estudiante_id = None
+                    enrollment.descuento_personalizado = float(item.descuento_personalizado)
+                # Recalcular total_a_pagar con la logica MAX
+                from services.enrollment_service import _recalcular_total_enrollment
+                try:
+                    _recalcular_total_enrollment(enrollment, course)
+                except Exception:
+                    pass
+            # Si se especifico modulo inicial (en_ejecucion), marcar ese modulo
+            # como "iniciado" para que el dashboard lo muestre en la fase correcta
+            if (
+                item.modulo_inicial_index is not None
+                and enrollment.modulos
+                and 0 <= item.modulo_inicial_index < len(enrollment.modulos)
+            ):
+                # El estudiante arranca a partir de este modulo; los anteriores
+                # se marcan como pagados (asumimos que ya los curso).
+                # F-FIX-MODULO-INICIAL-ESTADO (2026-08-09, Kevin): tambien
+                # actualizar el estado del modulo a "Pagado" (antes solo se
+                # seteaba monto_pagado=costo pero el estado quedaba
+                # "Pendiente", mostrando inconsistencia en la UI).
+                for idx in range(item.modulo_inicial_index):
+                    mod = enrollment.modulos[idx]
+                    mod.monto_pagado = mod.costo or 0.0
+                    if (mod.costo or 0) > 0 and mod.monto_pagado >= (mod.costo or 0) - 0.01:
+                        mod.estado = "Pagado"
+            # F-HISTORICO-AUTOSERVICIO-EXCEL (2026-08-04): aplicar pagos por
+            # modulo del Excel del CPD. Dict {modulo_index_str: monto_pagado}.
+            total_pagos_a_aplicar = 0.0
+            if item.pagos_modulos and enrollment.modulos:
+                for idx_str, monto in item.pagos_modulos.items():
+                    try:
+                        idx = int(idx_str)
+                    except (ValueError, TypeError):
+                        continue
+                    if 0 <= idx < len(enrollment.modulos):
+                        mod = enrollment.modulos[idx]
+                        monto_aplicar = float(monto or 0.0)
+                        nuevo_pagado = (mod.monto_pagado or 0.0) + monto_aplicar
+                        if mod.costo and nuevo_pagado > mod.costo + 0.01:
+                            monto_aplicar = max(0.0, mod.costo - (mod.monto_pagado or 0.0))
+                            nuevo_pagado = mod.costo
+                        mod.monto_pagado = nuevo_pagado
+                        if mod.costo and nuevo_pagado >= mod.costo - 0.01:
+                            mod.estado = "Pagado"
+                        elif nuevo_pagado > 0:
+                            mod.estado = "Parcial"
+                        total_pagos_a_aplicar += monto_aplicar
+            # F-HISTORICO-EXCEL-TOTAL-PAGADO (2026-08-04): recalcular total.
+            # F-FIX-MODULO-INICIAL-TOTAL-PAGADO (2026-08-09, Kevin): tambien
+            # recalcular cuando se uso modulo_inicial_index (sin pagos_modulos
+            # explicitos pero los modulos anteriores quedaron como pagados).
+            total_pagado_de_modulos = sum(
+                (m.monto_pagado or 0.0) for m in (enrollment.modulos or [])
+            )
+            if total_pagado_de_modulos > enrollment.total_pagado:
+                diferencia = total_pagado_de_modulos - enrollment.total_pagado
+                enrollment.actualizar_saldo(diferencia)
+            elif total_pagos_a_aplicar > 0 or item.modulo_inicial_index is not None:
+                if total_pagado_de_modulos > (enrollment.total_pagado or 0):
+                    enrollment.actualizar_saldo(
+                        total_pagado_de_modulos - (enrollment.total_pagado or 0)
+                    )
+            # F-FIX-MATRICULA-NUEVO-ESTADO (2026-08-06, Kevin): si el item
+            # marco matricula_pagada=True, tambien hay que sacar al
+            # enrollment del estado PENDIENTE_PAGO si ya no hay deuda.
+            # Antes SOLO se hacia para existing (linea 510-516) y para
+            # pago total (linea 622-626). Esto dejaba a los estudiantes
+            # con matricula_pagada=True pero estado=PENDIENTE_PAGO, lo
+            # que hacia que la UI mostrara "matricula pendiente" aunque
+            # el usuario habia marcado el checkbox.
+            if (
+                enrollment.matricula_pagada
+                and enrollment.estado == EstadoInscripcion.PENDIENTE_PAGO.value
+            ):
+                # Caso 1: la matricula cubre el total (programa solo con matricula,
+                # sin modulos, o matricula = total_a_pagar).
+                costo_mat = enrollment.costo_matricula or 0
+                total_pag = enrollment.total_pagado or 0
+                if costo_mat > 0 and total_pag >= costo_mat - 0.01:
+                    enrollment.estado = EstadoInscripcion.ACTIVO.value
+                # Caso 2: ya pago todo el programa (incluyendo modulos).
+                elif enrollment.esta_completamente_pagado():
+                    enrollment.estado = EstadoInscripcion.ACTIVO.value
+                # Caso 3: matricula_pagada=True + no hay modulos (programa
+                # historico con un solo item "matricula" ya marcado como pagado)
+                elif not enrollment.modulos and costo_mat > 0:
+                    enrollment.estado = EstadoInscripcion.ACTIVO.value
+            # F-HISTORICO-EXCEL-ESTADO (2026-08-04): si ya pago todo, sacar
+            # del estado PENDIENTE_PAGO. La UI muestra el badge de la
+            # matricula con enrollment.estado, no con matricula_pagada.
+            if (
+                enrollment.estado == EstadoInscripcion.PENDIENTE_PAGO.value
+                and enrollment.esta_completamente_pagado()
+            ):
+                enrollment.estado = EstadoInscripcion.ACTIVO.value
+            await enrollment.save()
+
+            # Batch update de referencias cruzadas
+            if course.id not in student.lista_cursos_ids:
+                student.lista_cursos_ids.append(course.id)
+                await student.save()
+            if student.id not in course.inscritos:
+                course.inscritos.append(student.id)
+                await course.save()
+
+            return InitialEnrollmentResultado(
+                estudiante_id=est_id_str,
+                success=True,
+                message="Inscripcion creada como carga inicial",
+                enrollment_id=str(enrollment.id),
+            )
+        except ValueError as e:
+            return InitialEnrollmentResultado(
+                estudiante_id=est_id_str,
+                success=False,
+                message=str(e),
+            )
+        except Exception as e:
+            return InitialEnrollmentResultado(
+                estudiante_id=est_id_str,
+                success=False,
+                message=f"Error inesperado: {str(e)}",
+            )
+
+    # Procesar items con semaforo para no saturar la BD
+    SEM = 5
+    sem = asyncio.Semaphore(SEM)
+
+    async def procesar_con_semaforo(item: InitialEnrollmentItem) -> InitialEnrollmentResultado:
+        async with sem:
+            return await procesar_item(item)
+
+    # asyncio.gather con return_exceptions=True para que un fallo no aborte los demas
+    tasks = [procesar_con_semaforo(item) for item in payload.estudiantes]
+    results_raw = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for r in results_raw:
+        if isinstance(r, Exception):
+            fallidos += 1
+            resultados.append(InitialEnrollmentResultado(
+                estudiante_id="?",
+                success=False,
+                message=f"Error inesperado: {str(r)}",
+            ))
+            continue
+        resultados.append(r)
+        if r.success:
+            if "actualizaron pagos" in (r.message or ""):
+                exitosos += 1
+            elif "ya esta inscrito" in (r.message or "").lower() or "ya estaba inscrito" in (r.message or "").lower():
+                ya_inscritos_count += 1
+            else:
+                exitosos += 1
+        else:
+            fallidos += 1
+
+    return InitialEnrollmentResponse(
+        total_solicitados=len(payload.estudiantes),
+        exitosos=exitosos,
+        ya_inscritos=ya_inscritos_count,
+        fallidos=fallidos,
+        resultados=resultados,
+    )
 
 
 class EstadoOverrideRequest(BaseModel):
@@ -304,14 +832,158 @@ async def put_resolucion(
 async def create_course(
     *,
     course_in: CourseCreate,
-    current_user: User = Depends(require_cpd) # <-- CPD CREA LOS PROGRAMAS
+    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-AUTOSERVICIO: cualquier EC/COORD/CPD/ADMIN/SUPERADMIN pueden intentar. Validaciones inline abajo.
 ) -> Any:
-    """Crear nuevo curso"""
+    """Crear nuevo curso.
+
+    F-2026-08-12-EC-RESOLUCION-OBLIGATORIA (Kevin 2026-08-12 post-reunion):
+    el EC/COORD/CPD/ADMIN/SUPERADMIN pueden crear los 3 tipos de programas
+    (historico, programado/proximo, en ejecucion). La diferencia es la
+    resolucion PDF:
+
+    - Historico (es_historico=True): resolucion OPCIONAL. Sirve solo
+      como registro/documento de respaldo.
+    - Programado/proximo (estado 'proximo'): resolucion OPCIONAL.
+    - En ejecucion (estado 'en_ejecucion'): resolucion OBLIGATORIA.
+      Sin resolucion NO se puede crear el programa.
+
+    Para subir la resolucion antes de crear el curso, hay un endpoint
+    auxiliar `POST /courses/upload-resolucion-temp` que sube el PDF a
+    cloudinary y devuelve la URL temporal. El frontend usa esa URL
+    en el payload de create_course.
+    """
+    from core.timezone_utils import utcnow_naive
+    from datetime import datetime as _dt
+
+    # F-2026-08-12-EC-RESOLUCION-OBLIGATORIA: validar la resolucion segun
+    # el tipo de programa. Si es en_ejecucion, la resolucion_pdf_url
+    # debe estar presente (ya sea porque se subio via temp o viene en
+    # el payload). Si no, 400 con mensaje claro.
+    es_historico_flag = bool(getattr(course_in, "es_historico", False))
+    estado_override = getattr(course_in, "estado_override", None)
+    resolucion_pdf_url = getattr(course_in, "resolucion_pdf_url", None)
+
+    # Determinar si el programa sera en ejecucion. Miramos estado_override
+    # (lo que el usuario eligio en el form) o estado persistido.
+    sera_en_ejecucion = (estado_override == "en_ejecucion") and not es_historico_flag
+
+    if sera_en_ejecucion and not resolucion_pdf_url:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Para crear un programa EN EJECUCION es obligatorio subir la "
+                "resolucion PDF. Usa el endpoint POST /courses/upload-resolucion-temp "
+                "para subir el PDF primero, luego pasa la URL devuelta en "
+                "resolucion_pdf_url al crear el curso."
+            ),
+        )
+
+    # F-2026-08-12-EC-HISTORICO-CREAR (Kevin 2026-08-12 post-reunion):
+    # cualquier EC puede crear cualquier tipo, pero:
+    # - Si es historico (es_historico=True), NO exigimos fecha_fin
+    #   (programas del pasado lejano pueden no tener fecha exacta).
+    # - Si NO es historico y trae fecha_fin, validamos que sea pasada
+    #   (es coherente con que es un programa "historico/cerrado").
+    #
+    # FIX-ISSUE-251 (2026-08-14): el mensaje era confuso. Ahora claro.
+    if not es_historico_flag:
+        fecha_fin = getattr(course_in, "fecha_fin", None)
+        if fecha_fin is not None:
+            if isinstance(fecha_fin, _dt):
+                fin_dt = fecha_fin
+            else:
+                fin_dt = _dt.combine(fecha_fin, _dt.min.time())
+            now_naive = utcnow_naive()
+            if fin_dt >= now_naive:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "La fecha_fin debe ser ANTERIOR a hoy cuando el programa "
+                        "NO es historico. Tienes 2 opciones: (1) marca es_historico=true "
+                        "si es un programa del pasado, o (2) deja fecha_fin null "
+                        "o usa una fecha futura si es un programa programado o en ejecucion."
+                    ),
+                )
     try:
         course = await course_service.create_course(course_in=course_in)
+        # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): popular
+        # estado_calculado para que el frontend muestre el badge correcto
+        # inmediatamente despues de crear.
+        course.estado_calculado = course.get_estado_actual()
+
+        # FIX-F-2026-08-12-EC-CREADO-POR (Kevin 2026-08-12): guardar quien
+        # creo el programa. Esto se persistia implicitamente en User.cursos_asignados
+        # via el auto-asign, pero NO en el Course. Sin este campo no se puede
+        # hacer migraciones retroactivas ("asignar a este EC los programas que
+        # el creo") ni trazabilidad. Ademas, por seguridad forzamos `activo=True`
+        # aunque el frontend mande False: la decision de visibilidad se hace
+        # via el flag `es_historico`, no via `activo` (FIX-F-2026-08-12-EC-ACTIVO-HISTORICO).
+        # Si en el futuro queremos un flag "inactivo" para archivar manualmente,
+        # usamos otro campo dedicado (ej: `archivado`).
+        course.creado_por_id = current_user.id
+        course.activo = True
+        await course.save()
+
+        # F-2026-08-12-EC-AUTOASIGNAR-CURSO (Kevin 2026-08-12 post-reunion):
+        # cuando un EC/COORDINADOR crea un programa historico, debe
+        # autoasignarse a su lista de cursos_asignados. Asi el programa
+        # aparece en sus listados (filtrados por cursos_asignados) y
+        # puede cargar estudiantes. Sin esto, el EC crea el programa
+        # pero no lo ve nunca.
+        if current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
+            if course.id not in (current_user.cursos_asignados or []):
+                current_user.cursos_asignados = (current_user.cursos_asignados or []) + [course.id]
+                await current_user.save()
+
         return course
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# F-2026-08-12-EC-RESOLUCION-OBLIGATORIA (Kevin 2026-08-12 post-reunion):
+# el EC decidio que la resolucion PDF es:
+# - Historico: OPCIONAL
+# - Programado (proximo): OPCIONAL
+# - En ejecucion: OBLIGATORIA
+# Si no cumple, el programa NO se crea.
+# Para resolver esto, agregamos un endpoint de upload TEMPORAL que
+# sube el PDF a cloudinary SIN asociarlo a ningun curso. El frontend
+# sube el PDF primero, obtiene la URL, y la pasa en el payload de
+# create_course. Asi el backend puede validar que para en_ejecucion
+# la URL este presente.
+
+@router.post(
+    "/upload-resolucion-temp",
+    summary="F-2026-08-12-EC-RESOLUCION-OBLIGATORIA: subir PDF de resolucion temporal (sin asociar a curso)",
+)
+async def upload_resolucion_temp(
+    file: UploadFile = File(..., description="PDF de la resolucion"),
+    current_user: User = Depends(require_encargado_curso),
+) -> Any:
+    """
+    Sube un PDF de resolucion a cloudinary y devuelve la URL temporal
+    (sin asociarla a ningun curso). El frontend usa esta URL al crear
+    el curso via POST /courses con resolucion_pdf_url=...
+
+    Para programas en ejecucion la resolucion es OBLIGATORIA (se
+    valida en create_course). Para historicos y programados es
+    opcional.
+    """
+    if file.content_type != "application/pdf":
+        raise HTTPException(400, "Solo se aceptan archivos PDF")
+    try:
+        from core.cloudinary_utils import upload_pdf
+        # Subir a una carpeta "temp" - no se asocia a ningun curso
+        url = await upload_pdf(
+            file=file,
+            folder="resoluciones/cursos/temp",
+            public_id=f"temp_{current_user.id}_{int(datetime.now().timestamp())}",
+        )
+        return {"url": url}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Error subiendo PDF: {str(e)}")
 
 @router.get(
     "/{id}",
@@ -327,6 +999,9 @@ async def read_course(
     course = await course_service.get_course(id=id)
     if not course:
         raise HTTPException(status_code=404, detail="Curso no encontrado")
+    # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): popular
+    # estado_calculado para que el frontend muestre el badge correcto.
+    course.estado_calculado = course.get_estado_actual()
     return course
 
 @router.put(
@@ -338,14 +1013,35 @@ async def update_course(
     *,
     id: PydanticObjectId,
     course_in: CourseUpdate,
-    current_user: User = Depends(require_cpd) # <-- CPD EDITA LOS PROGRAMAS
+    # FIX-ISSUE-258 (2026-08-14): EC/COORD pueden editar cursos en sus
+    # cursos_asignados. CPD/ADMIN/SUPERADMIN editan cualquiera. Validacion
+    # inline mas abajo.
+    current_user: User = Depends(require_encargado_curso)
 ) -> Any:
-    """Actualizar curso existente"""
+    """Actualizar curso existente.
+
+    FIX-ISSUE-258: EC/COORD pueden editar si curso esta en cursos_asignados.
+    """
     course = await course_service.get_course(id=id)
     if not course:
         raise HTTPException(status_code=404, detail="Curso no encontrado")
+
+    # FIX-ISSUE-258: EC solo puede editar cursos en sus cursos_asignados.
+    if current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
+        if id not in (current_user.cursos_asignados or []):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "No tienes asignado este programa. Solo puedes editar "
+                    "programas en tu lista de cursos asignados."
+                ),
+            )
+
     try:
         course = await course_service.update_course(course=course, course_in=course_in)
+        # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): popular
+        # estado_calculado para que el frontend muestre el badge correcto.
+        course.estado_calculado = course.get_estado_actual()
         return course
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

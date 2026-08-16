@@ -33,3 +33,22 @@ get_token.py
 dnstest.py
 resize_icons.py
 _idxcheck_tmp.py
+
+# F-CERTIFICADOS (2026-07-29): PDFs generados por tests funcionales
+# standalone (manual_test_pdf.py). No son artefactos de pytest, son outputs
+# de una corrida manual para inspección visual. Se borran o se regeneran.
+tests/_pdf_test_*.pdf
+_set_test_password.py
+
+# Scripts de debugging/auditoria efimeros (raiz y subdirs).
+# Patrones: _audit_*, _test_*, _list_*, _set_*, _commit_msg.txt
+# Si necesitas uno persistente, moverlo a scripts/ con nombre descriptivo.
+_audit_*.py
+_audit_*.mjs
+_test_*.py
+_test_*.mjs
+_list_*.py
+_set_*.py
+_commit_msg.txt
+commit-msg-*.txt
+.gitignore.append

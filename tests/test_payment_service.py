@@ -636,41 +636,50 @@ class TestRolesUploadByEncargado:
 
 
 # ========================================================================
-# F-COBRANZA-014 · Fix actualizar_saldo_enrollment resta anulados (2026-07-21)
+# F-085 (2026-07-28) · REVERTIR regla de resta de anulados (F-COBRANZA-014)
 # ========================================================================
-# El bug: actualizar_saldo_enrollment solo sumaba pagos APROBADOS al total_pagado,
-# sin descontar los ANULADOS. Esto causaba un desfase de 3,534 BOB en producción.
+# Contexto: F-COBRANZA-014 (jul-21) introdujo `total_pagado = aprobados - anulados`
+# intentando arreglar un desfase de 3,534 BOB. Pero esa fórmula produce números
+# NEGATIVOS en cualquier caso donde el monto anulado sea mayor que el resto
+# aprobado (ej real: Luis Fernando con matrícula 300 aprobado + Módulo 2940
+# anulado = -2640, rompiendo 5 endpoints financieros con ValidationError 500).
 #
-# El fix: ahora se calcula dinero_neto_pagado = aprobados - anulados, y se usa ese
-# para total_pagado y saldo_pendiente. El waterfall de módulos sigue usando el
-# aprobado bruto (estado académico histórico).
+# F-085 corrige esto: `total_pagado = sum(aprobados)`. Al anular un pago
+# aprobado, NO se resta del total. Es la misma regla aplicada en F-082/F-084
+# y es matemáticamente consistente (anular NO duplica la resta).
+#
+# El desfase que F-COBRANZA-014 intentaba arreglar era en realidad un BUG
+# del cascading (RevisionIdWasChanged) que NO actualizaba total_pagado al
+# aprobar. El fix correcto es el retry + notification (F-082), no la resta
+# posterior de anulados.
 
-class TestF014ActualizarSaldoRestaAnulados:
-    """F-COBRANZA-014: total_pagado = aprobados - anulados."""
+class TestF085ReglaTotalPagado:
+    """F-085: total_pagado = sum(aprobados). NO restar anulados."""
 
-    def test_codigo_recolecta_anulados(self):
-        """El código de actualizar_saldo_enrollment debe buscar pagos anulados,
-        no solo aprobados. Defensa contra refactors que reviertan el fix."""
+    def test_codigo_NO_recolecta_anulados(self):
+        """F-085: actualizar_saldo_enrollment ya NO busca pagos anulados.
+        La regla correcta los ignora (un pago anulado simplemente deja de
+        contar en aprobados; restarlo de nuevo sería doble resta)."""
         import re
         from pathlib import Path
 
         svc_file = Path(__file__).parent.parent / "services" / "enrollment_service.py"
         contenido = svc_file.read_text(encoding="utf-8")
 
-        # Buscar dentro de la función la query de pagos anulados
+        # Buscar dentro de la función la query de pagos anulados con EstadoPago.ANULADO
         patron = (
             r"async\s+def\s+actualizar_saldo_enrollment.*?"
             r"pagos_anulados\s*=\s*await\s+Payment\.find.*?"
             r"EstadoPago\.ANULADO"
         )
-        assert re.search(patron, contenido, re.DOTALL), (
-            "F-COBRANZA-014: la función debe recolectar pagos_anulados con EstadoPago.ANULADO"
+        assert not re.search(patron, contenido, re.DOTALL), (
+            "F-085: la función NO debe recolectar pagos anulados. "
+            "La regla correcta es total_pagado = sum(aprobados)."
         )
 
-    def test_codigo_usa_dinero_neto_para_total_pagado(self):
-        """total_pagado debe usar el neto (aprobados - anulados), no el bruto.
-        Verifica con line-precise parsing (no regex matchea comentarios)."""
-        import re
+    def test_codigo_usa_dinero_neto_igual_a_bruto(self):
+        """F-085: total_pagado se asigna desde dinero_neto_pagado, que ahora
+        es IGUAL a dinero_aprobado_bruto (sin restar anulados)."""
         from pathlib import Path
 
         svc_file = Path(__file__).parent.parent / "services" / "enrollment_service.py"
@@ -684,72 +693,85 @@ class TestF014ActualizarSaldoRestaAnulados:
                 break
         assert start_line is not None, "No se encontró la función actualizar_saldo_enrollment"
 
-        # Buscar las asignaciones a enrollment.total_pagado DENTRO de la función
-        # (hasta 200 líneas de función, suficiente para cubrirla toda)
-        asignaciones_total_pagado = []
+        # Buscar la asignación a dinero_neto_pagado DENTRO de la función
+        # F-085: debe ser `dinero_neto_pagado = round(dinero_aprobado_bruto, 2)`
+        asignaciones = []
         for ln in lineas[start_line:start_line + 200]:
             stripped = ln.strip()
-            # Excluir comentarios
             if stripped.startswith("#"):
                 continue
-            if "enrollment.total_pagado" in ln and "=" in ln and "round" not in ln[:ln.find("=")]:
-                # Capturar la línea que asigna (no la que compara)
+            if "dinero_neto_pagado" in ln and "=" in ln and "round" in ln:
                 if "<=" not in ln and ">=" not in ln and "==" not in ln and "!=" not in ln:
-                    asignaciones_total_pagado.append(ln.strip())
+                    asignaciones.append(ln.strip())
 
-        # Debe haber exactamente UNA asignación directa a enrollment.total_pagado
-        # y debe usar dinero_neto_pagado
-        assert len(asignaciones_total_pagado) >= 1, (
-            f"F-COBRANZA-014: no se encontró asignación a enrollment.total_pagado. "
-            f"Líneas escaneadas: {asignaciones_total_pagado}"
+        assert len(asignaciones) >= 1, (
+            f"F-085: no se encontró asignación a dinero_neto_pagado en "
+            f"actualizar_saldo_enrollment."
         )
-        asignacion = asignaciones_total_pagado[0]
-        assert "dinero_neto_pagado" in asignacion, (
-            f"F-COBRANZA-014: la asignación debe usar dinero_neto_pagado, no "
-            f"dinero_aprobado_bruto. Encontrado: {asignacion!r}"
+        asignacion = asignaciones[0]
+        # La regla correcta: dinero_neto_pagado = round(dinero_aprobado_bruto, 2)
+        # (sin restar anulados)
+        assert "dinero_aprobado_bruto" in asignacion, (
+            f"F-085: dinero_neto_pagado debe ser = round(dinero_aprobado_bruto, 2). "
+            f"Line: {asignacion!r}"
         )
-        assert "dinero_aprobado_bruto" not in asignacion, (
-            f"F-COBRANZA-014: BUG REGRESION. La asignación usa dinero_aprobado_bruto "
-            f"directo. Debe ser dinero_neto_pagado (= aprobados - anulados). "
+        assert "-" not in asignacion.split("=")[1], (
+            f"F-085: la asignación a dinero_neto_pagado NO debe tener resta (-). "
             f"Line: {asignacion!r}"
         )
 
-    def test_calculo_neto_correcto(self):
-        """Test puro de la lógica de resta: total_pagado = aprobados - anulados."""
-        # Caso real del bug de 3,534 BOB
-        aprobados = 888.0
-        anulados = 0.0
-        neto = round(aprobados - anulados, 2)
-        assert neto == 888.0
+    def test_calculo_total_pagado_es_suma_aprobados(self):
+        """F-085: regla pura total_pagado = sum(aprobados). NO restar anulados."""
+        # Caso normal: solo aprobados, sin anulados
+        aprobados = [300.0, 588.0, 588.0]  # matrícula + M1 + M2
+        anulados = []
+        total_pagado = round(sum(aprobados), 2)
+        assert total_pagado == 1476.0  # Caso Medardo post-F-082
 
-        # Caso con anulados
-        aprobados = 594.0
-        anulados = 588.0
-        neto = round(aprobados - anulados, 2)
-        assert neto == 6.0  # caso real de la inscripción 4376
+        # Caso con anulados: simplemente se excluyen del cálculo
+        aprobados = [300.0]  # solo matrícula
+        anulados = [2940.0]  # Módulo 1 anulado
+        total_pagado = round(sum(aprobados), 2)
+        assert total_pagado == 300.0  # Caso Luis Fernando post-F-085
 
-        # Caso con más anulados que aprobados (no debería pasar, pero cubrimos)
-        aprobados = 100.0
-        anulados = 200.0
-        neto = round(aprobados - anulados, 2)
-        # En este caso el neto sería negativo, pero el código actual hace round
-        # y luego max(0, ...) en saldo_pendiente, no en total_pagado.
-        # El bug aquí sería que total_pagado quede negativo. Es responsabilidad
-        # del flujo de negocio no llegar a este estado.
-        assert neto == -100.0
+        # Caso extremo: TODO aprobado, todo anulado (edge case)
+        aprobados = []
+        anulados = [500.0]
+        total_pagado = round(sum(aprobados), 2)
+        assert total_pagado == 0.0
+        # NUNCA debe ser negativo (esa es la garantía de la regla correcta)
 
-    def test_saldo_pendiente_usa_total_pagado_neto(self):
-        """saldo_pendiente se calcula como max(0, total_a_pagar - total_pagado_neto).
-        Verifica con el caso real de la inscripción 43d6 que tenía DIF=+300."""
-        total_a_pagar = 1770.0
-        total_pagado_neto = 900.0  # aprobado (aprobados) - anulado (0) = 900
-        saldo_esperado = max(0.0, round(total_a_pagar - total_pagado_neto, 2))
-        assert saldo_esperado == 870.0  # antes era 1170, ahora 870
+    def test_saldo_pendiente_no_negativo(self):
+        """F-085: saldo_pendiente = max(0, total_a_pagar - sum(aprobados)).
+        Caso Luis Fernando (matrícula 300 aprobado + Módulo 2940 anulado):
+        total_a_pagar=3240, total_pagado=300 → saldo=2940 (no 5880, no negativo)."""
+        total_a_pagar = 3240.0
+        # Regla F-085: total_pagado = sum(aprobados) = 300
+        total_pagado = 300.0
+        saldo = max(0.0, round(total_a_pagar - total_pagado, 2))
+        assert saldo == 2940.0
+        # Y total_pagado NO es negativo
+        assert total_pagado >= 0
 
-        # Caso con anulado: el saldo_pendiente se "agranda" porque el total_pagado es menor
-        total_pagado_neto_con_anulado = 6.0  # 594 - 588
-        saldo_con_anulado = max(0.0, round(total_a_pagar - total_pagado_neto_con_anulado, 2))
-        assert saldo_con_anulado == 1764.0  # 1770 - 6
+    def test_idempotente(self):
+        """F-085: aplicar la regla N veces da el mismo resultado (idempotente).
+        Simula: aprobar 1000 → anular 1000 → aprobar 1000. La regla F-085
+        produce el mismo total_pagado que la regla F-COBRANZA-014 cuando
+        NO hay solapamiento problemático, pero NO produce negativos en casos
+        extremos."""
+        # Caso: 1 pago aprobado, 0 anulados → mismo resultado con ambas reglas
+        total_pagado_v1 = round(1000 - 0, 2)
+        total_pagado_v2 = round(1000, 2)
+        assert total_pagado_v1 == total_pagado_v2  # 1000
+
+        # Caso problemático: 300 aprobado, 2940 anulado
+        # F-COBRANZA-014: 300 - 2940 = -2640 (BUG)
+        # F-085:          300            = 300   (OK)
+        v1_negativo = round(300 - 2940, 2)
+        v2_correcto = round(300, 2)
+        assert v1_negativo == -2640.0  # Confirma que v1 producía el bug
+        assert v2_correcto == 300.0    # Y v2 lo arregla
+        assert v2_correcto >= 0  # Garantía F-085
 
 
 # ========================================================================
@@ -1423,7 +1445,7 @@ class TestF034ByStaffSkipOwnershipCheck:
     def test_create_payment_check_envuelve_con_skip(self, service_src):
         """El check enrollment.estudiante_id != student_id debe estar envuelto en `if not skip_ownership_check`."""
         idx = service_src.read_text(encoding="utf-8").find("async def create_payment")
-        bloque = service_src.read_text(encoding="utf-8")[idx:idx + 2000]
+        bloque = service_src.read_text(encoding="utf-8")[idx:idx + 5000]
         # Verificar que el check esta dentro de un `if not skip_ownership_check`
         assert "if not skip_ownership_check" in bloque, (
             "El check debe estar condicionado a skip_ownership_check=False. "

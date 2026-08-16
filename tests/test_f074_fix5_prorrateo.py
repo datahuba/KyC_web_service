@@ -54,10 +54,15 @@ class TestF074FIX5ProrrateoRobusto:
     def test_usa_logger_no_print(self):
         """El log debe ser vía `logger.warning`, no `print`."""
         content = read(PAYMENT_SERVICE_FILE)
-        # Buscar el bloque del WARNING de F-074-FIX-5
-        idx = content.find("F-074-FIX-5")
+        # Buscar el bloque del WARNING de F-074-FIX-5. Hay 3 menciones de
+        # F-074-FIX-5: (1) comentario de cabezera, (2) comentario "loguear
+        # como WARNING", (3) string del mensaje. La que importa para el
+        # logger es la 2da. Buscamos el comentario "loguear" especificamente
+        # y verificamos que el bloque siguiente (3 lineas despues) tenga
+        # logger.warning.
+        idx = content.find("F-074-FIX-5: loguear como WARNING")
         if idx > 0:
-            bloque = content[idx:idx + 2000]
+            bloque = content[idx:idx + 600]
             assert "logger" in bloque and "warning" in bloque, (
                 "F-074-FIX-5: el log debe ser vía `logger.warning()`, no `print()`"
             )

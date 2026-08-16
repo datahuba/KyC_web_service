@@ -20,7 +20,7 @@ from typing import List, Any, Optional, Union
 from datetime import datetime
 from pydantic import BaseModel, Field
 from core.timezone_utils import utcnow_naive
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Path
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Path, Body
 from models.enrollment import Enrollment
 from models.student import Student
 from models.course import Course
@@ -33,7 +33,10 @@ from schemas.enrollment import (
     EnrollmentResponse,
     EnrollmentUpdate,
     EnrollmentWithDetails,
-    ModuloNotaUpdate
+    ModuloNotaUpdate,
+    BulkEnrollmentRequest,
+    BulkEnrollmentResponse,
+    BulkEnrollmentErrorItem,
 )
 from services import enrollment_service, payment_service
 from beanie import PydanticObjectId
@@ -133,6 +136,145 @@ async def create_enrollment(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.post(
+    "/bulk",
+    response_model=BulkEnrollmentResponse,
+    status_code=200,
+    summary="[Staff] Inscripción en lote: múltiples estudiantes a un mismo programa",
+)
+async def create_enrollments_bulk(
+    *,
+    bulk_in: BulkEnrollmentRequest,
+    current_user: User = Depends(require_encargado_curso),  # CPD, ENCARGADO_CURSO, COORDINADOR o superior
+) -> Any:
+    """
+    F-INSCRIPCION-LOTE (2026-07-31): inscribe varios estudiantes al
+    mismo programa en una sola operación. Pensado para cuando llega
+    una lista de admitidos (excel del CPD / Coordinadores) y hay que
+    matricularlos en masa.
+
+    Comportamiento:
+    - Itera secuencialmente (no asyncio.gather) para no perder
+      actualizaciones de `course.inscritos` y `student.lista_cursos_ids`
+      (esos modelos no tienen optimistic locking).
+    - Si un estudiante ya está inscrito en el curso, se reporta como
+      `ya_inscritos` (NO falla toda la operación).
+    - Si un estudiante no existe o el curso no está activo, se reporta
+      como `fallidos` con el motivo específico.
+    - Aplica un mismo descuento_id o descuento_personalizado a todos
+      (útil para becas grupales o promociones).
+
+    Permisos:
+    - superadmin / admin / cpd: cualquier curso.
+    - encargado_curso: solo cursos en cursos_asignados.
+    - coordinador: cualquier curso.
+    """
+    # 1. Verificar que el usuario puede inscribir en este curso
+    if (
+        current_user.rol == UserRole.ENCARGADO_CURSO
+        and bulk_in.curso_id not in (current_user.cursos_asignados or [])
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="No tienes asignado este curso (encargado_curso).",
+        )
+
+    # 2. Cargar el curso UNA vez (reutilizado para todos los estudiantes)
+    course = await Course.get(bulk_in.curso_id)
+    if not course:
+        raise HTTPException(status_code=404, detail="Curso no encontrado")
+
+    if not course.activo:
+        raise HTTPException(
+            status_code=400,
+            detail="Este curso no está activo y no acepta nuevas inscripciones",
+        )
+
+    # 3. Pre-cargar todos los estudiantes (1 sola query Mongo, no N)
+    estudiante_ids_unicos = list({str(eid) for eid in bulk_in.estudiantes_ids})
+    students = await Student.find(
+        {"_id": {"$in": [PydanticObjectId(sid) for sid in estudiante_ids_unicos]}}
+    ).to_list()
+    student_map: dict = {str(s.id): s for s in students}
+
+    # 4. Iterar y crear inscripciones (secuencial para no chocar con
+    # course.inscritos / student.lista_cursos_ids)
+    exitosos = 0
+    ya_inscritos_count = 0
+    fallidos = 0
+    enrollments_creados: List[EnrollmentResponse] = []
+    errores: List[BulkEnrollmentErrorItem] = []
+
+    for est_id in bulk_in.estudiantes_ids:
+        est_id_str = str(est_id)
+        try:
+            student = student_map.get(est_id_str)
+            if not student:
+                raise ValueError(f"Estudiante {est_id_str} no encontrado")
+
+            enrollment_in = EnrollmentCreate(
+                estudiante_id=est_id,
+                curso_id=bulk_in.curso_id,
+                descuento_id=bulk_in.descuento_id,
+                descuento_personalizado=bulk_in.descuento_personalizado,
+            )
+            # skip_link_updates=True: actualizamos course.inscritos /
+            # student.lista_cursos_ids en batch al final (ver abajo)
+            enrollment = await enrollment_service.create_enrollment(
+                enrollment_in=enrollment_in,
+                admin_username=current_user.nombre_visible,
+                student=student,
+                course=course,
+                skip_link_updates=True,
+            )
+            enriched = await enrollment_service.enrich_enrollment_dates(enrollment)
+            enrollments_creados.append(enriched)
+            exitosos += 1
+        except ValueError as e:
+            msg = str(e)
+            if "ya está inscrito" in msg.lower():
+                ya_inscritos_count += 1
+            else:
+                fallidos += 1
+                errores.append(BulkEnrollmentErrorItem(
+                    estudiante_id=est_id_str,
+                    error=msg,
+                ))
+        except Exception as e:
+            fallidos += 1
+            errores.append(BulkEnrollmentErrorItem(
+                estudiante_id=est_id_str,
+                error=f"Error inesperado: {str(e)}",
+            ))
+
+    # 5. Batch update de course.inscritos y student.lista_cursos_ids.
+    # Como usamos `skip_link_updates=True` en create_enrollment para no
+    # chocar con optimistic locking durante el loop, ahora actualizamos
+    # las referencias cruzadas en una sola pasada.
+    if exitosos > 0:
+        inscritos_set = {str(e["estudiante_id"]) for e in enrollments_creados}
+        # Actualizar course.inscritos (lista de PyObjectId)
+        for sid_str in inscritos_set:
+            sid = PydanticObjectId(sid_str)
+            if sid not in course.inscritos:
+                course.inscritos.append(sid)
+        await course.save()
+        # Actualizar student.lista_cursos_ids
+        for s in students:
+            if bulk_in.curso_id not in s.lista_cursos_ids:
+                s.lista_cursos_ids.append(bulk_in.curso_id)
+                await s.save()
+
+    return BulkEnrollmentResponse(
+        total_solicitados=len(bulk_in.estudiantes_ids),
+        exitosos=exitosos,
+        ya_inscritos=ya_inscritos_count,
+        fallidos=fallidos,
+        enrollments_creados=enrollments_creados,
+        errores=errores,
+    )
+
+
 @router.get(
     "/",
     response_model=PaginatedResponse[EnrollmentResponse],
@@ -171,23 +313,42 @@ async def list_enrollments(
         if estado:
             all_enrollments = [e for e in all_enrollments if e.estado == estado]
         total_count = len(all_enrollments)
+        total_pages = math.ceil(total_count / per_page) if total_count > 0 else 0
+        has_next = page < total_pages
+        has_prev = page > 1
         start = (page - 1) * per_page
         end = start + per_page
         enrollments = all_enrollments[start:end]
+        # F-FIX-DESCONOCIDO-ENROLLMENTS (2026-08-09, Kevin): enriquecer
+        # tambien para estudiantes (sus propias inscripciones) para que
+        # vean el nombre del curso (no "Desconocido").
+        enriched_enrollments = await enrollment_service.enrich_enrollments_batch(enrollments)
+        # FIX-ISSUE-250 (2026-08-14): items + data (retro-compat).
+        return {
+            "items": enriched_enrollments,
+            "data": enriched_enrollments,  # alias retro-compat
+            "meta": PaginationMeta(
+                page=page, limit=per_page, totalItems=total_count,
+                totalPages=total_pages, hasNextPage=has_next, hasPrevPage=has_prev
+            )
+        }
     else:
         raise HTTPException(status_code=403, detail="No autorizado")
 
     total_pages = math.ceil(total_count / per_page) if total_count > 0 else 0
     has_next = page < total_pages
     has_prev = page > 1
-    
-    enriched_enrollments = []
-    for enrollment in enrollments:
-        enriched = await enrollment_service.enrich_enrollment_dates(enrollment)
-        enriched_enrollments.append(enriched)
-    
+
+    # F-FIX-DESCONOCIDO-ENROLLMENTS (2026-08-09, Kevin): usar batch lookup
+    # (2 queries: students + courses con In) en vez de N queries individuales.
+    # Esto ademas joinea el nombre del estudiante/curso en el response,
+    # arreglando el bug "Desconocido" del frontend.
+    enriched_enrollments = await enrollment_service.enrich_enrollments_batch(enrollments)
+
     return {
-        "data": enriched_enrollments,
+        # FIX-ISSUE-250 (2026-08-14): items + data (retro-compat).
+        "items": enriched_enrollments,
+        "data": enriched_enrollments,  # alias retro-compat
         "meta": PaginationMeta(
             page=page, limit=per_page, totalItems=total_count,
             totalPages=total_pages, hasNextPage=has_next, hasPrevPage=has_prev
@@ -509,11 +670,120 @@ async def get_my_enrollments(
     FIX-ERRORES-500: lista las inscripciones del estudiante autenticado.
     Importante: este endpoint debe declararse ANTES de /{id} para que
     no se matchee con id="me" (que rompe PydanticObjectId).
+
+    F-FIX-ENROLLMENTS-ME-JOIN (2026-08-10, Kevin): ahora joinea
+    estudiante_nombre, curso_nombre, etc. para que el estudiante vea
+    los nombres en su dashboard (no IDs).
+
+    F-2026-08-11-MODULOS-EC: si el estudiante tiene saldo_pendiente > 0 en
+    alguna inscripcion, sus notas (nota, nota_borrador) y estado_academico
+    se devuelven como null. Solo cuando pague todo (saldo_pendiente == 0)
+    podra ver las notas. Regla de la reunion educacion continua UAGRM
+    2026-08-11: "estudiante no ve nota hasta pagar".
     """
     enrollments = await Enrollment.find(
         Enrollment.estudiante_id == current_user.id
     ).sort("-created_at").to_list()
-    return enrollments
+    # F-FIX-ENROLLMENTS-ME-JOIN: joinear nombres (1 query batch por
+    # coleccion, no N+1).
+    enriched = await enrollment_service.enrich_enrollments_batch(enrollments)
+
+    # F-2026-08-11-MODULOS-EC: filtrar notas si hay deuda pendiente.
+    # NO mutamos el objeto de la DB, solo el snapshot que se serializa.
+    # Si saldo_pendiente > 0: ocultar nota, nota_borrador, estado_academico
+    # (forzar a "Cursando") y nota_final del enrollment.
+    for enr in enriched:
+        saldo = (enr.get("saldo_pendiente") or 0) if isinstance(enr, dict) else 0
+        if saldo > 0:
+            modulos = enr.get("modulos") if isinstance(enr, dict) else None
+            if modulos:
+                for m in modulos:
+                    if not isinstance(m, dict):
+                        continue
+                    if m.get("nota") is not None:
+                        m["nota"] = None
+                    if m.get("nota_borrador") is not None:
+                        m["nota_borrador"] = None
+                    if m.get("estado_academico") not in (None, "Cursando"):
+                        m["estado_academico"] = "Cursando"
+            if isinstance(enr, dict) and enr.get("nota_final") is not None:
+                enr["nota_final"] = None
+
+    return enriched
+
+
+@router.get(
+    "/me/cursos-resumen",
+    summary="F-087-CAL · Mis cursos activos (resumen para dashboard del estudiante)"
+)
+async def get_my_courses_resumen(
+    current_user: Student = Depends(get_current_user)
+) -> Any:
+    """
+    Devuelve los cursos del estudiante autenticado enriquecidos con:
+    - Código, nombre y tipo del programa
+    - Fechas de inicio/fin
+    - Estado calculado del PROGRAMA (programado | en_ejecucion | cerrado)
+    - Estado de la INSCRIPCIÓN (activo, suspendido, etc.)
+    - Progreso de módulos (X de Y pagados)
+    - Saldo pendiente
+
+    Pensado para alimentar la sección "Mis cursos activos" del dashboard
+    del estudiante, agrupado por estado del programa.
+    """
+    from models.course import Course
+    from models.estado_programa import EstadoPrograma
+
+    enrollments = await Enrollment.find(
+        Enrollment.estudiante_id == current_user.id
+    ).sort("-created_at").to_list()
+
+    # Trae todos los cursos en batch
+    curso_ids = list({e.curso_id for e in enrollments if e.curso_id})
+    cursos_list = await Course.find({"_id": {"$in": curso_ids}}).to_list() if curso_ids else []
+    cursos_map = {c.id: c for c in cursos_list}
+
+    items = []
+    for e in enrollments:
+        c = cursos_map.get(e.curso_id)
+        if not c:
+            continue
+        estado_programa = c.get_estado_actual()
+        modulos_pagados = sum(
+            1 for m in (e.modulos or [])
+            if (m.estado or "").lower() in ("pagado", "completo")
+        )
+        items.append({
+            "enrollment_id": str(e.id),
+            "curso_id": str(c.id),
+            "curso_codigo": c.codigo,
+            "curso_nombre": c.nombre_programa,
+            "curso_tipo": c.tipo_curso.value if hasattr(c.tipo_curso, "value") else str(c.tipo_curso),
+            "curso_modalidad": c.modalidad.value if hasattr(c.modalidad, "value") else str(c.modalidad),
+            "fecha_inicio": c.fecha_inicio.isoformat() if c.fecha_inicio else None,
+            "fecha_fin": c.fecha_fin.isoformat() if c.fecha_fin else None,
+            "estado_programa": estado_programa,  # programado | en_ejecucion | cerrado
+            "estado_inscripcion": e.estado.value if hasattr(e.estado, "value") else str(e.estado),
+            "motivo_suspension": e.motivo_suspension,
+            "total_a_pagar": e.total_a_pagar,
+            "total_pagado": e.total_pagado,
+            "saldo_pendiente": e.saldo_pendiente,
+            "modulos_total": len(e.modulos or []),
+            "modulos_pagados": modulos_pagados,
+            "matricula_pagada": bool(e.matricula_pagada),
+            "fecha_inscripcion": e.fecha_inscripcion.isoformat() if e.fecha_inscripcion else None,
+        })
+
+    return {
+        "items": items,
+        "resumen": {
+            "total_cursos": len(items),
+            "en_ejecucion": sum(1 for it in items if it["estado_programa"] == EstadoPrograma.EN_EJECUCION.value),
+            "programado": sum(1 for it in items if it["estado_programa"] == EstadoPrograma.PROGRAMADO.value),
+            "cerrado": sum(1 for it in items if it["estado_programa"] == EstadoPrograma.CERRADO.value),
+            "saldo_pendiente_total": sum(it["saldo_pendiente"] or 0 for it in items),
+        }
+    }
 
 
 @router.get(
@@ -726,7 +996,7 @@ async def get_enrollments_resumen(
     pasivos_congelado = 0
     pasivos_pasivo = 0
     pasivos_abandono = 0
-    completados = 0
+    completados_legacy = 0  # F-DASHBOARD-R10: ya no se usa para "completados" del UI
     cancelados = 0
     pendientes_pago = 0
     retirados = 0  # F-083
@@ -758,9 +1028,50 @@ async def get_enrollments_resumen(
                 # motivo None o desconocido -> cuenta como pasivo genérico
                 pasivos_pasivo += count
         elif estado == "completado":
-            completados += count
+            # F-DASHBOARD-R10 (2026-08-06, Kevin): NO contar como "completado"
+            # del UI. R10 explicito: "completado = módulo académico cerrado
+            # (nota + pago), NO programa completo". El estado=completado del
+            # enrollment se setea al pagar TODO, no al terminar académicamente.
+            # Por eso se calcula aparte abajo.
+            completados_legacy += count
         elif estado == "retirado":  # F-083
             retirados += count
+
+    # F-DASHBOARD-R10: contar "completados" reales = TODOS los modulos
+    # con estado_academico='Aprobado' (nota subida Y validada). NO basarse
+    # en enrollment.estado='completado' porque eso se setea al pagar todo,
+    # no al terminar el programa académicamente.
+    # Caso real (2026-08-06, DIPL-IA-2026): Andrea Gutierrez Ruiz tiene
+    # enrollment.estado='completado' pero solo 1 de 5 modulos aprobados
+    # (van por el 2do modulo). Esto inflaba el conteo.
+    pipeline_completados = [
+        {"$match": {**filtro_curso, "estado": {"$nin": ["cancelado", "retirado"]}}},
+        {"$project": {
+            "modulos_aprobados": {
+                "$size": {
+                    "$filter": {
+                        "input": {"$ifNull": ["$modulos", []]},
+                        "as": "m",
+                        "cond": {"$eq": ["$$m.estado_academico", "Aprobado"]}
+                    }
+                }
+            },
+            "total_modulos": {
+                "$size": {"$ifNull": ["$modulos", []]}
+            }
+        }},
+        {"$match": {
+            "$expr": {
+                "$and": [
+                    {"$gt": ["$total_modulos", 0]},
+                    {"$eq": ["$modulos_aprobados", "$total_modulos"]}
+                ]
+            }
+        }},
+        {"$count": "total"}
+    ]
+    completados_result = await Enrollment.aggregate(pipeline_completados).to_list()
+    completados = completados_result[0]["total"] if completados_result else 0
 
     total_pasivos = pasivos_congelado + pasivos_pasivo + pasivos_abandono
 
@@ -774,7 +1085,8 @@ async def get_enrollments_resumen(
             "pasivo": pasivos_pasivo,
             "abandono": pasivos_abandono,
         },
-        "completados": completados,
+        "completados": completados,  # F-DASHBOARD-R10: TODOS los modulos aprobados
+        "completados_legacy": completados_legacy,  # estado enrollment (referencia)
         "retirados": retirados,  # F-083: separado de pasivos
         "cancelados": cancelados,  # NO cuentan como inscritos
         "curso_id": str(curso_id) if curso_id else None,
@@ -1537,3 +1849,249 @@ async def disparar_verificacion_inactividad(
     ids = [enrollment_id] if enrollment_id else None
     resultado = await congelado_service.verificar_inactividad_pagos(enrollment_ids=ids)
     return resultado
+
+
+# ========================================================================
+# ENDPOINTS: INICIAR MÓDULO (F-CUENTAS-POR-COBRAR 2026-07-29)
+# ========================================================================
+# Habilitan manualmente un módulo como "en curso" para que cuente en la
+# CxC real (a la fecha). El módulo 1 de los enrollments activos ya quedó
+# backfilleado por scripts/backfill_modulo_iniciado.py; los módulos 2..N
+# los irá iniciando el encargado del programa con un click.
+#
+# RBAC (Kevin: "Solo Admin + Superadmin + Encargado del Curso del programa
+# específico"):
+# - superadmin / admin: cualquier módulo de cualquier programa.
+# - encargado_curso: solo módulos de cursos en cursos_asignados.
+# - Cualquier otro rol (cobranza, cpd, mae, coordinador, docente): 403.
+
+async def _puede_iniciar_modulo(current_user: User, enrollment: Enrollment) -> bool:
+    """
+    Verifica que el usuario puede iniciar módulos del programa del enrollment.
+    Devuelve True si:
+    - rol in {SUPERADMIN, ADMIN}, o
+    - rol = ENCARGADO_CURSO y el curso está en cursos_asignados.
+    """
+    from models.enums import UserRole
+    if current_user.rol in {UserRole.SUPERADMIN, UserRole.ADMIN}:
+        return True
+    if current_user.rol == UserRole.ENCARGADO_CURSO:
+        cursos_asignados = current_user.cursos_asignados or []
+        return str(enrollment.curso_id) in [str(c) for c in cursos_asignados]
+    return False
+
+
+@router.post(
+    "/{id}/modulos/{index}/iniciar",
+    response_model=EnrollmentResponse,
+    summary="[Staff] Marcar módulo N como 'en curso' (habilita CxC real)",
+)
+async def iniciar_modulo_endpoint(
+    *,
+    id: PydanticObjectId,
+    index: int = Path(..., ge=0, description="Índice del módulo (0, 1, 2...)"),
+    force: bool = Query(False, description="Solo superadmin: saltar la validación de encadenamiento"),
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    F-CUENTAS-POR-COBRAR: el encargado del programa inicia manualmente un
+    módulo. A partir de este momento, el saldo del módulo entra en la
+    "CxC a la fecha" del reporte financiero.
+
+    Permisos: Admin, Superadmin, o Encargado del Curso del programa específico.
+    Idempotente: si el módulo ya estaba iniciado, no-op (devuelve 200 OK).
+
+    F-MODAL-GESTION-MODULOS (2026-08-03, Kevin): el módulo N+1 solo se puede
+    iniciar si el N está finalizado. Solo superadmin puede saltarse con `?force=true`.
+    """
+    enrollment = await Enrollment.get(id)
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="Inscripción no encontrada")
+
+    if not await _puede_iniciar_modulo(current_user, enrollment):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Solo Admin, Superadmin, o el Encargado del Curso de este "
+                "programa específico pueden iniciar módulos."
+            ),
+        )
+
+    # F-MODAL-GESTION-MODULOS: el flag force solo lo puede usar superadmin
+    from models.enums import UserRole
+    if force and current_user.rol != UserRole.SUPERADMIN:
+        raise HTTPException(
+            status_code=403,
+            detail="Solo SUPERADMIN puede usar force=true para iniciar un módulo fuera de orden.",
+        )
+
+    from services import cuentas_por_cobrar_service
+    enrollment = await cuentas_por_cobrar_service.iniciar_modulo(
+        enrollment=enrollment,
+        modulo_index=index,
+        current_user=current_user,
+        force=force,
+    )
+    return await enrollment_service.enrich_enrollment_dates(enrollment)
+
+
+@router.post(
+    "/{id}/modulos/{index}/deshacer-inicio",
+    response_model=EnrollmentResponse,
+    summary="[Staff] Revertir módulo N a 'no iniciado' (corrige CxC real)",
+)
+async def deshacer_inicio_modulo_endpoint(
+    *,
+    id: PydanticObjectId,
+    index: int = Path(..., ge=0, description="Índice del módulo (0, 1, 2...)"),
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    F-CUENTAS-POR-COBRAR: revierte el inicio de un módulo (caso de error
+    humano). Útil si Sandra/Rocío se equivocó de módulo o de programa.
+
+    Permisos: los mismos que iniciar_modulo.
+    """
+    enrollment = await Enrollment.get(id)
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="Inscripción no encontrada")
+
+    if not await _puede_iniciar_modulo(current_user, enrollment):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Solo Admin, Superadmin, o el Encargado del Curso de este "
+                "programa específico pueden revertir el inicio de un módulo."
+            ),
+        )
+
+    from services import cuentas_por_cobrar_service
+    enrollment = await cuentas_por_cobrar_service.deshacer_inicio_modulo(
+        enrollment=enrollment,
+        modulo_index=index,
+        current_user=current_user,
+    )
+    return await enrollment_service.enrich_enrollment_dates(enrollment)
+
+
+# ========================================================================
+# ENDPOINTS: FINALIZAR MÓDULO (F-MODULOS-MODAL 2026-07-31)
+# ========================================================================
+# Cierra un módulo iniciado. El kardex del estudiante usa el ciclo:
+#   Pendiente → En curso → Finalizado
+# Cuando se finaliza, el módulo ya no se considera "activo" para
+# recaudación -- el siguiente paso natural es registrar la nota.
+# También expone deshacer_finalizacion por si fue un error humano.
+
+@router.post(
+    "/{id}/modulos/{index}/finalizar",
+    response_model=EnrollmentResponse,
+    summary="[Staff] Cerrar/finalizar módulo N (ciclo completo)",
+)
+async def finalizar_modulo_endpoint(
+    *,
+    id: PydanticObjectId,
+    index: int = Path(..., ge=0, description="Índice del módulo (0, 1, 2...)"),
+    asistencia_porcentaje: Optional[float] = Body(
+        None, ge=0, le=100,
+        description=(
+            "F-2026-08-11-MODULOS-EC: porcentaje de asistencia del estudiante "
+            "al módulo (0-100). Opcional. Si < 80, el sistema fuerza "
+            "estado_academico='Reprobado' (regla de aprobación mínima por "
+            "asistencia, educación continua UAGRM 2026-08-11)."
+        ),
+    ),
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    F-MODULOS-MODAL (2026-07-31): marca un módulo como finalizado/cerrado.
+    Requisito: el módulo debe estar iniciado (iniciado_en != null).
+    Idempotente: si ya estaba finalizado, no-op.
+
+    F-2026-08-11-MODULOS-EC: si se pasa asistencia_porcentaje, se persiste en
+    el modulo. Si asistencia < 80%, se fuerza estado_academico='Reprobado'
+    independientemente de la nota.
+    """
+    enrollment = await Enrollment.get(id)
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="Inscripción no encontrada")
+
+    if not await _puede_iniciar_modulo(current_user, enrollment):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Solo Admin, Superadmin, o el Encargado del Curso de este "
+                "programa específico pueden finalizar módulos."
+            ),
+        )
+
+    if index < 0 or index >= len(enrollment.modulos):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Índice de módulo {index} inválido",
+        )
+
+    modulo = enrollment.modulos[index]
+    if modulo.iniciado_en is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No se puede finalizar un módulo que no está iniciado. "
+                "Primero márcalo como 'en curso'."
+            ),
+        )
+
+    if modulo.finalizado_en is None:
+        modulo.finalizado_en = utcnow_naive()
+    # F-2026-08-11-MODULOS-EC: persistir asistencia_porcentaje y aplicar
+    # regla del 80% (forzar Reprobado si < 80). Se aplica aunque el módulo
+    # ya estuviera finalizado, para soportar correcciones.
+    if asistencia_porcentaje is not None:
+        modulo.asistencia_porcentaje = asistencia_porcentaje
+        if asistencia_porcentaje < 80:
+            modulo.estado_academico = "Reprobado"
+
+    await enrollment.save()
+
+    return await enrollment_service.enrich_enrollment_dates(enrollment)
+
+
+@router.post(
+    "/{id}/modulos/{index}/deshacer-finalizacion",
+    response_model=EnrollmentResponse,
+    summary="[Staff] Revertir cierre de módulo N (caso de error)",
+)
+async def deshacer_finalizacion_modulo_endpoint(
+    *,
+    id: PydanticObjectId,
+    index: int = Path(..., ge=0, description="Índice del módulo (0, 1, 2...)"),
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    F-MODULOS-MODAL: revierte la finalización de un módulo. Útil si fue un
+    error humano (ej: cerró el módulo equivocado).
+    """
+    enrollment = await Enrollment.get(id)
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="Inscripción no encontrada")
+
+    if not await _puede_iniciar_modulo(current_user, enrollment):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Solo Admin, Superadmin, o el Encargado del Curso de este "
+                "programa específico pueden revertir la finalización."
+            ),
+        )
+
+    if index < 0 or index >= len(enrollment.modulos):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Índice de módulo {index} inválido",
+        )
+
+    modulo = enrollment.modulos[index]
+    modulo.finalizado_en = None
+    await enrollment.save()
+
+    return await enrollment_service.enrich_enrollment_dates(enrollment)

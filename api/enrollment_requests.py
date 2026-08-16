@@ -9,8 +9,10 @@ real) o rechaza con motivo.
 - POST /enrollment-requests/                  -> STUDENT (propio)
 - GET  /enrollment-requests/                  -> CPD, ADMIN, SUPERADMIN
 - GET  /enrollment-requests/me                -> STUDENT (propio historial)
+- GET  /enrollment-requests/{id}              -> CPD/ADMIN/SUPERADMIN (ver detalle) o STUDENT (propia)
 - POST /enrollment-requests/{id}/approve      -> CPD, ADMIN, SUPERADMIN
 - POST /enrollment-requests/{id}/reject       -> CPD, ADMIN, SUPERADMIN
+- DELETE /enrollment-requests/{id}            -> CPD, ADMIN, SUPERADMIN (cascade si se borra enrollment)
 """
 
 import math
@@ -106,7 +108,8 @@ async def list_requests(
     enriched = await _enrich_requests(items)
     total_pages = math.ceil(total / per_page) if total > 0 else 0
     return {
-        "data": enriched,
+        "items": enriched,
+        "data": enriched,  # alias retro-compat
         "meta": PaginationMeta(
             page=page,
             limit=per_page,
@@ -129,6 +132,76 @@ async def list_my_requests(
         raise HTTPException(status_code=403, detail="Solo estudiantes tienen historial de solicitudes de inscripción")
     items = await enrollment_request_service.get_my_enrollment_requests(current_user.id)
     return await _enrich_requests(items)
+
+
+# F-FIX-ENROLLMENT-REQUEST-GET-BY-ID (2026-08-10, Kevin): antes NO existia
+# el endpoint GET /enrollment-requests/{id} (individual). El listado
+# funcionaba, pero no se podia ver el detalle de una solicitud. Esto
+# rompia la UI cuando el usuario hacia click en una solicitud del listado
+# y queria ver el detalle. Tambien impedia que scripts de cleanup/test
+# pudieran borrar solicitudes por id (DELETE siempre daba 404).
+@router.get(
+    "/{id}",
+    response_model=EnrollmentRequestResponse,
+    summary="Ver Detalle de Solicitud de Inscripción"
+)
+async def get_enrollment_request(
+    id: PydanticObjectId,
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> Any:
+    from models.enrollment_request import EnrollmentRequest
+    solicitud = await EnrollmentRequest.get(id)
+    if not solicitud:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+
+    # Estudiantes solo pueden ver SUS PROPIAS solicitudes
+    if isinstance(current_user, Student):
+        if solicitud.estudiante_id != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="No tienes permiso para ver solicitudes de otros estudiantes"
+            )
+    # Encargado/Coordinador solo pueden ver solicitudes de SUS cursos asignados
+    elif isinstance(current_user, User) and current_user.rol in [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
+        if solicitud.curso_id not in current_user.cursos_asignados:
+            raise HTTPException(
+                status_code=403,
+                detail="No tienes permiso para ver solicitudes de este curso"
+            )
+
+    enriched = await _enrich_requests([solicitud])
+    return enriched[0]
+
+
+# F-FIX-ENROLLMENT-REQUEST-DELETE (2026-08-10, Kevin): agregar DELETE
+# /enrollment-requests/{id} para limpieza administrativa. Antes no existia,
+# asi que las solicitudes huerfanas (e.g. una solicitud aprobada cuyo
+# enrollment fue borrado) quedaban en la BD sin forma de removerlas.
+# Solo CPD/Admin/Superadmin pueden borrar.
+@router.delete(
+    "/{id}",
+    status_code=200,
+    summary="Eliminar Solicitud de Inscripción (CPD/Admin)"
+)
+async def delete_enrollment_request(
+    id: PydanticObjectId,
+    current_user: User = Depends(require_encargado_curso)
+) -> Any:
+    from models.enrollment_request import EnrollmentRequest
+    solicitud = await EnrollmentRequest.get(id)
+    if not solicitud:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+
+    # Encargado/Coordinador solo pueden borrar solicitudes de SUS cursos
+    if current_user.rol in [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
+        if solicitud.curso_id not in current_user.cursos_asignados:
+            raise HTTPException(
+                status_code=403,
+                detail="No tienes permiso para borrar solicitudes de este curso"
+            )
+
+    await solicitud.delete()
+    return {"message": "Solicitud eliminada", "_id": str(id)}
 
 
 @router.post(

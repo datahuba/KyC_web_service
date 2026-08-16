@@ -6,7 +6,7 @@ Define los schemas Pydantic para operaciones CRUD de pagos.
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict
 from pydantic import BaseModel, Field
 from models.enums import EstadoPago
 from models.base import PyObjectId
@@ -75,12 +75,38 @@ class PaymentCreate(BaseModel):
         None,
         description="Monto del pago (igual al monto_comprobante)"
     )
-    
+
+    # F-SYNC-PAGOS-MODULOS (2026-08-04, Kevin): sincronizar el endpoint de pagos
+    # con la logica del modal de carga inicial. Si viene este dict, el backend
+    # aplica los pagos directo a los modulos (en vez de prorratear en cascada
+    # con get_next_pending_payment). Llave = indice del modulo (0-based string),
+    # valor = monto a aplicar a ese modulo.
+    # Ej: {"0": 294, "1": 294} = paga modulo 1 y 2 completos.
+    pagos_modulos: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Dict {modulo_index_str: monto_pagado}. Si viene, se aplica directo a los modulos en vez de prorratear."
+    )
+
+    # F-SYNC-PAGOS-MODULOS (2026-08-04, Kevin): detalle desglosado por modulo.
+    # Ej: "Módulo 1: Bs 294, Módulo 2: Bs 294". Se genera automaticamente si
+    # el caller envio pagos_modulos.
+    detalle: Optional[str] = Field(
+        default=None,
+        description="Detalle desglosado del pago. Ej: 'Módulo 1: Bs 294, Módulo 2: Bs 294'."
+    )
+
     comprobante_url: Optional[str] = Field(
         None,
         description="URL del comprobante/voucher. Nulo si el pago fue en Caja."
     )
-    
+
+    # R35-FASE2-RECONCILIATION (2026-08-05): origen del pago para distinguir
+    # pagos sinteticos de pagos reales. None = pago real cargado por usuario.
+    origen: Optional[str] = Field(
+        None,
+        description='Origen del pago. None=pago real. "reconciliacion_*"=pago sintetico'
+    )
+
     model_config = {
         "json_schema_extra": {
             "example": {
@@ -138,9 +164,17 @@ class PaymentResponse(BaseModel):
     verificado_por: Optional[str] = None
     motivo_rechazo: Optional[str] = None
     motivo_reversion: Optional[str] = None
-    
-    created_at: datetime
-    updated_at: datetime
+
+    # R35-FASE2-RECONCILIATION (2026-08-05): expone origen en la respuesta API
+    origen: Optional[str] = None
+
+    # F-PERF-PAGOS-NO-FILTRO-FIX2 (2026-08-08, Kevin): ANTES eran `datetime` (no
+    # Optional). Pydantic rechazaba None, lo que lanzaba 500 para pagos antiguos
+    # sin created_at/updated_at en el documento Mongo. Con motor + projection,
+    # los pagos sin esos campos retornan None, NO un datetime con default.
+    # Fix: cambiar a Optional[datetime] = None para que sea compatible.
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
     en_ventana_reversion: bool = False  # ISSUE-P-REVERSION
     

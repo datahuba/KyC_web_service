@@ -79,7 +79,8 @@ async def read_users(
     has_prev = page > 1
     
     return {
-        "data": users,
+        "items": users,
+        "data": users,  # alias retro-compat
         "meta": PaginationMeta(
             page=page,
             limit=per_page,

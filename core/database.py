@@ -30,6 +30,23 @@ from models.enrollment_request import EnrollmentRequest
 from models.pre_registration import PreRegistrationForm, PreRegistration
 # F-044 (2026-07-22): log de errores 500 con TTL 7 días.
 from models.error_log import ErrorLog
+# F-CERTIFICADOS (2026-07-29): emisión de Certificados de Notas y No Deudor
+# desde el portal del estudiante.
+from models.certificate import Certificate
+from models.certificate_counter import CertificateCounter
+# F-CERT-APROBACION (2026-07-30): solicitudes de certificado con flujo de
+# aprobación por el encargado del programa. Colección: certificate_requests.
+from models.certificate_request import CertificateRequest
+# F-TRAMITES-SOLICITUD (2026-07-29): solicitudes de Convalidación,
+# Tutoría, Readmisión y Titulación que el estudiante crea desde /app/requests.
+from models.tramite_solicitud import TramiteSolicitud
+# US-003 (2026-08-03): Módulo Comunicados. Anuncios oficiales del personal
+# (superadmin/encargado/cobranzas) hacia los estudiantes, con pop-up al login
+# y tracking de "visto" por estudiante.
+from models.comunicado import Comunicado, ComunicadoVisto
+# F-2026-08-11-ASISTENCIA: registro de asistencia por sesion/clase
+# (educacion continua, regla del 80% asistencia).
+from models.asistencia import Sesion, AsistenciaRegistro
 
 
 async def _sanitize_legacy_database(db):
@@ -198,6 +215,20 @@ async def init_db():
             Submission,
             # F-044 (2026-07-22)
             ErrorLog,
+            # F-CERTIFICADOS (2026-07-29)
+            Certificate,
+            CertificateCounter,
+            # F-CERT-APROBACION (2026-07-30): solicitudes con flujo de aprobación
+            CertificateRequest,
+            # F-TRAMITES-SOLICITUD (2026-07-29)
+            TramiteSolicitud,
+            # US-003 (2026-08-03): Comunicados
+            Comunicado,
+            ComunicadoVisto,
+            # F-2026-08-11-ASISTENCIA (2026-08-11): registro de asistencia
+            # por sesion/clase (educacion continua, regla del 80%).
+            Sesion,
+            AsistenciaRegistro,
         ]
     )
     print(f"[OK] Conectado a MongoDB ({settings.DATABASE_NAME}) y Beanie inicializado con Connection Pool optimizado.")

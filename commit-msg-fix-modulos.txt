@@ -1,0 +1,39 @@
+F-FIX-IMPUTAR-MODULOS (2026-08-11, Kevin)
+
+Bug: para 5 estudiantes del DIPL-INVCI-2026/1 con monto_objetivo < 1470
+(Adolfo 245, Anabel 490, Celia 735, Javier 245, Paula 735), el
+endpoint F-AJUSTE-PAGOS-EXCEL dejaba inconsistencia entre modulos
+y total_pagado:
+
+  - modulos[0-5].monto_pagado = 252 cada uno (estado "Pagado") -> suma 1,470
+  - enrollment.total_pagado = monto_objetivo (245 / 490 / 735)
+  - 1 pago consolidado de monto_objetivo
+
+Visible en /app/payments?curso_id=6a7333d9dd1898c0ae0fa60b (vista
+Matriz): columnas M1-M6 muestran 252 (Pagado) pero TOTAL INGRESOS
+muestra 245/490/735. La tabla no cuadra con el total.
+
+Causa raiz (api/admin_accounting.py:347-361 y :364):
+  PASO 2 (tipo=diff) subi modulos[].monto_pagado a m.costo completo
+  PASO 3 sobreescribia total_pagado = monto_objetivo (menor)
+  PASO 4 creaba 1 pago consolidado del monto_objetivo
+  Resultado: modulos mienten (dicen Pagado a 252) y el total no
+  cuadra con la suma de los modulos.
+
+Fix: cuando monto_objetivo < costo_total (caso especial), imputar
+monto_objetivo a los modulos en orden (M1 primero, hasta agotar) y
+dejar el resto en 0/Pendiente. Asi suma(monto_pagado) == total_pagado.
+
+Cuando monto_objetivo >= costo_total (caso normal: 1470), la logica
+existente sigue funcionando (sube Parcial a Pagado).
+
+El endpoint es idempotente (PASO 1 borra pagos "Ajuste" previos), asi
+que se puede re-ejecutar con el JSON de los 5 casos especiales para
+corregir los datos en BD.
+
+Verificacion esperada post-deploy:
+  - Adolfo: M1=245, M2-M6=0, TOTAL=245 (cuadra)
+  - Anabel: M1=252, M2=238, M3-M6=0, TOTAL=490 (cuadra)
+  - Celia: M1=252, M2=252, M3=231, M4-M6=0, TOTAL=735 (cuadra)
+  - Alvaro y resto: M1-M6=252, M6=210, TOTAL=1470 (sin cambios)
+  - TOTAL INGRESOS del curso: sigue Bs 89,180 (cuadre Excel)

@@ -123,6 +123,19 @@ class TipoTitulo(str, Enum):
     TITULO_DOCTORADO = "título de doctorado"
 
 
+# F-CERTIFICADOS (2026-07-29): tipos de certificado que la Unidad de Postgrado
+# emite a los estudiantes a través de KYC DataHub.
+# - NOTAS: constancia de calificaciones módulo por módulo. Solo se emite una
+#   vez al finalizar el programa (todos los módulos con nota válida y saldo
+#   cero).
+# - NO_DEUDOR: constancia de que el estudiante no tiene deuda pendiente
+#   hasta un módulo N específico. Se puede emitir múltiples veces a lo
+#   largo del programa.
+class TipoCertificado(str, Enum):
+    NOTAS = "notas"
+    NO_DEUDOR = "no_deudor"
+
+
 class Sexo(str, Enum):
     """Sexo del estudiante (dato oficial UAGRM)"""
     MASCULINO = "masculino"
@@ -193,7 +206,52 @@ class AssignmentType(str, Enum):
 
 class SubmissionStatus(str, Enum):
     """Estado de la entrega de un estudiante"""
-    PENDING = "pending"      
-    SUBMITTED = "submitted"  
+    PENDING = "pending"
+    SUBMITTED = "submitted"
     GRADED = "graded"
+
+
+# F-TRAMITES-SOLICITUD (2026-07-29): tipos de solicitud que el estudiante
+# puede crear desde la sección /app/requests. Sandra/Rocío pidieron 4 tipos
+# de solicitudes adicionales (reunión 2026-07-29):
+#   - CONVALIDACION: convalidar materias cursadas en otra institución.
+#     Requisitos: carta + certificado de nota (emitido por escuela postgrado) + pago.
+#   - TUTORIA: solicitar tutoría para su trabajo final / tesis. Requisitos:
+#     carta + certificado de nota + pago.
+#   - READMISION: personas que estudiaron hace años y no defendieron; la
+#     escuela de postgrado autoriza por algún motivo X/Z.
+#   - TITULACION: solicitud formal del título una vez completado el programa.
+class TipoTramite(str, Enum):
+    """Tipo de solicitud que el estudiante crea desde /app/requests."""
+    CONVALIDACION = "convalidacion"
+    TUTORIA = "tutoria"
+    READMISION = "readmision"
+    TITULACION = "titulacion"
+
+
+class EstadoTramite(str, Enum):
+    """Ciclo de vida de una solicitud de trámite."""
+    PENDIENTE = "pendiente"          # recién creada por el estudiante
+    EN_REVISION = "en_revision"      # staff la está revisando
+    APROBADA = "aprobada"            # aprobada por el staff
+    RECHAZADA = "rechazada"          # rechazada por el staff
+    CANCELADA = "cancelada"          # cancelada por el estudiante
+
+
+# F-2026-08-11-LIMITE-10: reunión educación continua UAGRM (2026-08-11).
+# Kevin pidió subir el límite de 5 → 10 programas en ejecución por encargado.
+# Antes 5, ahora 10. Profesionales siguen en 5 (no los afecta porque ese
+# límite solo aplica a ENCARGADO_CURSO y COORDINADOR).
+MAX_PROGRAMAS_POR_ENCARGADO = 10
+
+
+# F-2026-08-11-ASISTENCIA: estados de asistencia de un estudiante en una sesion.
+# "tarde" cuenta como 0.5 presente para el calculo del % asistencia.
+# "justificado" NO cuenta como presente NI como ausente (es neutro, ej:
+#   el estudiante tuvo cita medica y trajo justificativo).
+class EstadoAsistencia(str, Enum):
+    PRESENTE = "presente"
+    AUSENTE = "ausente"
+    TARDE = "tarde"
+    JUSTIFICADO = "justificado"
     

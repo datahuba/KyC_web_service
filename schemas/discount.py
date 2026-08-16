@@ -89,6 +89,13 @@ class DiscountResponse(BaseModel):
     updated_at: datetime
     nota_minima_requerida: Optional[float] = None
     resolucion_url: Optional[str] = None  # ISSUE-P-DESCUENTO-RESOLUCION
+
+    # F-MAESTRIA-EN-EJECUCION (2026-08-05, Kevin): flag para identificar
+    # descuentos auto-creados por el seed institucional del Organo Judicial.
+    # El frontend usa esto para mapear automaticamente los descuentos del
+    # Excel (0.5 → 50% interno, 1 → beca merito 100%).
+    es_institucional: Optional[bool] = Field(default=None)
+    institucion: Optional[str] = Field(default=None)
     # BUG (2026-07-09, reportado por el usuario: "no pude seleccionar los
     # estudiantes para asignar becas"): el modelo Discount SÍ tiene
     # lista_estudiantes, pero este schema de respuesta nunca la exponía --

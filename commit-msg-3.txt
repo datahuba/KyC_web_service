@@ -1,0 +1,20 @@
+F-AJUSTE-PAGOS-EXCEL-FIX-MONTO-VARIABLE: respetar monto_objetivo en pagos
+
+PROBLEMA v3 (2026-08-10, Kevin):
+Al ejecutar los 12 ajustes de INV con monto_objetivo variable (245, 735,
+1470), el endpoint SIEMPRE creaba 6 pagos canonicos (5x252 + 1x210 = 1470),
+ignorando el monto_objetivo del request.
+
+Resultado: 4 estudiantes (Adolfo 245, Celia 735, Franz 245, Jhonny 735)
+terminaron con sistema=1470 cuando el Excel pedia menos.
+
+FIX v4:
+- _crear_pagos_canonicos ahora acepta monto_objetivo opcional
+- Si monto_objetivo < 1470 (suma de los 6 canonicos): crea UN SOLO pago
+  consolidado por monto_objetivo (caso pago parcial / beca)
+- Si monto_objetivo >= 1470: crea los 6 pagos canonicos (camino normal)
+
+Resultado esperado al re-ejecutar:
+- Los 4 con Excel < 1470: 6 pagos anteriores borrados, 1 pago nuevo
+  por el monto_objetivo correcto
+- Los 8 con Excel = 1470: ya correctos, idempotente

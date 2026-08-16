@@ -22,6 +22,27 @@ class ModuloEstado(BaseModel):
     """
     Copia del módulo del curso para este estudiante específico.
     Lleva el control financiero (pagos) y académico (notas) del módulo.
+
+    F-MAESTRIA-EN-EJECUCION (2026-08-05, Kevin): agregado campo
+    `estado_operacional` que distingue entre el estado FINANCIERO
+    (`estado`: Pendiente/Parcial/Pagado) y el estado OPERACIONAL del
+    modulo en el cronograma del programa:
+    - Pendiente: modulo no se ha iniciado todavia
+    - En Ejecucion: modulo actualmente en curso (este es el "momento actual")
+    - Ejecutado: modulo ya finalizo
+
+    Mientras `estado` se calcula automaticamente desde los pagos,
+    `estado_operacional` lo define MANUALMENTE el admin/encargado del
+    programa (boton en el form del curso). Esto permite representar
+    la realidad: un modulo puede estar "Pagado" pero aun no haberse
+    dictado (estado_operacional=Pendiente), o estar "Pendiente" pero
+    ya haberse dictado (estado_operacional=Ejecutado, deuda pendiente).
+
+    Si el campo no se setea explicitamente, se puede derivar de
+    `iniciado_en` y `finalizado_en`:
+    - ambos None -> Pendiente
+    - solo iniciado_en -> En Ejecucion
+    - ambos -> Ejecutado
     """
     nombre: str = Field(..., description="Nombre del módulo (Ej: Módulo 1)")
     
@@ -29,10 +50,39 @@ class ModuloEstado(BaseModel):
     costo: float = Field(..., ge=0, description="Costo que debe pagar por este módulo")
     estado: str = Field(default="Pendiente", description="Puede ser: Pendiente, Parcial, Pagado")
     monto_pagado: float = Field(default=0.0, ge=0, description="Cuánto ha pagado de este módulo")
+
+    # F-MAESTRIA-EN-EJECUCION (2026-08-05, Kevin): estado operacional
+    # del modulo en el cronograma del programa. Mientras `estado`
+    # refleja el pago, `estado_operacional` refleja SI el modulo ya
+    # se dio o se esta dando. Default 'Pendiente' (no se ha iniciado).
+    estado_operacional: str = Field(
+        default="Pendiente",
+        description="Estado operacional: 'Pendiente' | 'En Ejecucion' | 'Ejecutado'. Define si el modulo se esta dando, ya se dio, o falta."
+    )
     
     # --- Control Académico (ISSUE P) ---
     nota: Optional[float] = Field(default=None, ge=0, le=100, description="Calificación obtenida en el módulo (0-100)")
     estado_academico: str = Field(default="Cursando", description="Puede ser: Cursando, Aprobado, Reprobado")
+
+    # F-CUENTAS-POR-COBRAR (2026-07-29): marca cuándo Sandra/Rocío (encargado
+    # del programa) habilitó manualmente este módulo como "en curso". Solo los
+    # módulos con iniciado_en != null cuentan para la CxC real (a la fecha).
+    # El Módulo 1 de enrollments activos se backfillea con fecha_inscripcion en
+    # el script scripts/backfill_modulo_iniciado.py.
+    iniciado_en: Optional[datetime] = Field(
+        default=None,
+        description="UTC. Cuándo el encargado del programa marcó este módulo como 'en curso'. None = aún no se ha iniciado.",
+    )
+
+    # F-MODULOS-MODAL (2026-07-31): marca cuándo el encargado marcó este
+    # módulo como "finalizado/cerrado" (el estudiante ya terminó de cursarlo).
+    # Un módulo finalizado NO puede volver a abrirse para pagos -- el siguiente
+    # paso es calcular la nota final. Se implementó para que el kardex pueda
+    # tener el ciclo completo: Pendiente → En curso → Finalizado.
+    finalizado_en: Optional[datetime] = Field(
+        default=None,
+        description="UTC. Cuándo el encargado cerró este módulo. None = aún no se cerró.",
+    )
 
     # ISSUE-P-RECALCULO-NOTA: costo de respaldo sin el descuento personal (beca)
     costo_sin_beca_personal: Optional[float] = Field(
@@ -48,6 +98,16 @@ class ModuloEstado(BaseModel):
     estado_validacion_nota: str = Field(
         default="sin_borrador",
         description="'sin_borrador' | 'pendiente_validacion' | 'validada'"
+    )
+
+    # F-2026-08-11-MODULOS-EC: porcentaje de asistencia del estudiante al
+    # módulo (0-100). El docente lo llena al cerrar el módulo. Si es < 80%,
+    # el sistema fuerza estado_academico='Reprobado' independientemente de
+    # la nota (regla de aprobación mínima por asistencia, reunión educación
+    # continua UAGRM 2026-08-11). None = aún no registrado.
+    asistencia_porcentaje: Optional[float] = Field(
+        default=None, ge=0, le=100,
+        description="Porcentaje de asistencia del estudiante al módulo (0-100). Si < 80%, el sistema fuerza Reprobado al cerrar el módulo. None = aún no registrado."
     )
 
 
@@ -129,12 +189,33 @@ class Enrollment(MongoBaseModel):
     
     matricula_pagada: bool = Field(default=False, description="¿Ya pagó la matrícula el estudiante para este curso?")
 
+    # F-US-006-3TIPOS-3A (2026-08-04): marca si esta inscripcion fue creada
+    # como carga inicial del programa (caso retroactivo, programa en_ejecucion
+    # o historico). Sirve para auditoria: distinguir una inscripcion que
+    # el estudiante hizo por su cuenta vs una que el admin/encargado metio
+    # manualmente al crear el programa.
+    es_carga_inicial: bool = Field(
+        default=False,
+        description="True si la inscripcion fue creada como carga inicial del programa "
+                    "(estudiante ya estaba/curso en el programa antes de que el sistema "
+                    "lo registrara). Usado para auditoria."
+    )
+
     # ISSUE-M-EXENCION: bypass de matrícula otorgado por MAE. NO condona la
     # deuda financiera (saldo_pendiente sigue reflejando la realidad); solo
     # desacopla el estado académico (poder cursar) del pago de matrícula.
     matricula_exenta: bool = Field(default=False, description="Si MAE autorizó cursar sin haber pagado la matrícula. La deuda financiera se mantiene intacta.")
     matricula_exenta_otorgada_por: Optional[str] = Field(default=None, description="Username del MAE/Admin/Superadmin que otorgó la exención.")
     matricula_exenta_fecha: Optional[datetime] = Field(default=None, description="Fecha (UTC) en que se otorgó la exención vigente.")
+
+    # US-004 v4 (2026-08-04): Kevin. Excluir esta inscripción del cálculo del
+    # "Por Cobrar" del dashboard sin cambiar su estado. Caso típico: estudiante
+    # con inscripción PENDIENTE_PAGO en un curso NUEVO que Sandra aún no incluye
+    # en su planilla (porque es un programa recién comenzando). No queremos
+    # que sume al Por Cobrar del curso viejo, pero tampoco queremos marcarlos
+    # como SUSPENDIDO (todavía pueden iniciar el nuevo curso). Se salta
+    # en get_resumen_economico pero sigue visible en otras vistas.
+    excluir_por_cobrar: bool = Field(default=False, description="Si True, esta inscripción NO suma al Por Cobrar del dashboard. El estado se mantiene.")
 
     # ISSUE-P-CONGELADO: motivo específico cuando estado=SUSPENDIDO. Reutiliza
     # el mismo estado que ISSUE-R-SOLICITUD-PASIVO ('pasivo') para no explotar

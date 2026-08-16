@@ -36,11 +36,24 @@ class Modulo(BaseModel):
     """
     nombre: str = Field(..., description="Nombre del módulo (Ej: Módulo 1: IA)")
     costo: float = Field(..., ge=0, description="Costo individual de este módulo")
-    
+
     # ISSUE R: Asignación granular de docente a nivel de módulo
     docente_id: Optional[PyObjectId] = Field(
-        None, 
+        None,
         description="ID del docente asignado a impartir y calificar este módulo"
+    )
+
+    # F-CERTIFICADOS (2026-07-29): fechas de inicio y fin del módulo para
+    # Certificados de Notas y calendario por módulo. Opcionales para mantener
+    # retrocompatibilidad con cursos existentes (backfill via script one-shot
+    # scripts/backfill_modulo_fechas.py que copia Course.fecha_inicio/fin).
+    fecha_inicio: Optional[datetime] = Field(
+        default=None,
+        description="Fecha de inicio del módulo (UTC). Usado para Certificados de Notas y calendario por módulo."
+    )
+    fecha_fin: Optional[datetime] = Field(
+        default=None,
+        description="Fecha de fin del módulo (UTC). Usado para Certificados de Notas y calendario por módulo."
     )
 
 
@@ -105,15 +118,37 @@ class Course(MongoBaseModel):
     # nuevo significado (gastos complementarios opcionales al programa).
 
     costo_total_interno: float = Field(
-        ...,
-        gt=0,
-        description="Costo total (colegiatura) del programa. Precio único, aplica a todos los estudiantes por igual."
-    )
-    
-    matricula_interno: float = Field(
-        ...,
+        default=0,
         ge=0,
-        description="Costo de matrícula institucional. Precio único, aplica a todos los estudiantes por igual."
+        description="Costo total (colegiatura) del programa. Precio único, aplica a todos los estudiantes por igual. "
+                    "En programas historicos (es_historico=True) puede ser 0 (no se exige)."
+    )
+
+    matricula_interno: float = Field(
+        default=0,
+        ge=0,
+        description="Costo de matrícula institucional. Precio único, aplica a todos los estudiantes por igual. "
+                    "En programas historicos (es_historico=True) puede ser 0 (no se exige)."
+    )
+
+    # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12, reunion UAGRM):
+    # Matriculas DIFERENCIADAS por tipo de estudiante (educacion continua).
+    # Si ambos son None, se usan los defaults globales del sistema
+    # (MATRICULA_PRIMER_CARRERA_DEFAULT=200, MATRICULA_PROFESIONAL_DEFAULT=500).
+    # Si el Course define estos campos, son el override para ESTE curso.
+    # Ver `get_matricula_for_student()` en services/payment_service.py para
+    # la regla hibrida (default global + override por curso).
+    matricula_primer_carrera: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="F-2026-08-12-DESCUENTO-BECA: override de matricula para estudiantes de PRIMERA CARRERA en la UAGRM. "
+                    "Si None, usa settings.MATRICULA_PRIMER_CARRERA_DEFAULT (200 Bs por default)."
+    )
+    matricula_profesional: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="F-2026-08-12-DESCUENTO-BECA: override de matricula para estudiantes que YA TIENEN TITULO PROFESIONAL. "
+                    "Si None, usa settings.MATRICULA_PROFESIONAL_DEFAULT (500 Bs por default)."
     )
 
     # ========================================================================
@@ -138,9 +173,10 @@ class Course(MongoBaseModel):
     # ========================================================================
     
     cantidad_cuotas: int = Field(
-        ...,
-        ge=1,
-        description="Número de cuotas en las que se puede dividir el pago"
+        default=0,
+        ge=0,
+        description="Número de cuotas en las que se puede dividir el pago. "
+                    "En programas historicos (es_historico=True) puede ser 0 (no se exige)."
     )
 
     modulos: List[Modulo] = Field(
@@ -211,9 +247,47 @@ class Course(MongoBaseModel):
         description="Override manual del estado (F-080). Si está definido y es válido, tiene prioridad sobre el cálculo por fechas. Útil para suspensiones o extensiones manuales."
     )
 
+    # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): estado calculado
+    # en runtime segun fechas/override. Se persiste (no es un @property)
+    # porque Beanie/Pydantic v2 no permite setear atributos dinamicos
+    # que no esten en el schema. El endpoint lo popula antes de retornar.
+    estado_calculado: Optional[str] = Field(
+        default=None,
+        description="F-CREAR-PROGRAMA-EN-EJECUCION: estado calculado por fechas+override. Populado por el endpoint antes de retornar."
+    )
+
     resolucion_pdf_url: Optional[str] = Field(
         default=None,
         description="URL del PDF de la resolución que respalda el programa (F-080)."
+    )
+
+    # F-HISTORICO (2026-07-31): marca un programa como "historico" (curso pasado
+    # o registro retroactivo). Cuando es True, el sistema NO exige datos
+    # operacionales (docentes, modulos con notas, pagos, requisitos) — solo
+    # identifica el programa (codigo, nombre, tipo, modalidad, fechas) y
+    # opcionalmente una resolucion de respaldo. Esto permite cargar rapidamente
+    # el catalogo de programas antiguos sin tener que reconstruir toda la
+    # estructura academica y financiera de cada uno.
+    es_historico: bool = Field(
+        default=False,
+        description="F-HISTORICO: True si es un programa historico/cerrado del que solo "
+                    "queremos guardar datos basicos + resolucion de respaldo. "
+                    "False (default) si es un programa en ejecucion o por ejecutarse, "
+                    "donde se exige la estructura completa (docentes, modulos, pagos, etc.)."
+    )
+
+    # FIX-F-2026-08-12-EC-CREADO-POR (Kevin 2026-08-12): trazabilidad de quien
+    # creo el programa. Antes no se guardaba, lo que impedia hacer migraciones
+    # retroactivas ("asignar a este EC los programas que el creo") y rompia el
+    # flujo de auto-asignacion cuando el EC se equivocaba de boton. Ahora cada
+    # curso tiene un `creado_por_id` apuntando al User que lo creo (sea
+    # EC/COORDINADOR/CPD/ADMIN/SUPERADMIN). Para cursos pre-existentes (sin
+    # este campo), el endpoint de migracion `POST /admin/migrate/ec-creador`
+    # hace el backfill una sola vez.
+    creado_por_id: Optional[PyObjectId] = Field(
+        default=None,
+        description="FIX-F-2026-08-12-EC-CREADO-POR: ID del User que creo el programa. "
+                    "None para cursos pre-existentes (usar endpoint de migracion)."
     )
     
     # ========================================================================
@@ -271,11 +345,17 @@ class Course(MongoBaseModel):
 
     def acepta_inscripciones(self) -> bool:
         """
-        F-080: True si el estado actual del programa permite nuevas
-        solicitudes de inscripción. Un programa CERRADO NO acepta.
-        PROGRAMADO y EN_EJECUCION sí.
+        F-080 + F-US-006-3TIPOS (2026-08-04): True SOLO si el estado actual
+        del programa es PROGRAMADO. Un programa en_ejecucion, cerrado o
+        histórico NO acepta nuevas solicitudes de inscripción de estudiantes
+        (los ya inscritos siguen, pero nadie nuevo puede entrar por su cuenta).
+
+        Razón: Kevin decidió que un programa en ejecución ya cerró inscripciones
+        — los rezagados los mete el admin/encargado manualmente a un módulo
+        futuro. Un histórico/cerrado es solo archivo, no se inscribe nadie nuevo
+        (salvo superadmin en caso retroactivo excepcional).
         """
-        return self.get_estado_actual() != EstadoPrograma.CERRADO.value
+        return self.get_estado_actual() == EstadoPrograma.PROGRAMADO.value
     
     class Settings:
         name = "courses"

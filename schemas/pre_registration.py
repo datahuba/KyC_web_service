@@ -104,6 +104,101 @@ class PreRegistrationSubmit(BaseModel):
     domicilio: Optional[str] = Field(None, max_length=300)
     mensaje: Optional[str] = Field(None, max_length=500, description="Mensaje o consulta opcional del visitante")
 
+    # F-2026-08-11-CAMPOS-EC: campos opcionales del Diplomado Gestión
+    # Tributaria y demás programas de educación continua (planilla de Lisa).
+    # Si el visitante NO se inscribe a un diplomado EC, los deja vacíos.
+    registro_universitario: Optional[str] = Field(None, max_length=30, description="Registro universitario UAGRM (de la ficha del estudiante, NO es el username).")
+    avance_academico_codigo: Optional[int] = Field(None, ge=0, description="Código de avance académico (planilla de Lisa).")
+    formulario_descuento_numero: Optional[int] = Field(None, ge=0, description="Número del formulario de descuento (planilla de Lisa).")
+    carrera_codigo: Optional[str] = Field(None, max_length=20, description="Código de carrera (de la planilla de Lisa).")
+    descuento_porcentaje: Optional[float] = Field(None, ge=0, le=1, description="Descuento pre-aprobado (0.0-1.0). Aplica SOLO a módulos.")
+
+    # F-2026-08-11-CAMPOS-EC-MODALIDAD (reunion UAGRM 2026-08-11, seccion 4):
+    # procedencia (codigo departamento Bolivia) + modalidad (presencial/virtual)
+    # + carta_firmada_url (URL del PDF firmado por el director).
+    # Regla de validacion: si modalidad='virtual' o procedencia != 'SCZ',
+    # carta_firmada_url es OBLIGATORIA (reunion UAGRM).
+    procedencia: Optional[str] = Field(None, max_length=10, description="Codigo del departamento de Bolivia: SCZ, LPZ, CBA, TJA, CHS, POT, ORU, BEN, PND.")
+    modalidad: Optional[str] = Field(None, max_length=20, description="Modalidad de estudio: 'presencial' o 'virtual'.")
+    carta_firmada_url: Optional[str] = Field(None, max_length=500, description="URL de la carta firmada por el director (PDF en Drive/OneDrive/Dropbox). Requerida si modalidad=virtual o procedencia!=SCZ.")
+
+    # F-2026-08-11-CAMPOS-EC-RESOLUCION (Kevin 22:37): la resolucion del programa
+    # es OPCIONAL. Si el estudiante ya la tiene a mano puede incluirla, sino
+    # el admin (CPD o encargado) la sube despues via /app/courses. Cuando se
+    # aprueba la submission, esta URL se copia a Course.resolucion_pdf_url
+    # para que el programa tenga su resolucion persistida.
+    resolucion_url: Optional[str] = Field(None, max_length=500, description="URL de la resolucion del programa (PDF que emite la UAGRM). OPCIONAL — el estudiante puede incluirla si ya la tiene, sino el admin la sube despues.")
+
+    # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12, reunion UAGRM):
+    # Pregunta binaria que determina el precio de matricula.
+    # - es_primer_carrera=True: cobra matricula_primer_carrera (default 200)
+    # - es_primer_carrera=False: cobra matricula_profesional (default 500)
+    #   Y debe subir foto del titulo profesional (titulo_profesional_url).
+    # Default True por seguridad: si el visitante no contesta, cobra menos.
+    es_primer_carrera: bool = Field(
+        default=True,
+        description="F-2026-08-12-DESCUENTO-BECA: ¿Es tu primera carrera en la UAGRM? "
+                    "True=si (cobra matricula primer carrera, default 200 Bs). "
+                    "False=no, ya tengo titulo profesional (cobra matricula profesional, default 500 Bs, "
+                    "y titulo_profesional_url pasa a ser obligatorio). "
+                    "Default True por seguridad."
+    )
+    titulo_profesional_url: Optional[str] = Field(
+        None, max_length=500,
+        description="F-2026-08-12-DESCUENTO-BECA: URL de la foto del titulo profesional "
+                    "(PDF/JPG/PNG en Cloudinary). REQUERIDA si es_primer_carrera=False. "
+                    "El encargado EC valida este documento al aprobar la pre-inscripcion."
+    )
+
+    @field_validator("modalidad")
+    @classmethod
+    def modalidad_valida(cls, v):
+        if v is None or v == "":
+            return None
+        v_norm = v.strip().lower()
+        if v_norm not in ("presencial", "virtual"):
+            raise ValueError("Modalidad debe ser 'presencial' o 'virtual'.")
+        return v_norm
+
+    @field_validator("procedencia")
+    @classmethod
+    def procedencia_valida(cls, v):
+        if v is None or v == "":
+            return None
+        v_norm = v.strip().upper()
+        if v_norm not in ("SCZ", "LPZ", "CBA", "TJA", "CHS", "POT", "ORU", "BEN", "PND"):
+            raise ValueError("Procedencia debe ser un codigo de departamento valido de Bolivia (SCZ, LPZ, CBA, TJA, CHS, POT, ORU, BEN, PND).")
+        return v_norm
+
+    @field_validator("carta_firmada_url")
+    @classmethod
+    def carta_firmada_requerida_si_provincia_o_virtual(cls, v, info):
+        # F-2026-08-11-CAMPOS-EC-MODALIDAD: regla de la reunion.
+        # Si el estudiante es de provincia (procedencia != SCZ) o eligio virtual,
+        # la carta firmada es obligatoria.
+        modalidad = (info.data.get("modalidad") or "").lower() if info.data.get("modalidad") else ""
+        procedencia = (info.data.get("procedencia") or "").upper() if info.data.get("procedencia") else ""
+        requiere_carta = modalidad == "virtual" or (procedencia and procedencia != "SCZ")
+        if requiere_carta and not (v and str(v).strip()):
+            raise ValueError(
+                "La carta firmada por el director es obligatoria para estudiantes de provincia (procedencia != SCZ) o modalidad virtual."
+            )
+        return v
+
+    @field_validator("titulo_profesional_url")
+    @classmethod
+    def titulo_requerido_si_no_primer_carrera(cls, v, info):
+        # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12): si el estudiante NO
+        # es primer carrera (ya tiene titulo profesional), la foto del titulo
+        # es OBLIGATORIA. El encargado EC lo valida en el panel al aprobar.
+        es_primer_carrera = info.data.get("es_primer_carrera", True)
+        if es_primer_carrera is False and not (v and str(v).strip()):
+            raise ValueError(
+                "Si ya tienes título profesional, debes subir una foto o escaneo del título. "
+                "El encargado de educación continua lo validará antes de aprobar tu pre-inscripción."
+            )
+        return v
+
     @field_validator("carnet")
     @classmethod
     def carnet_valido(cls, v: str) -> str:

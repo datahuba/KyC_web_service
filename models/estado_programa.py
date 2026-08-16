@@ -33,10 +33,13 @@ class EstadoPrograma(str, Enum):
     `Course.estado_override` para forzar manualmente. Si está definido
     tiene prioridad sobre el cálculo automático.
 
-    Uso del estado:
+    Uso del estado (F-080 + F-US-006-3TIPOS, 2026-08-04):
       - CERRADO: NO se aceptan nuevas solicitudes de inscripción.
-      - EN_EJECUCION: sí acepta inscripciones (mientras queden plazas).
-      - PROGRAMADO: sí acepta inscripciones anticipadas.
+      - EN_EJECUCION: NO se aceptan nuevas solicitudes de estudiantes
+        (el programa ya inició). Los ya inscritos siguen; los rezagados
+        los mete el admin/encargado manualmente a un módulo futuro.
+      - PROGRAMADO: sí acepta inscripciones anticipadas (es el único
+        estado visible para que un estudiante se inscriba por su cuenta).
 
     El campo `activo: bool` sigue existiendo como un flag independiente
     (e.g. desactivar manualmente un programa de la plataforma sin

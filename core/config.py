@@ -77,6 +77,43 @@ class Settings(BaseSettings):
     SENTRY_TRACES_SAMPLE_RATE: float = Field(default=0.1, env="SENTRY_TRACES_SAMPLE_RATE")
     SENTRY_ENVIRONMENT: str = Field(default="production", env="SENTRY_ENVIRONMENT")
 
+    # F-CACHE-SHARED (2026-08-08, Kevin): cache en memoria para lookups
+    # frecuentes de students y enrollments. El cuello de los endpoints de
+    # pagos NO era el query de payments sino los N+1 lookups de students +
+    # enrollments que enrich hace en cada request. Con este cache, los
+    # mismos IDs solo se buscan 1 vez cada TTL segundos (compartido entre
+    # todos los requests concurrentes del proceso).
+    # TTL: 30-60s es seguro porque los datos no son criticos en tiempo real
+    # (nombre del estudiante, cantidad de cuotas). Un cambio de nombre
+    # tarda hasta 60s en verse, aceptable para una lista de pagos.
+    CACHE_ENABLED: bool = Field(default=True, env="CACHE_ENABLED")
+    CACHE_TTL_STUDENTS_SECONDS: int = Field(default=60, env="CACHE_TTL_STUDENTS_SECONDS")
+    CACHE_TTL_ENROLLMENTS_SECONDS: int = Field(default=30, env="CACHE_TTL_ENROLLMENTS_SECONDS")
+    CACHE_MAX_ENTRIES: int = Field(default=1000, env="CACHE_MAX_ENTRIES")
+
+    # F-PERF-DASHBOARD-PRECOMPUTE (2026-08-08, Kevin): background job que
+    # pre-computa el dashboard cada X segundos para usuarios activos. Esto
+    # elimina el cold del dashboard (1-13s) en la mayoria de los casos
+    # porque el cache ya esta caliente cuando el user hace request.
+    # - DASHBOARD_PRECOMPUTE_INTERVAL_SECONDS: cada cuanto se ejecuta
+    #   el job. Default 240s (4 min) < TTL 300s (5 min) para garantizar
+    #   que el cache siempre tenga data fresca cuando el user lo pida.
+    # - DASHBOARD_PRECOMPUTE_ENABLED: kill switch. False desactiva el job.
+    DASHBOARD_PRECOMPUTE_ENABLED: bool = Field(default=True, env="DASHBOARD_PRECOMPUTE_ENABLED")
+    DASHBOARD_PRECOMPUTE_INTERVAL_SECONDS: int = Field(default=240, env="DASHBOARD_PRECOMPUTE_INTERVAL_SECONDS")
+
+    # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12, reunion UAGRM):
+    # Precios default de matricula para educacion continua.
+    # - MATRICULA_PRIMER_CARRERA_DEFAULT: si el estudiante es PRIMERA CARRERA
+    #   en la UAGRM (es_primer_carrera=True), paga este monto.
+    # - MATRICULA_PROFESIONAL_DEFAULT: si ya tiene titulo profesional
+    #   (es_primer_carrera=False), paga este monto.
+    # Un Course puede overridear estos defaults con `matricula_primer_carrera`
+    # y `matricula_profesional` propios. Si el Course no los define, se usan
+    # estos defaults globales.
+    MATRICULA_PRIMER_CARRERA_DEFAULT: float = Field(default=200.0, env="MATRICULA_PRIMER_CARRERA_DEFAULT")
+    MATRICULA_PROFESIONAL_DEFAULT: float = Field(default=500.0, env="MATRICULA_PROFESIONAL_DEFAULT")
+
     model_config = {
         "env_file": ".env",
         "case_sensitive": True

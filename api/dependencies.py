@@ -23,12 +23,19 @@ def puede_ver_economico(current_user) -> bool:
     """
     ISSUE-R-PERFIL-GENERICO: True si el usuario puede ver información económica
     (reportes de caja, resumen de ingresos, pagos). Roles económicos:
-    superadmin, admin, mae, cobranza; y COORDINADOR únicamente si su subtipo es
-    FINANCIERO (los coordinadores académico/investigación NO ven lo económico).
+    superadmin, admin, mae, cobranza, encargado_curso; y COORDINADOR únicamente
+    si su subtipo es FINANCIERO (los coordinadores académico/investigación NO
+    ven lo económico).
+
+    F-2026-08-22-EC-PAGOS-READONLY (Kevin 2026-08-22): encargado_curso entra
+    tambien (en modo SOLO LECTURA). El filtro por cursos_asignados que ya
+    está en cada endpoint se encarga de la segmentacion: el EC solo ve
+    pagos/certificados/reportes de SUS cursos asignados, igual que en
+    payments y certificates.
     """
     if not isinstance(current_user, User):
         return False
-    if current_user.rol in {UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MAE, UserRole.COBRANZA}:
+    if current_user.rol in {UserRole.SUPERADMIN, UserRole.ADMIN, UserRole.MAE, UserRole.COBRANZA, UserRole.ENCARGADO_CURSO}:
         return True
     return (
         current_user.rol == UserRole.COORDINADOR
@@ -364,9 +371,32 @@ def filtro_cursos_por_rol(current_user: User) -> Optional[dict]:
     para separar "Usuarios Globales" de "Asignados a Curso(s)"). Un cajero sin
     cursos marcados conserva acceso total, para no romper cuentas de Cobranza
     ya existentes que nunca se configuraron con cursos específicos.
+
+    F-2026-08-12-EC-CURSOS-FILTRO (Kevin 2026-08-12 post-reunion UAGRM):
+    extender el filtro a COORDINADOR tambien (supervisa EC de su area, debe
+    ver solo datos de los cursos que supervisa, que son los mismos cursos
+    asignados). Esto unifica el comportamiento EC + COORDINADOR + COBRANZA.
     """
-    if current_user.rol == UserRole.ENCARGADO_CURSO:
+    if current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
         return {"curso_id": {"$in": current_user.cursos_asignados}}
+    if current_user.rol == UserRole.COBRANZA and current_user.cursos_asignados:
+        return {"curso_id": {"$in": current_user.cursos_asignados}}
+    return None
+
+
+def filtro_cursos_por_rol_estricto(current_user: User) -> Optional[dict]:
+    """
+    Igual que filtro_cursos_por_rol pero retorna filtro incluso si cursos_asignados
+    está vacío (devuelve $in [] = no muestra nada). Usar SOLO en endpoints que
+    tienen sentido semántico de "0 cursos = 0 datos" (ej. dashboard del EC).
+
+    F-2026-08-12-EC-CURSOS-FILTRO (Kevin 2026-08-12): el EC sin cursos asignados
+    NO debe ver datos de TODOS los cursos por accidente. Si no tiene cursos,
+    no ve nada (mejor que ver todo por error de config).
+    """
+    if current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
+        cursos = current_user.cursos_asignados or []
+        return {"curso_id": {"$in": cursos}}
     if current_user.rol == UserRole.COBRANZA and current_user.cursos_asignados:
         return {"curso_id": {"$in": current_user.cursos_asignados}}
     return None

@@ -312,3 +312,56 @@ def build_welcome_pre_registration_email(
       </div>
     </div>
     """
+
+
+def build_pre_registration_received_email(
+    nombre: str,
+    nombre_programa: str,
+    submission_id: str,
+    admin_url: str
+) -> str:
+    """
+    F-2026-08-22-PRE-REG-EMAIL-CONFIRM (Kevin 2026-08-22): email de confirmacion
+    inmediata que recibe el visitante en cuanto envia su pre-inscripcion
+    (aun no aprobada). Le confirma que su solicitud fue recibida y le
+    muestra el numero de solicitud para consultar el estado. Tambien le
+    avisa el plazo aproximado de revision.
+
+    Distinto de build_welcome_pre_registration_email, que se envia al
+    APROBAR (ahi si incluye credenciales de acceso).
+    """
+    return f"""
+    <div style="font-family: Arial, Helvetica, sans-serif; max-width: 520px; margin: 0 auto; color: #1f2937;">
+      <div style="background: #1d4ed8; padding: 20px; text-align: center; border-radius: 12px 12px 0 0;">
+        <h1 style="color: #ffffff; margin: 0; font-size: 18px;">Escuela de Posgrado · UAGRM</h1>
+        <p style="color: #dbeafe; margin: 4px 0 0; font-size: 13px;">Contaduría Pública</p>
+      </div>
+      <div style="border: 1px solid #e5e7eb; border-top: none; padding: 24px; border-radius: 0 0 12px 12px;">
+        <p style="font-size: 15px;">Hola <strong>{nombre}</strong>,</p>
+        <p style="font-size: 14px; line-height: 1.6;">
+          Hemos recibido tu pre-inscripción al programa
+          <strong>{nombre_programa}</strong>. Nuestro equipo académico la
+          revisará en un plazo aproximado de <strong>2 a 3 días hábiles</strong>.
+        </p>
+        <div style="background: #f9fafb; border-radius: 10px; padding: 16px; margin: 20px 0; border-left: 4px solid #1d4ed8;">
+          <p style="margin: 0 0 6px; font-size: 13px; color: #6b7280;">Número de solicitud</p>
+          <p style="margin: 0; font-size: 14px; font-weight: bold; color: #1f2937; font-family: monospace; word-break: break-all;">{submission_id}</p>
+          <p style="margin: 12px 0 0; font-size: 12px; color: #6b7280;">
+            Guarda este número para cualquier consulta o seguimiento.
+          </p>
+        </div>
+        <p style="font-size: 13px; color: #6b7280; line-height: 1.6;">
+          Te enviaremos un segundo correo cuando tu solicitud sea revisada y aprobada.
+          Por favor revisa tu bandeja de entrada y también la carpeta de spam.
+        </p>
+        <p style="font-size: 13px; color: #6b7280; line-height: 1.6;">
+          Si no realizaste esta solicitud o detectas algún error, por favor
+          responde a este correo.
+        </p>
+        <p style="font-size: 12px; color: #9ca3af; margin-top: 24px;">
+          Unidad de Postgrado · Facultad de Ciencias Contables, Auditoría,
+          Sistemas de Control de Gestión y Finanzas · UAGRM
+        </p>
+      </div>
+    </div>
+    """

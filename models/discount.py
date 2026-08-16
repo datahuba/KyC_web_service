@@ -159,6 +159,20 @@ class Discount(MongoBaseModel):
         None,
         description="URL del documento de resolución que respalda este descuento. None si aún no se ha subido."
     )
+
+    # F-MAESTRIA-EN-EJECUCION (2026-08-05, Kevin): flag para identificar
+    # descuentos auto-creados por el seed institucional del Organo Judicial
+    # (no fueron creados por un usuario). El frontend usa este flag para
+    # mapear automaticamente los descuentos del Excel de admitidos
+    # (0.5 → 50% interno, 1 → beca merito 100%) sin pedir confirmacion.
+    es_institucional: Optional[bool] = Field(
+        default=None,
+        description="True si este descuento fue creado por el seed institucional (no por un usuario). None = creado manualmente."
+    )
+    institucion: Optional[str] = Field(
+        default=None,
+        description="Institucion asociada al descuento institucional: 'ORGANO_JUDICIAL' | 'POSTGRADO_UAGRM' | None."
+    )
     
     # ========================================================================
     # VALIDADORES

@@ -8,8 +8,9 @@ crearles un Student + User con la convención 'Uagrm.<CI>'.
 
 Endpoints:
   PÚBLICOS (sin auth):
-    GET  /pre-registrations/public/{slug}    -> ver form por slug
-    POST /pre-registrations/public/{slug}    -> enviar submission
+    GET  /pre-registrations/public/{slug}                -> ver form por slug
+    POST /pre-registrations/public/{slug}                -> enviar submission
+    POST /pre-registrations/public/{slug}/upload-carta   -> subir carta firmada (F-2026-08-11-CAMPOS-EC-MODALIDAD)
 
   ADMIN (auth requerida):
     GET  /pre-registrations/forms            -> listar forms visibles (superadmin, admin, cpd, encargado, coord)
@@ -26,12 +27,12 @@ Endpoints:
 """
 
 import math
-from typing import Any, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from typing import Any, List, Optional
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from beanie import PydanticObjectId
 
 from models.user import User
-from models.pre_registration import PreRegistrationForm
+from models.pre_registration import PreRegistrationForm, PreRegistration
 from models.student import Student
 from models.course import Course
 from schemas.pre_registration import (
@@ -44,7 +45,8 @@ from schemas.pre_registration import (
 )
 from schemas.common import PaginatedResponse, PaginationMeta
 from services import pre_registration_service
-from api.dependencies import require_superadmin, require_cpd
+from core.cloudinary_utils import upload_document
+from api.dependencies import require_superadmin, require_cpd, require_encargado_curso
 
 router = APIRouter()
 
@@ -82,6 +84,158 @@ async def submit_public_form(slug: str, data: PreRegistrationSubmit) -> Any:
     return await _enrich_submission(sub)
 
 
+# F-2026-08-11-CAMPOS-EC-MODALIDAD: endpoint público para subir la carta
+# firmada por el director desde el wizard de preinscripción. Reusa Cloudinary
+# (ya configurado en el sistema) en lugar de guardar archivos en disco local,
+# porque (a) el sistema ya tiene Cloudinary operativo, (b) la URL resultante
+# es https pública y se puede servir directamente, (c) el contenedor se puede
+# reiniciar sin perder los archivos.
+#
+# Tipos permitidos: PDF, JPG, PNG. Tamaño max: 20MB (mismo limite que
+# upload_document de cloudinary_utils). El endpoint es público (sin auth)
+# porque el visitante del wizard no está logueado.
+@router.post(
+    "/public/{slug}/upload-carta",
+    summary="Subir carta firmada por el director (público, sin auth)"
+)
+async def upload_carta_firmada(slug: str, file: UploadFile = File(...)) -> Any:
+    """
+    Sube la carta firmada (PDF/JPG/PNG, max 20MB) a Cloudinary y devuelve
+    la URL publica que el frontend guarda en `cartaFirmadaUrl`.
+
+    Valida que el slug exista y el formulario este abierto (no requiere auth).
+    """
+    # Validar que el form exista y este abierto (reusa la misma validacion
+    # que submit_public_form)
+    try:
+        await pre_registration_service.get_public_form_by_slug(slug)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Subir a Cloudinary en folder dedicado. Reusa la funcion generica
+    # upload_document que ya valida tipo y tamaño (max 20MB).
+    try:
+        result = await upload_document(
+            file=file,
+            folder=f"pre-registrations/cartas-firmadas/{slug}",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al subir la carta firmada: {str(e)}",
+        )
+
+    return {
+        "url": result["url"],
+        "public_id": result["public_id"],
+        "resource_type": result["resource_type"],
+        "mime_type": result["mime_type"],
+        "size_bytes": result["size_bytes"],
+    }
+
+
+# F-2026-08-11-CAMPOS-EC-RESOLUCION (Kevin 22:37): el estudiante puede subir
+# opcionalmente la resolucion de BECA / DESCUENTO al que se inscribe
+# (PDF que emite Vicerrectorado aprobando el descuento). NO es la resolucion
+# del programa (eso lo emite el CPD/admin), sino la resolucion que aplica el
+# descuento del estudiante (educacion continua tiene descuentos por convenio,
+# por vinculo familiar con la UAGRM, etc).
+#
+# Es OPCIONAL porque a veces la resolucion la sube el admin despues. Pero si
+# el estudiante ya la tiene a mano, puede incluirla aca para ahorrar tiempo
+# al encargado de EC.
+#
+# Misma mecanica que upload-carta: valida que el form exista y este abierto,
+# sube a Cloudinary (folder dedicado), devuelve la URL publica.
+@router.post(
+    "/public/{slug}/upload-resolucion-beca",
+    summary="Subir resolucion de beca/descuento (publico, opcional, sin auth)"
+)
+async def upload_resolucion(slug: str, file: UploadFile = File(...)) -> Any:
+    """
+    Sube la resolucion de beca/descuento (PDF/JPG/PNG, max 20MB) a Cloudinary
+    y devuelve la URL publica que el frontend guarda en `resolucionUrl`.
+
+    Valida que el slug exista y el formulario este abierto (no requiere auth).
+    """
+    try:
+        await pre_registration_service.get_public_form_by_slug(slug)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        result = await upload_document(
+            file=file,
+            folder=f"pre-registrations/resoluciones-beca/{slug}",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al subir la resolucion de beca: {str(e)}",
+        )
+
+    return {
+        "url": result["url"],
+        "public_id": result["public_id"],
+        "resource_type": result["resource_type"],
+        "mime_type": result["mime_type"],
+        "size_bytes": result["size_bytes"],
+    }
+
+
+# F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12, reunion UAGRM):
+# el estudiante que NO es primera carrera debe subir una foto o escaneo
+# del titulo profesional. El encargado de educacion continua lo valida
+# desde el modal de detalle de la submission.
+#
+# Misma mecanica que upload-carta y upload-resolucion-beca: valida que el
+# form exista y este abierto, sube a Cloudinary (folder dedicado), devuelve
+# la URL publica que el frontend guarda en `tituloProfesionalUrl`.
+@router.post(
+    "/public/{slug}/upload-titulo",
+    summary="Subir foto del titulo profesional (publico, sin auth, requerido si NO es primer carrera)"
+)
+async def upload_titulo_profesional(slug: str, file: UploadFile = File(...)) -> Any:
+    """
+    Sube la foto del titulo profesional (PDF/JPG/PNG, max 20MB) a Cloudinary
+    y devuelve la URL publica que el frontend guarda en `tituloProfesionalUrl`.
+
+    Valida que el slug exista y el formulario este abierto (no requiere auth).
+    El estudiante solo la sube si respondio que NO es primera carrera en la
+    UAGRM (es_primer_carrera=False). El encargado de educacion continua
+    valida el documento desde el modal de detalle de la submission.
+    """
+    try:
+        await pre_registration_service.get_public_form_by_slug(slug)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        result = await upload_document(
+            file=file,
+            folder=f"pre-registrations/titulos-profesionales/{slug}",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al subir el titulo profesional: {str(e)}",
+        )
+
+    return {
+        "url": result["url"],
+        "public_id": result["public_id"],
+        "resource_type": result["resource_type"],
+        "mime_type": result["mime_type"],
+        "size_bytes": result["size_bytes"],
+    }
+
+
 # ============================================================================
 # ADMIN (auth) — prefijo /pre-registrations/forms y /pre-registrations/submissions
 # ============================================================================
@@ -91,18 +245,24 @@ async def submit_public_form(slug: str, data: PreRegistrationSubmit) -> Any:
     response_model=PaginatedResponse[PreRegistrationFormResponse],
     summary="Listar Formularios visibles para mi rol"
 )
+@router.get(
+	"/forms",
+	response_model=PaginatedResponse[PreRegistrationFormResponse],
+	summary="Listar Formularios visibles para mi rol"
+)
 async def list_forms(
-    page: int = Query(1, ge=1),
-    per_page: int = Query(20, ge=1, le=100),
-    current_user: User = Depends(require_cpd)
+	page: int = Query(1, ge=1),
+	per_page: int = Query(20, ge=1, le=100),
+	current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-FIX-COUNTERS-403: encargado_curso/coordinador tambien pueden listar forms
 ) -> Any:
     items, total = await pre_registration_service.get_forms_for_admin(
         current_user=current_user, page=page, per_page=per_page
     )
-    enriched = [await _enrich_form(f) for f in items]
+    enriched = await _enrich_forms_batch(items)
     total_pages = math.ceil(total / per_page) if total > 0 else 0
     return {
-        "data": enriched,
+        "items": enriched,
+        "data": enriched,  # alias retro-compat
         "meta": PaginationMeta(
             page=page, limit=per_page, totalItems=total, totalPages=total_pages,
             hasNextPage=(page < total_pages), hasPrevPage=(page > 1),
@@ -117,7 +277,7 @@ async def list_forms(
 )
 async def get_form(
     form_id: PydanticObjectId,
-    current_user: User = Depends(require_cpd)
+    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-FIX-COUNTERS-403: encargado_curso/coordinador tambien pueden ver forms individuales
 ) -> Any:
     form = await pre_registration_service.get_form_by_id(form_id)
     if not form:
@@ -137,11 +297,11 @@ async def get_form(
     "/forms",
     response_model=PreRegistrationFormResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Crear Formulario (solo super admin)"
+    summary="Crear Formulario (encargado EC / super admin)"
 )
 async def create_form(
     data: PreRegistrationFormCreate,
-    current_user: User = Depends(require_superadmin)
+    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-AUTOSERVICIO: encargado_curso y coordinador (educacion continua) pueden crear formularios.
 ) -> Any:
     try:
         form = await pre_registration_service.create_form(data, current_user.username)
@@ -153,12 +313,12 @@ async def create_form(
 @router.patch(
     "/forms/{form_id}",
     response_model=PreRegistrationFormResponse,
-    summary="Editar Formulario (solo super admin)"
+    summary="Editar Formulario (encargado EC / super admin)"
 )
 async def update_form(
     form_id: PydanticObjectId,
     data: PreRegistrationFormUpdate,
-    current_user: User = Depends(require_superadmin)
+    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-AUTOSERVICIO
 ) -> Any:
     try:
         form = await pre_registration_service.update_form(form_id, data)
@@ -170,11 +330,11 @@ async def update_form(
 @router.post(
     "/forms/{form_id}/close",
     response_model=PreRegistrationFormResponse,
-    summary="Cerrar Formulario manualmente (solo super admin)"
+    summary="Cerrar Formulario manualmente (encargado EC / super admin)"
 )
 async def close_form(
     form_id: PydanticObjectId,
-    current_user: User = Depends(require_superadmin)
+    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-AUTOSERVICIO
 ) -> Any:
     from schemas.pre_registration import PreRegistrationFormUpdate
     try:
@@ -187,11 +347,11 @@ async def close_form(
 @router.post(
     "/forms/{form_id}/reopen",
     response_model=PreRegistrationFormResponse,
-    summary="Reabrir Formulario (solo super admin)"
+    summary="Reabrir Formulario (encargado EC / super admin)"
 )
 async def reopen_form(
     form_id: PydanticObjectId,
-    current_user: User = Depends(require_superadmin)
+    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-AUTOSERVICIO
 ) -> Any:
     from schemas.pre_registration import PreRegistrationFormUpdate
     try:
@@ -205,11 +365,11 @@ async def reopen_form(
     "/forms/{form_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
-    summary="Eliminar Formulario (solo super admin)"
+    summary="Eliminar Formulario (encargado EC / super admin)"
 )
 async def delete_form(
     form_id: PydanticObjectId,
-    current_user: User = Depends(require_superadmin)
+    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-AUTOSERVICIO
 ):
     try:
         await pre_registration_service.delete_form(form_id)
@@ -233,15 +393,21 @@ async def list_submissions(
     per_page: int = Query(20, ge=1, le=100),
     form_id: Optional[str] = Query(None, description="Filtrar por ID de form"),
     estado: Optional[str] = Query(None, description="pendiente | aprobado | rechazado"),
-    current_user: User = Depends(require_cpd)
+    # F-2026-08-12-DESCUENTOS-TAB (Kevin 2026-08-12): si es true, devuelve
+    # solo submissions con descuento propuesto > 0. Usado por la pestana
+    # "Descuentos" del panel de pre-registros.
+    con_descuento: bool = Query(False, description="F-2026-08-12-DESCUENTOS-TAB: solo submissions con descuento propuesto > 0"),
+    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-FIX-COUNTERS-403: encargado_curso/coordinador tambien pueden listar submissions
 ) -> Any:
-    items, total = await pre_registration_service.get_submissions_for_admin(
-        current_user=current_user, form_id=form_id, estado=estado, page=page, per_page=per_page
+    items, total, forms_by_id = await pre_registration_service.get_submissions_for_admin(
+        current_user=current_user, form_id=form_id, estado=estado,
+        page=page, per_page=per_page, con_descuento=con_descuento,
     )
-    enriched = [await _enrich_submission(s) for s in items]
+    enriched = await _enrich_submissions_batch(items, preloaded_forms=forms_by_id)
     total_pages = math.ceil(total / per_page) if total > 0 else 0
     return {
-        "data": enriched,
+        "items": enriched,
+        "data": enriched,  # alias retro-compat
         "meta": PaginationMeta(
             page=page, limit=per_page, totalItems=total, totalPages=total_pages,
             hasNextPage=(page < total_pages), hasPrevPage=(page > 1),
@@ -256,7 +422,16 @@ async def list_submissions(
 )
 async def approve_submission(
     submission_id: PydanticObjectId,
-    current_user: User = Depends(require_cpd)
+    # F-FIX-PRE-REGISTROS-EC-APPROVE (2026-08-12, Kevin): el EC (encargado
+    # de curso) tiene un rol activo en el panel de pre-registros (valida
+    # titulo, valida descuento, ve detalle, etc) y DEBE poder aprobar
+    # pre-inscripciones de los cursos que le corresponden. Antes solo
+    # CPD/ADMIN/SUPERADMIN podian aprobar porque el decorador era
+    # `require_cpd`. Eso bloqueaba al EC con 403 ANTES de llegar a la
+    # logica del check de cursos_asignados que ya estaba abajo. Cambiar
+    # a `require_encargado_curso` permite al EC llegar al check, y la
+    # logica valida que la submission sea de un curso que le pertenece.
+    current_user: User = Depends(require_encargado_curso)
 ) -> Any:
     # Chequear que la submission sea visible para este rol
     from models.pre_registration import PreRegistration
@@ -291,7 +466,10 @@ async def approve_submission(
 async def reject_submission(
     submission_id: PydanticObjectId,
     body: PreRegistrationReject,
-    current_user: User = Depends(require_cpd)
+    # F-FIX-PRE-REGISTROS-EC-APPROVE (2026-08-12, Kevin): mismo fix que
+    # approve_submission. El EC debe poder rechazar pre-inscripciones
+    # de sus cursos.
+    current_user: User = Depends(require_encargado_curso)
 ) -> Any:
     from models.pre_registration import PreRegistration
     from models.enums import UserRole
@@ -323,39 +501,125 @@ async def reject_submission(
     "/counters",
     summary="Conteos globales (para badges en sidebar)"
 )
-async def counters(current_user: User = Depends(require_cpd)) -> Any:
-    return await pre_registration_service.get_forms_counters()
+async def counters(current_user: User = Depends(require_encargado_curso)) -> Any: # F-2026-08-11-EC-FIX-COUNTERS-403: encargado_curso/coordinador tambien pueden ver badges de counters
+    return await pre_registration_service.get_forms_counters(current_user)
 
 
 # ============================================================================
 # Helpers
 # ============================================================================
 
-async def _enrich_form(form: PreRegistrationForm) -> PreRegistrationFormResponse:
-    """Agrega nombre de programa y conteos para la lista admin."""
-    data = PreRegistrationFormResponse.model_validate(form, from_attributes=True)
-    if form.programa_id:
-        course = await _get_course(form.programa_id)
-        if course:
+async def _enrich_forms_batch(forms: List[PreRegistrationForm]) -> List[PreRegistrationFormResponse]:
+    """B-2026-08-22-PRE-REG-BATCH-ENRICH: enrich N forms en 2 queries (1
+    para courses, 1 aggregation para counts) en vez de 3N awaits serial.
+    Reduce /forms de ~1.3s a <0.3s.
+    """
+    if not forms:
+        return []
+
+    # 1) Recolectar ids unicos
+    form_ids: List[PydanticObjectId] = [f.id for f in forms if f.id is not None]
+    programa_ids: List[PydanticObjectId] = list({
+        f.programa_id for f in forms if f.programa_id is not None
+    })
+
+    # 2) UN query para todos los courses necesarios
+    courses_by_id: dict = {}
+    if programa_ids:
+        courses = await Course.find({"_id": {"$in": programa_ids}}).to_list()
+        courses_by_id = {c.id: c for c in courses}
+
+    # 3) UNA aggregation para total + pendientes por form (1 sola pasada a Mongo)
+    counts_by_form: dict = {fid: {"total": 0, "pendiente": 0} for fid in form_ids}
+    if form_ids:
+        pipeline = [
+            {"$match": {"form_id": {"$in": form_ids}}},
+            {"$group": {
+                "_id": {"form_id": "$form_id", "estado": "$estado"},
+                "count": {"$sum": 1},
+            }},
+        ]
+        async for row in PreRegistration.aggregate(pipeline):
+            fid = row["_id"].get("form_id")
+            estado = row["_id"].get("estado")
+            cnt = row.get("count", 0)
+            if fid in counts_by_form:
+                counts_by_form[fid]["total"] += cnt
+                if estado == "pendiente":
+                    counts_by_form[fid]["pendiente"] = cnt
+
+    # 4) Construir respuestas en memoria
+    enriched: List[PreRegistrationFormResponse] = []
+    for form in forms:
+        data = PreRegistrationFormResponse.model_validate(form, from_attributes=True)
+        if form.programa_id and form.programa_id in courses_by_id:
+            course = courses_by_id[form.programa_id]
             data.programa_nombre = course.nombre_programa
             data.programa_codigo = course.codigo
-    data.submissions_total = await _count_submissions_for_form(form.id)
-    data.submissions_pendientes = await _count_submissions_for_form(form.id, "pendiente")
-    return data
+        if form.id in counts_by_form:
+            data.submissions_total = counts_by_form[form.id]["total"]
+            data.submissions_pendientes = counts_by_form[form.id]["pendiente"]
+        enriched.append(data)
+    return enriched
+
+
+async def _enrich_submissions_batch(subs, preloaded_forms: Optional[dict] = None) -> List[PreRegistrationResponse]:
+    """B-2026-08-22-PRE-REG-BATCH-ENRICH: enrich N submissions en 1 sola
+    query (1 para courses) en vez de 2N awaits serial. Acepta
+    preloaded_forms para ahorrarse el find de forms cuando el service
+    ya los cargo. Reduce /submissions de ~8.3s a <1s.
+    """
+    if not subs:
+        return []
+
+    # 1) Si el service ya cargo los forms, usarlos. Si no, 1 query.
+    forms_by_id: dict = dict(preloaded_forms) if preloaded_forms else {}
+    missing_form_ids: List[PydanticObjectId] = list({
+        s.form_id for s in subs
+        if s.form_id is not None and s.form_id not in forms_by_id
+    })
+    if missing_form_ids:
+        forms = await PreRegistrationForm.find({"_id": {"$in": missing_form_ids}}).to_list()
+        for f in forms:
+            forms_by_id[f.id] = f
+
+    # 2) Recolectar programa_ids unicos (de los forms) y UN query para courses
+    programa_ids: List[PydanticObjectId] = list({
+        f.programa_id for f in forms_by_id.values() if f.programa_id is not None
+    })
+    courses_by_id: dict = {}
+    if programa_ids:
+        courses = await Course.find({"_id": {"$in": programa_ids}}).to_list()
+        courses_by_id = {c.id: c for c in courses}
+
+    # 3) Construir respuestas en memoria
+    enriched: List[PreRegistrationResponse] = []
+    for sub in subs:
+        data = PreRegistrationResponse.model_validate(sub, from_attributes=True)
+        form = forms_by_id.get(sub.form_id)
+        if form:
+            data.form_nombre = form.nombre
+            if form.programa_id:
+                data.programa_id = form.programa_id
+                course = courses_by_id.get(form.programa_id)
+                if course:
+                    data.programa_nombre = course.nombre_programa
+        enriched.append(data)
+    return enriched
+
+
+# Mantener wrappers single para usos puntuales (get_public_form, get_form by id,
+# submit_public_form, reject_submission) — donde solo hay 1 item y no se justifica batch.
+async def _enrich_form(form: PreRegistrationForm) -> PreRegistrationFormResponse:
+    """Single-item enrich. Usado en endpoints que devuelven 1 solo form."""
+    results = await _enrich_forms_batch([form])
+    return results[0]
 
 
 async def _enrich_submission(sub) -> PreRegistrationResponse:
-    """Agrega nombre de form y programa para la lista admin."""
-    data = PreRegistrationResponse.model_validate(sub, from_attributes=True)
-    form = await PreRegistrationForm.get(sub.form_id)
-    if form:
-        data.form_nombre = form.nombre
-        if form.programa_id:
-            data.programa_id = form.programa_id
-            course = await _get_course(form.programa_id)
-            if course:
-                data.programa_nombre = course.nombre_programa
-    return data
+    """Single-item enrich. Usado en endpoints que devuelven 1 sola submission."""
+    results = await _enrich_submissions_batch([sub])
+    return results[0]
 
 
 _course_cache: dict = {}
@@ -371,7 +635,6 @@ async def _get_course(course_id):
 
 
 async def _count_submissions_for_form(form_id, estado: Optional[str] = None) -> int:
-    from models.pre_registration import PreRegistration
     query: dict = {"form_id": form_id}
     if estado:
         query["estado"] = estado

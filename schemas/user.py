@@ -13,8 +13,8 @@ Schemas incluidos:
 
 from datetime import datetime
 from typing import Optional, List
-from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator
-from models.enums import UserRole, SubtipoCoordinador
+from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator, AliasChoices
+from models.enums import UserRole, SubtipoCoordinador, MAX_PROGRAMAS_POR_ENCARGADO
 from models.base import PyObjectId
 
 # Roles que requieren nombre_funcional obligatorio (ISSUE-R-ROLES + ISSUE-R-PERFIL-GENERICO)
@@ -27,7 +27,7 @@ _ROLES_REQUIEREN_NOMBRE_FUNCIONAL = {UserRole.ENCARGADO_CURSO, UserRole.COORDINA
 class UserCreate(BaseModel):
     """
     Schema para crear un nuevo usuario
-    
+
     Uso: POST /users/
     """
     username: str = Field(..., min_length=3, description="Nombre de usuario único")
@@ -37,7 +37,14 @@ class UserCreate(BaseModel):
     # confirmada por el usuario para docentes/personal nuevo). Si no hay carnet
     # ni password, se rechaza explícitamente (ver validador abajo).
     password: Optional[str] = Field(None, min_length=5, description="Contraseña (será hasheada). Opcional si se provee 'carnet': se autogenera como 'Uagrm.<CI>'.")
-    rol: UserRole = Field(default=UserRole.ADMIN, description="Rol de usuario")
+    # F-FIX-USERS-ROLE-OBLIGATORIO (2026-08-10, Kevin): 'rol' es OBLIGATORIO.
+    # Antes tenía default=ADMIN, lo cual causaba escalada silenciosa de
+    # privilegios: si el cliente enviaba 'role' (inglés) o cualquier typo,
+    # Pydantic lo ignoraba silenciosamente y el user se creaba como ADMIN
+    # por default. Ahora 'rol' debe especificarse explícitamente.
+    # Acepta tanto 'rol' (español, nombre interno) como 'role' (inglés, alias)
+    # para compatibilidad con clientes que usan el nombre inglés.
+    rol: UserRole = Field(..., description="Rol de usuario (obligatorio)", validation_alias=AliasChoices('rol', 'role'))
 
     # GAP-1 (audio 2026-07-08): CI del personal, usado para la contraseña por defecto.
     carnet: Optional[str] = Field(None, max_length=20, description="Carnet de Identidad (CI). Si se provee y no hay password, la contraseña inicial será 'Uagrm.<CI>'.")
@@ -86,11 +93,17 @@ class UserCreate(BaseModel):
 
     @model_validator(mode="after")
     def validar_limite_programas(self):
-        if self.rol == UserRole.ENCARGADO_CURSO and self.cursos_asignados and len(self.cursos_asignados) > 5:
-            raise ValueError("Un encargado de curso puede tener máximo 5 programas asignados")
+        # F-2026-08-11-LIMITE-10: antes 5, ahora 10 (reunión EC 2026-08-11).
+        if self.rol == UserRole.ENCARGADO_CURSO and self.cursos_asignados and len(self.cursos_asignados) > MAX_PROGRAMAS_POR_ENCARGADO:
+            raise ValueError(f"Un encargado de curso puede tener máximo {MAX_PROGRAMAS_POR_ENCARGADO} programas asignados")
         return self
 
+    # F-FIX-USERS-ROLE-OBLIGATORIO (2026-08-10, Kevin): usar populate_by_name
+    # para aceptar tanto 'rol' (español, nombre interno) como 'role' (inglés,
+    # alias). Antes, los clientes que enviaban 'role' lo hacían silenciosamente
+    # ignorado, y el default=ADMIN hacía que se creara como admin.
     model_config = {
+        "populate_by_name": True,
         "json_schema_extra": {
             "example": {
                 "username": "admin.finanzas",
@@ -104,13 +117,24 @@ class UserCreate(BaseModel):
 class UserResponse(BaseModel):
     """
     Schema para mostrar información de un usuario
-    
+
     Uso: GET /users/{id}
+
+    F-071 (2026-07-28): estandarización a `role` (inglés) en la respuesta JSON.
+    Internamente el modelo Beanie sigue usando `rol` (español), pero en la
+    respuesta HTTP el campo se serializa como `role` para coincidir con
+    `/auth/me` (CurrentUserResponse) y con lo que el frontend espera.
+    Antes el frontend usaba el fallback defensivo `user.role || user.rol`
+    porque el modelo User se serializaba como `rol` y el CurrentUserResponse
+    como `role` — inconsistencia que este cambio resuelve en backend.
     """
     id: PyObjectId = Field(..., alias="_id")
     username: str
     email: EmailStr
-    rol: UserRole
+    # F-071: `rol` (Python/Beanie) -> `role` (JSON API). populate_by_name=True
+    # permite que `from_attributes=True` lea `user.rol` del modelo, y la
+    # serialización genera el campo `role` en la respuesta.
+    rol: UserRole = Field(..., serialization_alias="role")
     activo: bool
     ultimo_acceso: Optional[datetime] = None
     created_at: datetime
@@ -120,8 +144,8 @@ class UserResponse(BaseModel):
     carnet: Optional[str] = None  # GAP-1
     subtipo_coordinador: Optional[SubtipoCoordinador] = None  # ISSUE-R-PERFIL-GENERICO
     cv_url: Optional[str] = None  # HOJA-DE-VIDA-DOCENTE
-    
-    
+
+
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True,
@@ -174,12 +198,11 @@ class UserUpdate(BaseModel):
 
     @model_validator(mode="after")
     def validar_limite_programas(self):
-        # Para UserUpdate, 'rol' puede ser None si no se envió en el PATCH, 
+        # F-2026-08-11-LIMITE-10: antes 5, ahora 10 (reunión EC 2026-08-11).
+        # Para UserUpdate, 'rol' puede ser None si no se envió en el PATCH,
         # pero asumimos que la validación completa en update_user en backend también pasará si es necesario.
-        # Aquí validamos si el rol se está enviando como ENCARGADO_CURSO explícitamente en el PATCH, 
-        # o si hay cursos_asignados > 5 (el servicio de actualización validará contra el rol existente de ser necesario).
-        if self.rol == UserRole.ENCARGADO_CURSO and self.cursos_asignados and len(self.cursos_asignados) > 5:
-            raise ValueError("Un encargado de curso puede tener máximo 5 programas asignados")
+        if self.rol == UserRole.ENCARGADO_CURSO and self.cursos_asignados and len(self.cursos_asignados) > MAX_PROGRAMAS_POR_ENCARGADO:
+            raise ValueError(f"Un encargado de curso puede tener máximo {MAX_PROGRAMAS_POR_ENCARGADO} programas asignados")
         return self
 
     model_config = {

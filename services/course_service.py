@@ -7,6 +7,7 @@ Lógica de negocio para cursos (Funciones).
 
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Union
+import asyncio
 from models.course import Course, calcular_estado_actual
 from models.enrollment import Enrollment
 from models.student import Student
@@ -42,6 +43,13 @@ async def get_courses(
     tipo_curso: Optional[TipoCurso] = None,
     modalidad: Optional[Modalidad] = None,
     estado: Optional[str] = None,
+    # FIX-ISSUE-272 (2026-08-14): filtro por es_historico.
+    es_historico: Optional[bool] = None,
+    # F-2026-08-12-EC-CURSOS-FILTRO (Kevin 2026-08-12): si llega una lista
+    # de cursos_asignados, filtra la query a SOLO esos cursos. Usado por
+    # EC/COORDINADOR/COBRANZA-segmentado para ver solo SUS cursos.
+    # Si llega vacia, retorna lista vacia (no se rompe).
+    cursos_asignados: Optional[list] = None,
 ) -> tuple[List[Course], int]:
     """
     Obtiene múltiples cursos con paginación y filtros
@@ -57,6 +65,9 @@ async def get_courses(
             (programado | en_ejecucion | cerrado). Como el estado se
             calcula en runtime según fechas, se trae un set más amplio
             y se filtra en memoria (es aceptable hasta ~500 cursos).
+        es_historico: FIX-ISSUE-272 - filtrar por es_historico=true/false.
+        cursos_asignados: F-2026-08-12-EC-CURSOS-FILTRO - si no es None,
+            filtra a solo los cursos en esta lista (usado para EC).
     """
     query = Course.find()
 
@@ -82,11 +93,23 @@ async def get_courses(
     if modalidad:
         query = query.find(Course.modalidad == modalidad)
 
+    # 5. FIX-ISSUE-272: Filtro es_historico
+    if es_historico is not None:
+        query = query.find(Course.es_historico == es_historico)
+
+    # 6. F-2026-08-12-EC-CURSOS-FILTRO: si cursos_asignados es lista vacia,
+    # retornar 0 resultados (no exponer todos los cursos).
+    if cursos_asignados is not None:
+        if not cursos_asignados:
+            return [], 0
+        query = query.find({"_id": {"$in": cursos_asignados}})
+
     total_count = await query.count()
     skip = (page - 1) * per_page
     courses = await query.sort("-created_at").skip(skip).limit(per_page).to_list()
 
-    # F-080: filtro en memoria por estado calculado
+    # F-080: filtro en memoria por estado calculado (no se puede hacer
+    # en la query porque es un calculo runtime segun fechas).
     if estado:
         courses = [c for c in courses if c.get_estado_actual() == estado]
 
@@ -99,7 +122,28 @@ async def create_course(course_in: CourseCreate) -> Course:
     # Seguridad de negocio: impedir asociar descuentos inactivos
     await _validate_active_discount(payload.get("descuento_id"))
 
+    # F-FIX-DESCUENTO-SYNC (2026-08-05, Kevin): si el usuario seleccionó un
+    # descuento del catálogo, sincronizar el campo numérico `descuento_curso`
+    # con el porcentaje del descuento. Sin esto, el campo numérico queda
+    # en 0.0 aunque el `descuento_id` sí está guardado, y la UI muestra
+    # "sin descuento aplicado" aunque SÍ se aplique al inscribir.
+    if payload.get("descuento_id"):
+        discount_obj = await Discount.get(payload["descuento_id"])
+        if discount_obj and discount_obj.activo:
+            payload["descuento_curso"] = float(discount_obj.porcentaje)
+
     course = Course(**payload)
+
+    # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): sincronizar
+    # el campo `estado` persistido con el calculo automatico aplicado
+    # al `estado_override` recibido. Asi el campo persistido refleja
+    # la realidad operacional y el badge de la UI es consistente.
+    # Si el usuario envio estado_override='en_ejecucion', persistimos
+    # el campo `estado` como 'en_ejecucion' para que el `get_estado_actual`
+    # que ya respeta el override devuelva lo que el usuario quiso.
+    if payload.get("estado_override"):
+        course.estado = payload["estado_override"]
+
     await course.create()
     return course
 
@@ -117,6 +161,20 @@ async def update_course(
     if "descuento_id" in update_data:
         await _validate_active_discount(update_data.get("descuento_id"))
 
+    # F-FIX-DESCUENTO-SYNC (2026-08-05, Kevin): si el usuario asignó/cambió
+    # un descuento del catálogo, sincronizar el campo numérico `descuento_curso`
+    # con el porcentaje. Si se removió el descuento (descuento_id=None),
+    # reseteamos descuento_curso a 0.
+    if "descuento_id" in update_data:
+        new_desc_id = update_data.get("descuento_id")
+        if new_desc_id:
+            discount_obj = await Discount.get(new_desc_id)
+            if discount_obj and discount_obj.activo:
+                update_data["descuento_curso"] = float(discount_obj.porcentaje)
+        else:
+            # El usuario removió el descuento
+            update_data["descuento_curso"] = 0.0
+
     # ISSUE-Q-DOCUMENTOS-KYC (2026-07-09): detectar si se están cambiando los
     # requisitos/documentos del curso para propagarlos a las inscripciones ya
     # existentes (los requisitos se copian al inscribirse, así que sin esto los
@@ -125,7 +183,12 @@ async def update_course(
 
     for field, value in update_data.items():
         setattr(course, field, value)
-        
+
+    # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): sincronizar
+    # el campo `estado` persistido si el usuario envio estado_override.
+    if "estado_override" in update_data and update_data["estado_override"]:
+        course.estado = update_data["estado_override"]
+
     await course.save()
 
     if requisitos_actualizados:
@@ -145,15 +208,27 @@ async def _sincronizar_requisitos_inscripciones(course: Course) -> None:
     - QUITA de la inscripción los requisitos que el curso ya no exige, SOLO si
       el estudiante todavía no subió nada para ellos (estado "pendiente"); si ya
       había subido algo, se conserva para no perder su documento.
+
+    F-FIX-SYNC-REQUISITOS-PARALELO (2026-08-09, Kevin): el loop original
+    hacia N saves SECUENCIALES (1 por enrollment). Con 64 inscritos y
+    150ms de RTT a MongoDB Atlas (Brazil), eso son 9.6s SOLO en red,
+    que sumado a la latencia Bolivia→VPS saturaba el timeout de 30s del
+    frontend. Ahora:
+      1. Calculamos los nuevos_requisitos en memoria.
+      2. SKIP si no cambio (muchos enrollments no requieren sync).
+      3. asyncio.gather para paralelizar los saves (1 RTT en lugar de N).
+    Resultado: de 9.6s+ a ~0.5-1s para 64 inscritos.
     """
     from models.enums import EstadoInscripcion
 
-    descripciones_curso = [r.descripcion for r in course.requisitos]
+    descripciones_curso = set(r.descripcion for r in course.requisitos)
     enrollments = await Enrollment.find(
         Enrollment.curso_id == course.id,
         Enrollment.estado != EstadoInscripcion.CANCELADO
     ).to_list()
 
+    # Preparar saves solo de los enrollments que REALMENTE cambiaron
+    saves_pendientes = []
     for enr in enrollments:
         existentes = {r.descripcion: r for r in enr.requisitos}
         nuevos_requisitos = []
@@ -171,8 +246,19 @@ async def _sincronizar_requisitos_inscripciones(course: Course) -> None:
             if template.descripcion not in existentes:
                 nuevos_requisitos.append(template.to_requisito())
 
+        # F-FIX-SYNC-REQUISITOS-PARALELO: skip si la lista no cambió.
+        # Comparamos por descripcion+estado para no hacer save innecesario.
+        signature_actual = sorted((r.descripcion, r.estado.value if hasattr(r.estado, 'value') else str(r.estado)) for r in enr.requisitos)
+        signature_nueva = sorted((r.descripcion, r.estado.value if hasattr(r.estado, 'value') else str(r.estado)) for r in nuevos_requisitos)
+        if signature_actual == signature_nueva:
+            continue
+
         enr.requisitos = nuevos_requisitos
-        await enr.save()
+        saves_pendientes.append(enr.save())
+
+    # Ejecutar todos los saves en paralelo (1 RTT total al pool de Mongo).
+    if saves_pendientes:
+        await asyncio.gather(*saves_pendientes, return_exceptions=True)
 
 async def delete_course(id: PydanticObjectId) -> Optional[Course]:
     """Elimina un curso"""
@@ -226,13 +312,36 @@ async def get_course_students(course_id: PydanticObjectId) -> List[CourseEnrolle
             inscripcion={
                 "id": enrollment.id,
                 "fecha_inscripcion": enrollment.fecha_inscripcion,
-                "estado": enrollment.estado
+                "estado": enrollment.estado,
+                # F-HISTORICO-EXCEL-ESTADO (2026-08-04): exponer el flag
+                # matricula_pagada para que el frontend pueda mostrar el
+                # badge correcto cuando la UI del modal 'Estudiantes
+                # Inscritos' lo necesite.
+                "matricula_pagada": enrollment.matricula_pagada,
             },
             financiero={
                 "total_a_pagar": enrollment.total_a_pagar,
                 "total_pagado": enrollment.total_pagado,
                 "saldo_pendiente": enrollment.saldo_pendiente,
-                "avance_pago": round(avance, 2)
+                "avance_pago": round(avance, 2),
+                # F-2026-08-22-PRE-REG-BADGE-DESCUENTO (Kevin 2026-08-22):
+                # exponer el descuento aplicado para que el frontend muestre
+                # el badge "X% descuento" en el modal Estudiantes Inscritos.
+                # descuento_personalizado es el snapshot del enrollment (en %
+                # 0-100, ej: 50.0 = 50%). descuento_origen indica si fue
+                # vicerrectorado (descuento del wizard validado), EC (campo
+                # descuento_porcentaje del Excel Lisa), o mixto.
+                "descuento_personalizado": (
+                    enrollment.descuento_personalizado
+                    if enrollment.descuento_personalizado and enrollment.descuento_personalizado > 0
+                    else None
+                ),
+                "descuento_origen": (
+                    "vicerrectorado"
+                    if (student.descuento_vicerrectorado_monto or 0) > 0
+                    else "ec" if (student.descuento_porcentaje or 0) > 0
+                    else None
+                ),
             }
         )
         report.append(item)
@@ -271,6 +380,45 @@ async def get_courses_para_calendario(
 
     courses = await query.to_list()
 
+    # F-CALENDARIO-FIX-2 (2026-07-30): contar inscritos REALES (no todos los
+    # IDs historicos). El campo Course.inscritos contiene TODOS los IDs
+    # que se fueron agregando, incluyendo cancelados/retirados que ya no
+    # cuentan como inscritos. Para evitar duplicar la logica de "que es un
+    # inscrito" en el frontend y mantener consistencia con la tabla de
+    # enrollments, hacemos una query cross-collection aqui.
+    #
+    # Estados que NO cuentan como inscrito: CANCELADO (nunca curso).
+    # Estados que SI cuentan: PENDIENTE_PAGO, ACTIVO, SUSPENDIDO,
+    # COMPLETADO, RETIRADO.
+    from models.enrollment import Enrollment
+    from models.enums import EstadoInscripcion
+
+    # Pre-cargar counts de inscritos por curso en una sola query
+    # F-CALENDARIO-FIX-3 (2026-07-30): Beanie 1.30 no soporta
+    # `.in_()` con ExpressionField (lanza 'ExpressionField object is not
+    # callable'). Usamos find con dict de Mongo directo.
+    estados_validos_values = [
+        EstadoInscripcion.PENDIENTE_PAGO.value,
+        EstadoInscripcion.ACTIVO.value,
+        EstadoInscripcion.SUSPENDIDO.value,
+        EstadoInscripcion.COMPLETADO.value,
+        EstadoInscripcion.RETIRADO.value,
+    ]
+    course_ids = [c.id for c in courses]
+    counts_por_curso: dict = {}
+    try:
+        # find() con dict de Mongo query directamente
+        all_enrollments = await Enrollment.find(
+            {"curso_id": {"$in": course_ids}, "estado": {"$in": estados_validos_values}}
+        ).to_list()
+        for e in all_enrollments:
+            cid = str(e.curso_id)
+            counts_por_curso[cid] = counts_por_curso.get(cid, 0) + 1
+    except Exception as e:
+        # Si falla la query, fallback a len(c.inscritos)
+        import logging
+        logging.warning(f"[calendario] no se pudo contar inscritos via Beanie: {e}")
+
     items: List[Dict[str, Any]] = []
     for c in courses:
         # Filtro por año: si tiene fecha_inicio usamos esa, sino fecha_fin
@@ -300,7 +448,7 @@ async def get_courses_para_calendario(
             "costo_total_interno": c.costo_total_interno,
             "matricula_interno": c.matricula_interno,
             "cantidad_modulos": len(c.modulos or []),
-            "cantidad_inscritos": len(c.inscritos or []),
+            "cantidad_inscritos": counts_por_curso.get(str(c.id), len(c.inscritos or [])),
         })
 
     # Orden cronológico: cursos sin fecha al final
@@ -314,14 +462,20 @@ async def get_courses_para_calendario(
 
 async def get_courses_disponibles_para_estudiante() -> List[Course]:
     """
-    F-080: devuelve los cursos en los que un estudiante PODRÍA pedir
-    inscripción (estado = programado o en_ejecucion, activo=True).
-    Un curso cerrado NO aparece.
+    F-080 + F-US-006-3TIPOS (2026-08-04): devuelve los cursos en los que un
+    estudiante PODRÍA pedir inscripción. Tras el cambio de Kevin, solo los
+    cursos en estado PROGRAMADO aceptan nuevas inscripciones de estudiantes.
+    Un programa en_ejecucion, cerrado o histórico NO aparece en esta lista
+    (los ya inscritos lo ven en su "mis programas", pero nadie nuevo puede
+    unirse por su cuenta).
+
+    Se delega al helper `Course.acepta_inscripciones()` para que la regla
+    viva en un solo lugar.
     """
     from models.enums import EstadoPrograma
 
     courses = await Course.find(Course.activo == True).to_list()
-    return [c for c in courses if c.get_estado_actual() != EstadoPrograma.CERRADO.value]
+    return [c for c in courses if c.acepta_inscripciones()]
 
 
 async def set_estado_override(

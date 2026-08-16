@@ -46,7 +46,8 @@ async def read_discounts(
     has_prev = page > 1
     
     return {
-        "data": discounts,
+        "items": discounts,
+        "data": discounts,  # alias retro-compat
         "meta": PaginationMeta(
             page=page,
             limit=per_page,

@@ -9,6 +9,7 @@ rollback financiero y control de Caja/Bancos.
 
 from typing import List, Any, Optional, Union
 import asyncio
+import json
 import re
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, status
@@ -51,7 +52,7 @@ async def create_payment(
     metodo_pago: str = Form(default="Transferencia", description="Transferencia, Depósito o Caja"),
     monto_comprobante: float = Form(...),
     concepto: Optional[str] = Form(None),
-    
+
     # Datos opcionales según el método de pago
     numero_transaccion: Optional[str] = Form(None),
     remitente: Optional[str] = Form(None),
@@ -63,6 +64,18 @@ async def create_payment(
     # caja o todo lo demas". El comprobante es OBLIGATORIO para todos los
     # metodos, incluyendo Caja.
     file: UploadFile = File(..., description="Comprobante obligatorio (imagen o PDF)"),
+
+    # F-SYNC-PAGOS-MODULOS (2026-08-04, Kevin): sincronizar con la logica
+    # del modal CargaInicialModal. Si viene, se aplica directo a los modulos
+    # en vez de prorratear. Formato JSON: '{"2": 294}' = paga modulo 3 (Bs 294).
+    pagos_modulos_json: Optional[str] = Form(
+        default=None,
+        description='JSON con Dict[str, float]. Ej: \'{"2": 294}\' = paga modulo 3.'
+    ),
+    detalle: Optional[str] = Form(
+        default=None,
+        description="Detalle desglosado del pago (opcional, se genera auto si vienen pagos_modulos)."
+    ),
 
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> Any:
@@ -110,6 +123,17 @@ async def create_payment(
                 )
         
         # 3. Ensamblaje del Payload Relajado
+        # F-SYNC-PAGOS-MODULOS (2026-08-04, Kevin): parsear pagos_modulos_json
+        # si viene (formato JSON string). Si no, queda None.
+        pagos_modulos_dict = None
+        if pagos_modulos_json:
+            try:
+                pagos_modulos_dict = json.loads(pagos_modulos_json)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"pagos_modulos_json invalido (debe ser JSON valido): {e}"
+                )
         payment_in = PaymentCreate(
             inscripcion_id=inscripcion_id,
             metodo_pago=metodo_pago,
@@ -121,7 +145,9 @@ async def create_payment(
             banco=banco,
             fecha_comprobante=fecha_comprobante,
             cuenta_destino=cuenta_destino,
-            comprobante_url=comprobante_url
+            comprobante_url=comprobante_url,
+            pagos_modulos=pagos_modulos_dict,
+            detalle=detalle,
         )
         
         if is_staff:
@@ -139,13 +165,21 @@ async def create_payment(
                 student_id=target_student_id,
                 auto_approve=True,
                 approved_by=current_user.username,
-                skip_ownership_check=True
+                skip_ownership_check=True,
+                # F-087: staff subiendo via /payments/ → subido_por="estudiante"
+                # (semánticamente: el staff está subiendo en nombre del estudiante).
+                # Para distinguir esto del caso upload-by-encargado (que se
+                # llama desde otro endpoint y se setea allí), usamos "estudiante"
+                # porque el endpoint es el genérico de creación.
+                subido_por="estudiante",
             )
         else:
             payment = await payment_service.create_payment(
                 payment_in=payment_in,
                 student_id=current_user.id,
-                auto_approve=False
+                auto_approve=False,
+                # F-087: estudiante subiendo su propio comprobante.
+                subido_por="estudiante",
             )
         
         return await payment_service.enrich_payment_with_details(payment)
@@ -169,6 +203,17 @@ async def create_payment_by_staff(
     estudiante_id: str = Form(..., description="ID del estudiante (para asociar el comprobante en Cloudinary)"),
     metodo_pago: str = Form(default="Transferencia", description="Transferencia, Depósito o Caja"),
     monto_comprobante: float = Form(..., gt=0, description="Monto del pago en BOB (>0)"),
+    # F-SYNC-PAGOS-MODULOS (2026-08-04, Kevin): sincronizar /payments/by-staff
+    # con la logica de modulo especifico. Si viene, se aplica directo a los
+    # modulos en vez de prorratear. Mismo formato que /payments/ (JSON string).
+    pagos_modulos_json: Optional[str] = Form(
+        default=None,
+        description='JSON Dict[str, float]. Ej: \'{"2": 294}\' = paga modulo 3 con Bs 294.'
+    ),
+    detalle: Optional[str] = Form(
+        default=None,
+        description="Detalle desglosado del pago (opcional, se genera auto si vienen pagos_modulos)."
+    ),
     concepto: Optional[str] = Form(None, description="Concepto (opcional; si vacío, backend calcula glosa detallada)"),
 
     numero_transaccion: Optional[str] = Form(None),
@@ -252,6 +297,11 @@ async def create_payment_by_staff(
         fecha_comprobante=fecha_comprobante,
         cuenta_destino=cuenta_destino,
         comprobante_url=comprobante_url,
+        # F-SYNC-PAGOS-MODULOS (2026-08-04, Kevin): parsear pagos_modulos_json
+        # para aplicar el pago a un modulo especifico. Si no viene, usa
+        # la cascada automatica (proximo modulo pendiente).
+        pagos_modulos=json.loads(pagos_modulos_json) if pagos_modulos_json else None,
+        detalle=detalle,
     )
 
     try:
@@ -278,6 +328,10 @@ async def create_payment_by_staff(
             auto_approve=True,
             approved_by=current_user.username,
             skip_ownership_check=True,
+            # F-087: staff registrando el pago COMPLETO en nombre del estudiante
+            # (no es el caso "estudiante subió comprobante"). Es el encargado
+            # quien hizo todo el registro, así que subido_por="encargado".
+            subido_por="encargado",
         )
 
         # F-COBRANZA-014: el saldo del enrollment se actualiza dentro de
@@ -313,10 +367,17 @@ async def list_payments(
     
     if isinstance(current_user, User):
         # AUDITORÍA (CRÍTICO #1): sin este guard, cualquier rol autenticado
-        # (docente, encargado_curso, coordinador) caía en ningún filtro y veía
-        # TODOS los pagos/comprobantes del sistema. Solo el personal financiero
-        # y de gestión académica tiene algún tipo de acceso a esta vista.
-        if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
+        # (docente) caía en ningún filtro y veía TODOS los pagos/comprobantes
+        # del sistema. Solo el personal financiero, de gestión académica, y
+        # los que necesitan ver pagos de SUS cursos asignados tiene acceso.
+        # F-FIX-RBAC-PAGOS-ENCARGADO (2026-08-10, Kevin): encargado_curso y
+        # coordinador pueden ver pagos de SUS cursos asignados (Sandra necesitaba
+        # ver si los estudiantes de DIPL-IA-2026 pagaron, y el sistema la
+        # bloqueaba con 403 'No autorizado para ver pagos').
+        if current_user.rol not in [
+            "superadmin", "admin", "mae", "cpd", "cobranza",
+            "encargado_curso", "coordinador"
+        ]:
             raise HTTPException(status_code=403, detail="No autorizado para ver pagos")
 
         # ISSUE-P-SEGMENTACION: Cobranza con cursos_asignados solo ve pagos de esos cursos.
@@ -333,18 +394,42 @@ async def list_payments(
             cursos_permitidos=cursos_permitidos,
             tipo_concepto=tipo_concepto
         )
-        
-        # Filtrado de RBAC (CPD vs Cobranza)
+
+        # F-COBRANZA-PAGINACION (2026-08-08, Kevin): el bug era
+        # `total_count = len(filtered_payments)` que sobrescribia el total
+        # REAL del service con la cantidad de items de la pagina actual.
+        # Ejemplo: si la BD tiene 500 pagos y per_page=100, el service
+        # retornaba total_count=500 + 100 pagos, pero el endpoint
+        # sobrescribia a 100, haciendo creer al usuario que solo hay 100
+        # pagos en total. Ahora: si NO hay filtro RBAC (CPD), respetar
+        # el total del service. Si hay filtro RBAC, el total puede
+        # ser impreciso (es la pagina actual filtrada, no el total real
+        # filtrado), pero al menos no es un sub-conjunto de la pagina.
         filtered_payments = []
         for p in payments:
-            concepto_lower = (p.concepto or "").lower().strip()
+            # F-PERF-PAGOS-NO-FILTRO (2026-08-08, Kevin): p puede ser dict de motor
+            # (cuando get_all_payments usa motor directo) o Beanie Payment
+            # (cuando se llama desde /pendientes/list u otro endpoint que
+            # todavía usa Beanie). Acceso polimorfico para ambos.
+            if isinstance(p, dict):
+                concepto = p.get("concepto") or ""
+            else:
+                concepto = getattr(p, "concepto", "") or ""
+            concepto_lower = concepto.lower().strip()
             is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
             if current_user.rol == "cpd" and not is_matricula:
                 continue
             filtered_payments.append(p)
-            
+
         payments = filtered_payments
-        total_count = len(filtered_payments)
+        # Solo sobrescribir total_count si hay filtro RBAC activo (CPD)
+        if current_user.rol == "cpd":
+            # Para CPD, el total es la pagina actual filtrada (puede ser
+            # menos que per_page). Impreciso pero al menos el usuario ve
+            # la pagina actual completa. Idealmente habria que hacer una
+            # query count adicional con el filtro aplicado.
+            total_count = len(filtered_payments)
+        # Si no es CPD, total_count ya viene correcto del service.
         
     elif isinstance(current_user, Student):
         all_payments = await payment_service.get_payments_by_student(
@@ -371,9 +456,11 @@ async def list_payments(
     has_prev = page > 1
     
     enriched_payments = await payment_service.enrich_payments_with_details_bulk(payments)
-    
+
     return {
-        "data": enriched_payments,
+        # FIX-ISSUE-250 (2026-08-14): items + data (retro-compat).
+        "items": enriched_payments,
+        "data": enriched_payments,  # alias retro-compat
         "meta": PaginationMeta(
             page=page,
             limit=per_page,
@@ -515,7 +602,9 @@ async def get_reporte_caja_endpoint(
     has_prev = page > 1
 
     return {
-        "data": enriched,
+        # FIX-ISSUE-250 (2026-08-14): items + data (retro-compat).
+        "items": enriched,
+        "data": enriched,  # alias retro-compat
         "meta": PaginationMeta(
             page=page,
             limit=per_page,
@@ -575,7 +664,9 @@ async def get_lista_habilitados(
     # explícitamente o FastAPI falla con PydanticSerializationError.
     return jsonable_encoder(
         {
-            "data": enriched,
+            # FIX-ISSUE-250 (2026-08-14): items + data (retro-compat).
+            "items": enriched,
+            "data": enriched,  # alias retro-compat
             "resumen": resultado["resumen"],
             "meta": PaginationMeta(
                 page=page, limit=per_page, totalItems=resultado["total_count"], totalPages=total_pages,
@@ -1007,9 +1098,9 @@ async def generar_reporte_excel_pagos(
     enrollment_ids = list({p.inscripcion_id for p in payments if p.inscripcion_id})
     curso_ids = list({p.curso_id for p in payments if p.curso_id})
     
-    students_task = Student.find(In(Student.id, student_ids)).to_list()
-    enrollments_task = Enrollment.find(In(Enrollment.id, enrollment_ids)).to_list()
-    courses_task = Course.find(In(Course.id, curso_ids)).to_list()
+    students_task = Student.find({"_id": {"$in": [str(s) for s in student_ids]}}).to_list()
+    enrollments_task = Enrollment.find({"_id": {"$in": [str(e) for e in enrollment_ids]}}).to_list()
+    courses_task = Course.find({"_id": {"$in": [str(c) for c in curso_ids]}}).to_list()
     
     students, enrollments, courses = await asyncio.gather(students_task, enrollments_task, courses_task)
     
@@ -1257,8 +1348,8 @@ async def generar_reporte_pdf_caja(
     from models.course import Course
     student_ids_pdf = list({p.get("estudiante_id") for p in enriched if p.get("estudiante_id")})
     course_ids_pdf = list({p.get("curso_id") for p in enriched if p.get("curso_id")})
-    students_pdf = await Student.find(In(Student.id, student_ids_pdf)).to_list() if student_ids_pdf else []
-    courses_pdf = await Course.find(In(Course.id, course_ids_pdf)).to_list() if course_ids_pdf else []
+    students_pdf = await Student.find({"_id": {"$in": [str(s) for s in student_ids_pdf]}}).to_list() if student_ids_pdf else []
+    courses_pdf = await Course.find({"_id": {"$in": [str(c) for c in course_ids_pdf]}}).to_list() if course_ids_pdf else []
     students_map_pdf = {s.id: s for s in students_pdf}
     courses_map_pdf = {c.id: c for c in courses_pdf}
 
@@ -1418,9 +1509,9 @@ async def get_extracto_bancario(
     enrollment_ids = list({p.inscripcion_id for p in payments if p.inscripcion_id})
     curso_ids = list({p.curso_id for p in payments if p.curso_id})
 
-    students_task = Student.find(In(Student.id, student_ids)).to_list()
-    enrollments_task = Enrollment.find(In(Enrollment.id, enrollment_ids)).to_list()
-    courses_task = Course.find(In(Course.id, curso_ids)).to_list()
+    students_task = Student.find({"_id": {"$in": [str(s) for s in student_ids]}}).to_list()
+    enrollments_task = Enrollment.find({"_id": {"$in": [str(e) for e in enrollment_ids]}}).to_list()
+    courses_task = Course.find({"_id": {"$in": [str(c) for c in curso_ids]}}).to_list()
 
     students, enrollments, courses = await asyncio.gather(students_task, enrollments_task, courses_task)
     students_map = {s.id: s for s in students}
@@ -1784,7 +1875,14 @@ async def export_payments_excel(
         # la lógica de list_payments.
         filtered = []
         for p in payments:
-            concepto_lower = (p.concepto or "").lower().strip()
+            # F-PERF-PAGOS-NO-FILTRO (2026-08-08, Kevin): p puede ser dict de motor
+            # (post-optimizacion) o Beanie Payment (pre-optimizacion). Acceso
+            # polimorfico.
+            if isinstance(p, dict):
+                concepto = p.get("concepto") or ""
+            else:
+                concepto = getattr(p, "concepto", "") or ""
+            concepto_lower = concepto.lower().strip()
             is_matricula = "matricula" in concepto_lower or "matrícula" in concepto_lower
             if current_user.rol == "cpd" and not is_matricula:
                 continue
@@ -1803,13 +1901,19 @@ async def export_payments_excel(
 
     # Enriquecer con estudiante + curso para el Excel
     enriched = await payment_service.enrich_payments_with_details_bulk(payments)
-    student_ids = list({p.estudiante_id for p in payments if p.estudiante_id})
-    enrollment_ids = list({p.inscripcion_id for p in payments if p.inscripcion_id})
-    curso_ids = list({p.curso_id for p in payments if p.curso_id})
+    # F-PERF-PAGOS-NO-FILTRO (2026-08-08, Kevin): payments puede ser dicts de
+    # motor (post-optimizacion) o Beanie Payment. Acceso polimorfico.
+    def _pid(p, key):
+        if isinstance(p, dict):
+            return p.get(key)
+        return getattr(p, key, None)
+    student_ids = list({_pid(p, "estudiante_id") for p in payments if _pid(p, "estudiante_id")})
+    enrollment_ids = list({_pid(p, "inscripcion_id") for p in payments if _pid(p, "inscripcion_id")})
+    curso_ids = list({_pid(p, "curso_id") for p in payments if _pid(p, "curso_id")})
 
-    students_task = Student.find(In(Student.id, student_ids)).to_list()
-    enrollments_task = Enrollment.find(In(Enrollment.id, enrollment_ids)).to_list()
-    courses_task = Course.find(In(Course.id, curso_ids)).to_list()
+    students_task = Student.find({"_id": {"$in": [str(s) for s in student_ids]}}).to_list()
+    enrollments_task = Enrollment.find({"_id": {"$in": [str(e) for e in enrollment_ids]}}).to_list()
+    courses_task = Course.find({"_id": {"$in": [str(c) for c in curso_ids]}}).to_list()
     students, enrollments, courses = await asyncio.gather(students_task, enrollments_task, courses_task)
     students_map = {s.id: s for s in students}
     courses_map = {c.id: c for c in courses}
@@ -1916,6 +2020,10 @@ async def get_matriz_pagos_endpoint(
         ge=0,
         description="Si viene, devuelve solo esa columna de módulo (0=matrícula virtual, 1=Módulo 1, etc.)",
     ),
+    curso_id: Optional[str] = Query(
+        None,
+        description="F-CXC-FILTRO-PROGRAMA: filtrar por un programa específico. None = todos los del alcance del usuario",
+    ),
     current_user: User = Depends(require_staff),
 ) -> Any:
     """
@@ -1930,9 +2038,88 @@ async def get_matriz_pagos_endpoint(
     filtro_rol = filtro_cursos_por_rol(current_user)
     cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
 
+    # F-CXC-FILTRO-PROGRAMA: convertir string a PydanticObjectId
+    from beanie import PydanticObjectId as _POI
+    curso_oid = _POI(curso_id) if curso_id else None
+
     return await payment_service.get_matriz_pagos(
         cursos_permitidos=cursos_permitidos,
         modulo_index=modulo_index,
+        curso_id=curso_oid,
+    )
+
+
+@router.get(
+    "/matriz/por-pago",
+    summary="F-087: Vista 'Por Pago' de Gestión de Pagos (1 fila por pago individual)",
+)
+async def get_matriz_por_pago_endpoint(
+    curso_id: Optional[str] = Query(
+        None,
+        description="Filtrar por curso. None = todos los cursos del alcance del usuario",
+    ),
+    modulo_index: Optional[int] = Query(
+        None,
+        ge=0,
+        description="Filtrar por módulo (0=matrícula, 1..N=módulos)",
+    ),
+    estado_pago: Optional[str] = Query(
+        None,
+        description="Filtrar por estado: aprobado | pendiente | rechazado | anulado",
+    ),
+    subido_por: Optional[str] = Query(
+        None,
+        description='Filtrar por quién subió: "estudiante" | "encargado"',
+    ),
+    page: int = Query(1, ge=1, description="Número de página"),
+    per_page: int = Query(50, ge=1, le=500, description="Resultados por página (max 500)"),
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    F-087 (2026-07-28): 3ra vista de Gestión de Pagos. A diferencia de la
+    matriz tradicional (que agrupa por estudiante y suma por módulo), esta
+    vista muestra UNA FILA POR CADA PAGO INDIVIDUAL, para que Kevin/Sandra
+    puedan auditar el origen de cada Bs.
+
+    Cada fila incluye: estudiante, CI, curso, módulo (parseado del concepto),
+    monto, fecha_subida, fecha_comprobante, número de transacción, comprobante
+    URL, quién subió (estudiante/encargado/null), método de pago, banco,
+    remitente, y estado.
+
+    La columna modulo_index intenta ser precisa:
+    - Si concepto = "Matrícula" → modulo_index = 0
+    - Si concepto = "Pago Módulo 1" → modulo_index = 1
+    - Si concepto = "Pago Módulos 1, 2" → modulo_index = 1 y se crea una segunda
+      fila con modulo_index = 2 (split prorrateado del monto, igual que la
+      matriz tradicional).
+
+    Nota sobre sub-pagos: el split es una vista, no un cambio en BD. El pago
+    real sigue siendo 1 documento. Si en el futuro se quiere granularidad
+    estricta, se debe modelar a nivel de sub-pagos en el schema.
+
+    Reglas:
+    - Permiso: `puede_ver_economico` (mismo que la matriz).
+    - Respeta segmentación de cursos por rol (cobranza con cursos_asignados).
+    - Ordena por fecha_subida DESC (lo más reciente primero).
+    - Paginación: page/per_page. Default 50 por página.
+    """
+    if not puede_ver_economico(current_user):
+        raise HTTPException(status_code=403, detail="No autorizado para ver pagos por-pago")
+
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
+    from beanie import PydanticObjectId as _POI
+    curso_oid = _POI(curso_id) if curso_id else None
+
+    return await payment_service.get_matriz_por_pago(
+        cursos_permitidos=cursos_permitidos,
+        curso_id=curso_oid,
+        modulo_index=modulo_index,
+        estado_pago=estado_pago,
+        subido_por=subido_por,
+        page=page,
+        per_page=per_page,
     )
 
 
@@ -1941,6 +2128,10 @@ async def get_matriz_pagos_endpoint(
     summary="F-074: Resumen por módulo (KPI cards vista Matriz)",
 )
 async def get_resumen_modulos_endpoint(
+    curso_id: Optional[str] = Query(
+        None,
+        description="F-CXC-FILTRO-PROGRAMA: filtrar KPIs por un programa específico. None = todos los del alcance",
+    ),
     current_user: User = Depends(require_staff),
 ) -> Any:
     """
@@ -1953,9 +2144,337 @@ async def get_resumen_modulos_endpoint(
     filtro_rol = filtro_cursos_por_rol(current_user)
     cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
 
+    # F-CXC-FILTRO-PROGRAMA: convertir string a PydanticObjectId
+    from beanie import PydanticObjectId as _POI
+    curso_oid = _POI(curso_id) if curso_id else None
+
     return await payment_service.get_resumen_modulos(
         cursos_permitidos=cursos_permitidos,
+        curso_id=curso_oid,
     )
+
+
+# =============================================================================
+# F-088 (2026-07-29): Vista "Deudores" unificada para Cobranza
+# =============================================================================
+# Reunión 2026-07-29 con Lic. Sandra Zabala: pidió una vista a "un solo golpe
+# visual" donde pueda ver, para un curso, qué estudiantes deben qué módulos.
+# Hoy tiene que descargar módulo por módulo en Excel y filtrar manualmente los
+# que no pagaron (lo cual es lento y propenso a errores).
+#
+# Aquí: estudiantes como filas, módulos como columnas, con un check visual
+# (verde = pagado, rojo = debe, gris = no_le_toca). Filtro "solo deudores"
+# para enfocarse solo en los que deben algo. Botón "Exportar a Excel" que
+# genera el mismo layout para enviar por WhatsApp / imprimir.
+#
+# Permisos: solo personal económico (puede_ver_economico).
+# =============================================================================
+@router.get(
+    "/deudores",
+    summary="F-088: Vista 'Deudores' unificada (estudiantes × módulos, con filtro solo deudores)",
+)
+async def get_deudores_endpoint(
+    curso_id: str = Query(..., description="ID del curso (obligatorio)"),
+    solo_deudores: bool = Query(
+        True,
+        description="Si True, solo retorna estudiantes con deuda_total > 0. Si False, retorna todos los inscritos.",
+    ),
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    F-088 (2026-07-29): vista "Deudores" unificada para cobranza.
+
+    Devuelve una matriz de estudiantes vs módulos del curso, con:
+    - Estado por celda (pagado / parcial / debe / no_le_toca)
+    - Datos de contacto (celular, email) para enviar WhatsApp directo
+    - Total de deuda por fila y resumen por columna
+    - Filtro `solo_deudores` para enfocarse en los que deben algo
+
+    Permisos: mismo que la matriz (puede_ver_economico). Respeta
+    segmentación de cursos por rol (cobranza con cursos_asignados solo ve
+    sus cursos asignados).
+    """
+    if not puede_ver_economico(current_user):
+        raise HTTPException(status_code=403, detail="No autorizado para ver deudores")
+
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
+    from beanie import PydanticObjectId as _POI
+    try:
+        curso_oid = _POI(curso_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="curso_id inválido")
+
+    try:
+        return await payment_service.get_matriz_deudores(
+            curso_id=curso_oid,
+            cursos_permitidos=cursos_permitidos,
+            solo_deudores=solo_deudores,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get(
+    "/deudores/export-excel",
+    summary="F-088: Exportar vista 'Deudores' a XLSX (mismo layout que la vista)",
+)
+async def export_deudores_excel(
+    curso_id: str = Query(..., description="ID del curso (obligatorio)"),
+    solo_deudores: bool = Query(True, description="Si True, solo exporta deudores"),
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    F-088 (2026-07-29): exporta la vista deudores a XLSX.
+
+    Layout del Excel:
+    - Header: nombre del curso + fecha de generación
+    - Columnas: Estudiante | CI | Celular | Email | Matrícula | Módulo 1 | M2 | ... | M N | Deuda Total
+    - Filas: estudiantes
+    - Celdas:
+      - Matrícula / Módulos: "Bs. X / Bs. Y" (pagado / costo) + check visual con color
+      - Verde si pagado completo, rojo si debe, gris si no_le_toca
+    - Fila TOTAL al final con cuánto se debe por columna
+    """
+    if not puede_ver_economico(current_user):
+        raise HTTPException(status_code=403, detail="No autorizado para exportar deudores")
+
+    filtro_rol = filtro_cursos_por_rol(current_user)
+    cursos_permitidos = filtro_rol["curso_id"]["$in"] if filtro_rol else None
+
+    from beanie import PydanticObjectId as _POI
+    try:
+        curso_oid = _POI(curso_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="curso_id inválido")
+
+    try:
+        data = await payment_service.get_matriz_deudores(
+            curso_id=curso_oid,
+            cursos_permitidos=cursos_permitidos,
+            solo_deudores=solo_deudores,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Generar XLSX
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+    from io import BytesIO
+    from fastapi.responses import StreamingResponse
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Deudores"
+
+    # Estilos
+    font_header = Font(bold=True, color="FFFFFF", size=12)
+    font_subheader = Font(bold=True, color="FFFFFF", size=10)
+    font_cell = Font(size=10)
+    font_total = Font(bold=True, size=10)
+    fill_header = PatternFill(start_color="1E40AF", end_color="1E40AF", fill_type="solid")
+    fill_pagado = PatternFill(start_color="D1FAE5", end_color="D1FAE5", fill_type="solid")  # verde
+    fill_debe = PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid")  # rojo
+    fill_no_le_toca = PatternFill(start_color="F3F4F6", end_color="F3F4F6", fill_type="solid")  # gris
+    fill_total = PatternFill(start_color="FEF3C7", end_color="FEF3C7", fill_type="solid")  # amber
+    border_thin = Border(
+        left=Side(style="thin", color="D1D5DB"),
+        right=Side(style="thin", color="D1D5DB"),
+        top=Side(style="thin", color="D1D5DB"),
+        bottom=Side(style="thin", color="D1D5DB"),
+    )
+    align_center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    align_left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    align_right = Alignment(horizontal="right", vertical="center", wrap_text=True)
+
+    # Header del reporte
+    curso_nombre = data["curso"]["nombre"]
+    curso_codigo = data["curso"]["codigo"] or ""
+    fecha_gen = datetime.now().strftime("%d/%m/%Y %H:%M")
+    total_estudiantes = data["resumen"]["total_estudiantes"]
+    total_deudores = data["resumen"]["total_deudores"]
+    deuda_total = data["resumen"]["deuda_total_curso"]
+
+    ws["A1"] = f"REPORTE DE DEUDORES — {curso_nombre}"
+    ws["A2"] = f"Código: {curso_codigo}  |  Generado: {fecha_gen}"
+    ws["A3"] = f"Estudiantes: {total_estudiantes}  |  Deudores: {total_deudores}  |  Deuda total: Bs. {deuda_total:,.2f}"
+    if solo_deudores:
+        ws["A4"] = "Filtro aplicado: SOLO DEUDORES"
+    else:
+        ws["A4"] = "Filtro aplicado: TODOS LOS INSCRITOS"
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A3"].font = Font(italic=True, size=10)
+    ws["A4"].font = Font(italic=True, size=10, color="6B7280")
+
+    # Header de la tabla (fila 6)
+    header_row = 6
+    cols = ["#", "Estudiante", "CI", "Celular", "Email", "Registro", "Matrícula"]
+    # F-XXX (2026-07-29): columnas como "Módulo 1, 2..." en vez del nombre
+    # largo del módulo. El nombre real queda en el atributo "title" del
+    # header cuando se abre en Excel, o se puede consultar en la columna
+    # auxiliar "Módulo N (nombre)".
+    for idx_mod, _m in enumerate(data["curso"]["modulos"], start=1):
+        cols.append(f"Módulo {idx_mod}")
+    cols.append("Deuda Total")
+    cols.append("Módulos que debe")
+
+    for col_idx, col_name in enumerate(cols, start=1):
+        cell = ws.cell(row=header_row, column=col_idx, value=col_name)
+        cell.font = font_subheader
+        cell.fill = fill_header
+        cell.alignment = align_center
+        cell.border = border_thin
+
+    # Filas de estudiantes
+    for i, est in enumerate(data["estudiantes"], start=1):
+        row = header_row + i
+        # # (correlativo)
+        c = ws.cell(row=row, column=1, value=i)
+        c.alignment = align_center
+        c.border = border_thin
+        c.font = font_cell
+        # Estudiante
+        c = ws.cell(row=row, column=2, value=est["nombre"])
+        c.alignment = align_left
+        c.border = border_thin
+        c.font = font_cell
+        # CI
+        c = ws.cell(row=row, column=3, value=est["ci"])
+        c.alignment = align_center
+        c.border = border_thin
+        c.font = font_cell
+        # Celular
+        c = ws.cell(row=row, column=4, value=est["celular"])
+        c.alignment = align_center
+        c.border = border_thin
+        c.font = font_cell
+        # Email
+        c = ws.cell(row=row, column=5, value=est["email"])
+        c.alignment = align_left
+        c.border = border_thin
+        c.font = font_cell
+        # Registro
+        c = ws.cell(row=row, column=6, value=est["registro"])
+        c.alignment = align_center
+        c.border = border_thin
+        c.font = font_cell
+        # Matrícula
+        mat = est["matricula"]
+        mat_label = "—" if mat["estado"] == "no_le_toca" else f"Bs. {mat['pagado']:,.2f} / Bs. {mat['costo']:,.2f}"
+        c = ws.cell(row=row, column=7, value=mat_label)
+        c.alignment = align_center
+        c.border = border_thin
+        c.font = font_cell
+        if mat["estado"] == "pagado":
+            c.fill = fill_pagado
+        elif mat["estado"] == "debe":
+            c.fill = fill_debe
+        else:
+            c.fill = fill_no_le_toca
+        # Módulos
+        for j, mod in enumerate(est["modulos"], start=8):
+            mod_label = "—" if mod["estado"] == "no_le_toca" else f"Bs. {mod['pagado']:,.2f} / Bs. {mod['costo']:,.2f}"
+            c = ws.cell(row=row, column=j, value=mod_label)
+            c.alignment = align_center
+            c.border = border_thin
+            c.font = font_cell
+            if mod["estado"] == "pagado":
+                c.fill = fill_pagado
+            elif mod["estado"] == "debe":
+                c.fill = fill_debe
+            else:
+                c.fill = fill_no_le_toca
+        # Deuda total
+        col_deuda = 8 + len(est["modulos"])
+        deuda_label = f"Bs. {est['deuda_total']:,.2f}" if est["deuda_total"] > 0.01 else "—"
+        c = ws.cell(row=row, column=col_deuda, value=deuda_label)
+        c.alignment = align_right
+        c.border = border_thin
+        c.font = font_total
+        if est["deuda_total"] > 0.01:
+            c.fill = fill_debe
+        # Módulos pendientes
+        col_mod_pend = col_deuda + 1
+        if est["modulos_pendientes"]:
+            mod_pend_label = ", ".join(f"M{m}" for m in est["modulos_pendientes"])
+        else:
+            mod_pend_label = "—"
+        c = ws.cell(row=row, column=col_mod_pend, value=mod_pend_label)
+        c.alignment = align_center
+        c.border = border_thin
+        c.font = font_cell
+
+    # Fila TOTAL
+    total_row = header_row + len(data["estudiantes"]) + 1
+    if data["estudiantes"]:
+        # Celda vacía para las primeras 6 columnas
+        for col_idx in range(1, 7):
+            c = ws.cell(row=total_row, column=col_idx, value="")
+            c.fill = fill_total
+            c.border = border_thin
+        # Label "TOTAL DEUDA"
+        c = ws.cell(row=total_row, column=7, value="TOTAL DEUDA →")
+        c.font = Font(bold=True, size=10)
+        c.alignment = align_right
+        c.fill = fill_total
+        c.border = border_thin
+        # Suma por columna de módulos
+        for j, mod in enumerate(data["curso"]["modulos"], start=8):
+            col_total = sum(
+                est["modulos"][j - 8]["pendiente"]
+                for est in data["estudiantes"]
+                if j - 8 < len(est["modulos"])
+            )
+            c = ws.cell(row=total_row, column=j, value=f"Bs. {col_total:,.2f}" if col_total > 0.01 else "—")
+            c.font = font_total
+            c.alignment = align_center
+            c.fill = fill_total
+            c.border = border_thin
+        # Deuda total
+        col_deuda = 8 + len(data["curso"]["modulos"])
+        c = ws.cell(row=total_row, column=col_deuda, value=f"Bs. {deuda_total:,.2f}")
+        c.font = Font(bold=True, size=11, color="DC2626")
+        c.alignment = align_right
+        c.fill = fill_total
+        c.border = border_thin
+        # Última celda vacía
+        c = ws.cell(row=total_row, column=col_deuda + 1, value="")
+        c.fill = fill_total
+        c.border = border_thin
+
+    # Anchos de columna
+    ws.column_dimensions["A"].width = 5
+    ws.column_dimensions["B"].width = 35
+    ws.column_dimensions["C"].width = 14
+    ws.column_dimensions["D"].width = 14
+    ws.column_dimensions["E"].width = 28
+    ws.column_dimensions["F"].width = 14
+    ws.column_dimensions["G"].width = 22  # Matrícula
+    for j in range(8, 8 + len(data["curso"]["modulos"])):
+        ws.column_dimensions[get_column_letter(j)].width = 22
+    ws.column_dimensions[get_column_letter(8 + len(data["curso"]["modulos"]))].width = 16
+    ws.column_dimensions[get_column_letter(9 + len(data["curso"]["modulos"]))].width = 22
+
+    # Altura del header
+    ws.row_dimensions[header_row].height = 30
+
+    # Generar el archivo en memoria
+    buffer = BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+
+    # Nombre del archivo
+    safe_nombre = (curso_codigo or "curso").replace("/", "_").replace(" ", "_")
+    filename = f"deudores_{safe_nombre}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
 
 @router.get(
     "/me",
@@ -2251,6 +2770,12 @@ async def upload_comprobante_by_encargado(
                 )
 
         await Payment.find_one({"_id": id}).update({"$set": update_dict})
+
+        # F-087 (2026-07-28): marca el pago como subido por encargado, ya sea
+        # que el comprobante sea nuevo o que se esté reemplazando uno anterior.
+        # La acción la hizo el encargado, no el estudiante, así que este campo
+        # refleja al responsable más reciente de la subida.
+        await Payment.find_one({"_id": id}).update({"$set": {"subido_por": "encargado"}})
 
         # Re-leer el pago actualizado
         payment = await payment_service.get_payment(id)

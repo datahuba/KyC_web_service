@@ -13,6 +13,28 @@ Permisos:
 
 from typing import List, Optional
 from datetime import datetime
+
+
+def _recalcular_estado_modulo(mod) -> None:
+    """
+    F-FIX-ESTADO-MODULOS-POST-DESCUENTO (2026-08-08, Kevin): cuando se cambia
+    el costo de un modulo (mod.costo), hay que recalcular su estado
+    financiero. Antes quedaba en "Parcial" aunque monto_pagado cubriera
+    el nuevo costo con descuento (caso de becados).
+
+    Reglas:
+    - monto_pagado == 0 -> Pendiente
+    - 0 < monto_pagado < costo - 0.01 -> Parcial
+    - monto_pagado >= costo - 0.01 -> Pagado
+    """
+    costo = float(mod.costo or 0.0)
+    pagado = float(mod.monto_pagado or 0.0)
+    if pagado <= 0.005:
+        mod.estado = "Pendiente"
+    elif abs(pagado - costo) < 0.01 or pagado >= costo - 0.01:
+        mod.estado = "Pagado"
+    else:
+        mod.estado = "Parcial"
 from models.enrollment import Enrollment, ModuloEstado, CargoAdicionalItemSnapshot
 from models.student import Student
 from models.course import Course
@@ -68,7 +90,12 @@ async def create_enrollment(
     # estudiante) sí valida curso.activo, pero esta vía directa (CPD/Encargado
     # de Curso) no lo hacía -- dos rutas de entrada con validación asimétrica,
     # permitiendo inscribir gente en cursos ya desactivados/cerrados.
-    if not course.activo:
+    # F-HISTORICO (2026-08-03, Kevin): los programas historicos (es_historico=True)
+    # SIEMPRE deben aceptar inscripciones, porque su proposito es cargar
+    # retroactivamente estudiantes que cursaron en el pasado. El flag activo
+    # puede estar en False (cerrado) pero es_historico=True significa que
+    # es solo para carga historica, no operativo.
+    if not course.activo and not course.es_historico:
         raise ValueError("Este curso no está activo y no acepta nuevas inscripciones")
 
     # 2. Validar que no esté ya inscrito
@@ -87,12 +114,24 @@ async def create_enrollment(
     
     # 4. Obtener precios del curso (precio único)
     costo_total = course.get_costo_total()
-    costo_matricula = course.get_matricula()
+    # F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12, reunion UAGRM):
+    # la matricula depende del tipo de estudiante (primer carrera vs
+    # profesional con titulo). El override del curso o el default global
+    # (200/500) se calcula en services/matricula_helper.py.
+    from services.matricula_helper import get_matricula_for_student
+    costo_matricula = get_matricula_for_student(course, student)
+
+    # F-HISTORICO-IMPORT (2026-08-03, Kevin): los programas historicos pueden
+    # tener cantidad_cuotas=0 (no se exige en historicos). Enrollment requiere
+    # >= 1, asi que forzamos a 1 cuando es historico y no tiene cuotas.
+    cantidad_cuotas_efectiva = course.cantidad_cuotas
+    if course.es_historico and cantidad_cuotas_efectiva < 1:
+        cantidad_cuotas_efectiva = 1
     
-    # 5. Aplicar descuento del curso 
+    # 5. Aplicar descuento del curso
     descuento_curso = 0.0
     descuento_curso_id = None
-    
+
     if course.descuento_id:
         discount_obj = await Discount.get(course.descuento_id)
         if discount_obj and discount_obj.activo:
@@ -100,13 +139,15 @@ async def create_enrollment(
             descuento_curso_id = discount_obj.id
     elif course.descuento_curso:
         descuento_curso = course.descuento_curso
-        
+
+    # Total con SOLO descuento del curso (referencia para distribución de
+    # módulos sin beca personal)
     total_con_descuento_curso = costo_total - (costo_total * descuento_curso / 100)
-    
+
     # 6. Aplicar descuento del estudiante
     descuento_personal = 0.0
     descuento_estudiante_id = None
-    
+
     if enrollment_in.descuento_id:
         discount_sel = await Discount.get(enrollment_in.descuento_id)
         if discount_sel and discount_sel.activo:
@@ -114,8 +155,13 @@ async def create_enrollment(
             descuento_estudiante_id = discount_sel.id
     elif enrollment_in.descuento_personalizado:
         descuento_personal = enrollment_in.descuento_personalizado
-        
-    colegiatura_final = total_con_descuento_curso - (total_con_descuento_curso * descuento_personal / 100)
+
+    # F-LOGICA-DESCUENTOS-MAX (2026-08-05, Kevin): "se queda con el descuento
+    # de mayor porcentaje". Si el personal es menor, gana el curso y se
+    # descarta el personal (el endpoint avisa al usuario).
+    descuento_efectivo = max(descuento_curso, descuento_personal)
+
+    colegiatura_final = costo_total - (costo_total * descuento_efectivo / 100)
 
     # ISSUE-P-CARGO-MULTIITEM: suma de todos los ítems de cargo adicional/
     # complementario al programa (ej. varios talleres incluidos). NINGÚN
@@ -183,7 +229,7 @@ async def create_enrollment(
         curso_id=enrollment_in.curso_id,
         costo_total=costo_total,
         costo_matricula=costo_matricula,
-        cantidad_cuotas=course.cantidad_cuotas,
+        cantidad_cuotas=cantidad_cuotas_efectiva,
         modulos=modulos_enrollment,
         
         descuento_curso_id=descuento_curso_id,
@@ -224,16 +270,275 @@ async def create_enrollment(
 
 
 async def enrich_enrollment_dates(enrollment: Enrollment) -> dict:
+    """
+    F-FIX-DESCONOCIDO-ENROLLMENTS (2026-08-09, Kevin): ahora joinea el nombre
+    del estudiante y del curso ademas de las fechas. El bug era que el
+    frontend mostraba "Desconocido" para IDs de estudiantes fuera de los
+    primeros 100. Ahora el endpoint /enrollments/ devuelve los nombres
+    directamente, sin necesidad de joinear en el cliente.
+
+    Para listas grandes, usar `enrich_enrollments_batch()` que hace lookup
+    con In() (1 query por coleccion) en vez de N queries individuales.
+    """
     from core.timezone_utils import utcnow_naive, to_bolivia_time
     enrollment_dict = enrollment.model_dump()
     enrollment_dict["fecha_inscripcion"] = to_bolivia_time(enrollment.fecha_inscripcion)
     enrollment_dict["created_at"] = to_bolivia_time(enrollment.created_at)
     enrollment_dict["updated_at"] = to_bolivia_time(enrollment.updated_at)
+
+    # F-LOGICA-DESCUENTOS-MAX (2026-08-05, Kevin): exponer al frontend el
+    # descuento que REALMENTE se aplicó y de dónde viene, para que pueda
+    # mostrar el mensaje "se aplicó el mayor (X%)" cuando corresponda.
+    desc_curso = float(enrollment.descuento_curso_aplicado or 0)
+    desc_personal = float(enrollment.descuento_personalizado or 0) if enrollment.descuento_personalizado is not None else 0.0
+    descuento_efectivo = max(desc_curso, desc_personal)
+    if descuento_efectivo > 0 and desc_personal > 0 and desc_curso >= desc_personal:
+        # El personal fue menor, se aplicó el curso (se descarta el personal)
+        origen = "curso"
+        advertencia = (
+            f"El descuento personal seleccionado ({desc_personal:.0f}%) es menor al "
+            f"descuento del curso ({desc_curso:.0f}%). Se aplicó el descuento de mayor "
+            f"porcentaje: el del curso ({desc_curso:.0f}%)."
+        )
+    elif descuento_efectivo > 0 and desc_personal > desc_curso:
+        origen = "personal"
+        advertencia = None
+    elif descuento_efectivo > 0 and desc_curso > 0:
+        origen = "curso"
+        advertencia = None
+    else:
+        origen = "ninguno"
+        advertencia = None
+    enrollment_dict["descuento_efectivo"] = descuento_efectivo
+    enrollment_dict["descuento_efectivo_origen"] = origen
+    enrollment_dict["advertencia_descuento"] = advertencia
+
+    # F-FIX-DESCONOCIDO-ENROLLMENTS: joinear nombre del estudiante
+    # y del curso para que el frontend NO muestre "Desconocido".
+    if enrollment.estudiante_id:
+        try:
+            from core.cache import get_students_bulk_cached
+            students_map = await get_students_bulk_cached([enrollment.estudiante_id])
+            student = students_map.get(enrollment.estudiante_id)
+            if student:
+                # student puede ser dict (de motor) o Beanie Student
+                nombre = student.get("nombre") if isinstance(student, dict) else getattr(student, "nombre", None)
+                registro = student.get("registro") if isinstance(student, dict) else getattr(student, "registro", None)
+                ci = student.get("carnet") if isinstance(student, dict) else getattr(student, "carnet", None)
+                enrollment_dict["estudiante_nombre"] = nombre
+                enrollment_dict["estudiante_registro"] = registro
+                enrollment_dict["estudiante_ci"] = ci
+            else:
+                enrollment_dict["estudiante_nombre"] = None
+                enrollment_dict["estudiante_registro"] = None
+                enrollment_dict["estudiante_ci"] = None
+        except Exception:
+            enrollment_dict["estudiante_nombre"] = None
+            enrollment_dict["estudiante_registro"] = None
+            enrollment_dict["estudiante_ci"] = None
+    else:
+        enrollment_dict["estudiante_nombre"] = None
+        enrollment_dict["estudiante_registro"] = None
+        enrollment_dict["estudiante_ci"] = None
+
+    # Joinear nombre del curso
+    if enrollment.curso_id:
+        try:
+            course = await Course.get(enrollment.curso_id)
+            if course:
+                enrollment_dict["curso_nombre"] = course.nombre_programa
+                enrollment_dict["curso_codigo"] = course.codigo
+            else:
+                enrollment_dict["curso_nombre"] = None
+                enrollment_dict["curso_codigo"] = None
+        except Exception:
+            enrollment_dict["curso_nombre"] = None
+            enrollment_dict["curso_codigo"] = None
+    else:
+        enrollment_dict["curso_nombre"] = None
+        enrollment_dict["curso_codigo"] = None
+
     return enrollment_dict
 
 
+async def enrich_enrollments_batch(enrollments: List[Enrollment]) -> List[dict]:
+    """
+    F-FIX-DESCONOCIDO-ENROLLMENTS (2026-08-09, Kevin): versión optimizada para
+    listas. Hace 2 queries batch (students + courses con In) en vez de N
+    queries individuales de enrich_enrollment_dates.
+
+    Uso: en /api/v1/enrollments/ (lista) y en cualquier endpoint que devuelva
+    multiples enrollments. Misma estructura de response que enrich_enrollment_dates.
+    """
+    if not enrollments:
+        return []
+
+    from core.timezone_utils import to_bolivia_time
+    from core.cache import get_students_bulk_cached
+
+    # Recolectar IDs unicos
+    estudiante_ids = list({e.estudiante_id for e in enrollments if e.estudiante_id})
+    curso_ids = list({e.curso_id for e in enrollments if e.curso_id})
+
+    # 1 query batch a students (con cache de F-CACHE-SHARED)
+    students_map = {}
+    if estudiante_ids:
+        try:
+            students_map = await get_students_bulk_cached(estudiante_ids)
+        except Exception:
+            students_map = {}
+
+    # 1 query batch a courses
+    courses_map: dict = {}
+    if curso_ids:
+        try:
+            courses_list = await Course.find(In(Course.id, curso_ids)).to_list()
+            for c in courses_list:
+                # Map por str(id) y por id (ObjectId) para cubrir cualquier lookup
+                key = str(c.id)
+                courses_map[key] = c
+                courses_map[c.id] = c
+        except Exception:
+            pass
+
+    enriched = []
+    for e in enrollments:
+        d = e.model_dump()
+        d["fecha_inscripcion"] = to_bolivia_time(e.fecha_inscripcion)
+        d["created_at"] = to_bolivia_time(e.created_at)
+        d["updated_at"] = to_bolivia_time(e.updated_at)
+
+        # descuento MAX (mismo que enrich_enrollment_dates)
+        desc_curso = float(e.descuento_curso_aplicado or 0)
+        desc_personal = float(e.descuento_personalizado or 0) if e.descuento_personalizado is not None else 0.0
+        descuento_efectivo = max(desc_curso, desc_personal)
+        if descuento_efectivo > 0 and desc_personal > 0 and desc_curso >= desc_personal:
+            origen = "curso"
+            advertencia = (
+                f"El descuento personal seleccionado ({desc_personal:.0f}%) es menor al "
+                f"descuento del curso ({desc_curso:.0f}%). Se aplicó el descuento de mayor "
+                f"porcentaje: el del curso ({desc_curso:.0f}%)."
+            )
+        elif descuento_efectivo > 0 and desc_personal > desc_curso:
+            origen = "personal"
+            advertencia = None
+        elif descuento_efectivo > 0 and desc_curso > 0:
+            origen = "curso"
+            advertencia = None
+        else:
+            origen = "ninguno"
+            advertencia = None
+        d["descuento_efectivo"] = descuento_efectivo
+        d["descuento_efectivo_origen"] = origen
+        d["advertencia_descuento"] = advertencia
+
+        # Joinear estudiante
+        if e.estudiante_id:
+            student = students_map.get(e.estudiante_id) or students_map.get(str(e.estudiante_id))
+            if student:
+                d["estudiante_nombre"] = student.get("nombre") if isinstance(student, dict) else getattr(student, "nombre", None)
+                d["estudiante_registro"] = student.get("registro") if isinstance(student, dict) else getattr(student, "registro", None)
+                d["estudiante_ci"] = student.get("carnet") if isinstance(student, dict) else getattr(student, "carnet", None)
+            else:
+                d["estudiante_nombre"] = None
+                d["estudiante_registro"] = None
+                d["estudiante_ci"] = None
+        else:
+            d["estudiante_nombre"] = None
+            d["estudiante_registro"] = None
+            d["estudiante_ci"] = None
+
+        # Joinear curso
+        if e.curso_id:
+            course = courses_map.get(e.curso_id) or courses_map.get(str(e.curso_id))
+            if course:
+                d["curso_nombre"] = course.nombre_programa if not isinstance(course, dict) else course.get("nombre_programa")
+                d["curso_codigo"] = course.codigo if not isinstance(course, dict) else course.get("codigo")
+            else:
+                d["curso_nombre"] = None
+                d["curso_codigo"] = None
+        else:
+            d["curso_nombre"] = None
+            d["curso_codigo"] = None
+
+        enriched.append(d)
+
+    return enriched
+
+
 async def get_enrollment(id: PydanticObjectId) -> Optional[Enrollment]:
-    return await Enrollment.get(id)
+    """
+    F-CACHE-SHARED (2026-08-08, Kevin): ahora usa el cache compartido
+    en memoria (TTL 30s) para evitar round-trip a Mongo en cada llamada.
+
+    Importante: el cache retorna un dict (de motor), NO un objeto Beanie.
+    El codigo que llama a esta funcion debe estar preparado para recibir
+    cualquiera de los dos. Beanie Enrollment tiene atributos (.id, .curso_id, etc.)
+    que el dict no tiene directamente (usa keys ['_id'], ['curso_id']).
+
+    Si necesitas acceso a campos especificos, usa .get('campo') con fallback
+    o _to_beanie() para convertir el dict a objeto Beanie.
+
+    Para mantener compatibilidad maxima, esta funcion:
+    1. Si el cache esta deshabilitado, hace Enrollment.get(id) normal
+    2. Si el cache retorna un dict, lo convierte a Enrollment con Pydantic
+       (perdida de performance minima, ~5ms por conversion)
+    3. Si no esta en cache, lo busca y guarda en cache
+    """
+    from core.cache import get_enrollment_cached, cache_enabled
+    from models.enrollment import Enrollment as _Enrollment
+
+    if not cache_enabled():
+        return await Enrollment.get(id)
+
+    cached_dict = await get_enrollment_cached(id)
+    if cached_dict is None:
+        return None
+
+    # Convertir dict a Enrollment (Beanie) para mantener compatibilidad con
+    # todos los callers que esperan un objeto Beanie (no dict).
+    try:
+        return _Enrollment(**{k: v for k, v in cached_dict.items() if k != "_found"})
+    except Exception:
+        # Si falla la conversion (schema cambio, campo nuevo requerido),
+        # caer al Enrollment.get(id) directo para no romper.
+        return await Enrollment.get(id)
+    """
+    F-CACHE-SHARED (2026-08-08, Kevin): ahora usa el cache compartido
+    en memoria (TTL 30s) para evitar round-trip a Mongo en cada llamada.
+
+    Importante: el cache retorna un dict (de motor), NO un objeto Beanie.
+    El codigo que llama a esta funcion debe estar preparado para recibir
+    cualquiera de los dos. Beanie Enrollment tiene atributos (.id, .curso_id, etc.)
+    que el dict no tiene directamente (usa keys ['_id'], ['curso_id']).
+
+    Si necesitas acceso a campos especificos, usa .get('campo') con fallback
+    o _to_beanie() para convertir el dict a objeto Beanie.
+
+    Para mantener compatibilidad maxima, esta funcion:
+    1. Si el cache esta deshabilitado, hace Enrollment.get(id) normal
+    2. Si el cache retorna un dict, lo convierte a Enrollment con Pydantic
+       (perdida de performance minima, ~5ms por conversion)
+    3. Si no esta en cache, lo busca y guarda en cache
+    """
+    if not _cache_enabled():
+        return await Enrollment.get(id)
+
+    from core.cache import get_enrollment_cached
+    from models.enrollment import Enrollment as _Enrollment
+
+    cached_dict = await get_enrollment_cached(id)
+    if cached_dict is None:
+        return None
+
+    # Convertir dict a Enrollment (Beanie) para mantener compatibilidad con
+    # todos los callers que esperan un objeto Beanie (no dict).
+    try:
+        return _Enrollment(**{k: v for k, v in cached_dict.items() if k != "_found"})
+    except Exception:
+        # Si falla la conversion (schema cambio, campo nuevo requerido),
+        # caer al Enrollment.get(id) directo para no romper.
+        return await Enrollment.get(id)
 
 
 async def get_enrollments_by_student(student_id: PydanticObjectId) -> List[Enrollment]:
@@ -365,7 +670,10 @@ async def update_enrollment_descuento(
         descuento_personalizado = enrollment.descuento_personalizado or 0.0
 
     total_con_descuento_curso = enrollment.costo_total - (enrollment.costo_total * enrollment.descuento_curso_aplicado / 100)
-    colegiatura_final = total_con_descuento_curso - (total_con_descuento_curso * descuento_personalizado / 100)
+    # F-LOGICA-DESCUENTOS-MAX (2026-08-05, Kevin): "se queda con el descuento
+    # de mayor porcentaje". Si el personal es menor, se descarta y se avisa.
+    descuento_efectivo_rec = max(enrollment.descuento_curso_aplicado, descuento_personalizado)
+    colegiatura_final = enrollment.costo_total - (enrollment.costo_total * descuento_efectivo_rec / 100)
     # ISSUE-P-CARGO-MULTIITEM: el cargo adicional (snapshot de ítems de esta
     # inscripción) se mantiene fuera del recálculo por descuento -- ningún
     # ítem recibe descuentos de curso/estudiante, se preserva íntegro.
@@ -393,6 +701,11 @@ async def update_enrollment_descuento(
             else:
                 mod.costo = round(proporcion * colegiatura_final, 2)
                 total_asignado += mod.costo
+            # F-FIX-ESTADO-MODULOS-POST-DESCUENTO (2026-08-08, Kevin): recalcular
+            # estado del modulo despues de cambiar su costo. Sin esto, los
+            # becados quedan en "Parcial" aunque monto_pagado cubra el nuevo
+            # costo con descuento.
+            _recalcular_estado_modulo(mod)
 
             if nota_minima_snapshot is not None:
                 if es_ultimo:
@@ -612,6 +925,26 @@ async def actualizar_saldo_enrollment(
     representan el estado ACADÉMICO histórico (un módulo que se pagó y luego se
     anuló queda en "Pagado" hasta que se reinscribe o se vuelve a pagar).
 
+    F-085 (2026-07-28): REVERTIR la regla F-COBRANZA-014. La fórmula
+    `total_pagado = aprobados - anulados` producía números NEGATIVOS en
+    cualquier caso donde el monto del pago anulado era mayor que el resto
+    aprobado (ej: Luis Fernando con matrícula 300 aprobado + Módulo 2940
+    anulado → total_pagado = -2640). Esto rompía 5 endpoints financieros
+    con ValidationError `total_pagado >= 0` y dejaba TODAS las páginas
+    financieras en blanco.
+
+    REGLA CORRECTA (idempotente, no produce negativos):
+      `total_pagado = sum(pagos APROBADOS)`
+    Al anular un pago aprobado, NO se resta del total — el pago simplemente
+    deja de contar en aprobados. Esto es la misma regla que aplicamos en
+    F-082 (Medardo) y F-084 (Anselmo) y es matemáticamente consistente.
+
+    El "desfase" que F-COBRANZA-014 detectó en realidad era un BUG en la
+    cascada (falla silenciosa de `actualizar_saldo_enrollment` por
+    `RevisionIdWasChanged` que NO actualizaba `total_pagado` al aprobar).
+    El fix correcto es el retry + notification (F-082), no la resta
+    posterior de anulados.
+
     OPTIMIZACIÓN DE IMPORTACIÓN MASIVA (2026-07-09, ISSUE-Q-IMPORT-TIMEOUT):
     `enrollment`/`pagos_aprobados` permiten pasar el documento y los pagos ya
     obtenidos en memoria, evitando el `Enrollment.get()` + `Payment.find()`
@@ -633,20 +966,14 @@ async def actualizar_saldo_enrollment(
             Payment.estado_pago == EstadoPago.APROBADO
         ).to_list()
 
-    # F-COBRANZA-014: también recolectar los anulados para descontarlos del total.
-    # Sin esto, `total_pagado` quedaba inflado y el reporte de caja no cuadraba
-    # con el extracto bancario.
-    pagos_anulados = await Payment.find(
-        Payment.inscripcion_id == enrollment_id,
-        Payment.estado_pago == EstadoPago.ANULADO
-    ).to_list()
+    # F-085: NO recolectar anulados ni restarlos. La regla es:
+    #   total_pagado = sum(aprobados)
+    # Los anulados ya no cuentan en aprobados (cambiaron de estado),
+    # restarlos de nuevo = doble resta = números negativos.
 
     dinero_aprobado_bruto = sum(p.cantidad_pago for p in pagos_aprobados)
-    dinero_anulado = sum(p.cantidad_pago for p in pagos_anulados)
-    # NETO = lo que realmente cuenta para "total_pagado" del enrollment y para
-    # los reportes de caja. El waterfall usa `dinero_aprobado_bruto` (estado
-    # histórico académico de los módulos).
-    dinero_neto_pagado = round(dinero_aprobado_bruto - dinero_anulado, 2)
+    # F-085: total_pagado = sum(aprobados). Sin restar anulados.
+    dinero_neto_pagado = round(dinero_aprobado_bruto, 2)
     tanque_de_agua = round(dinero_aprobado_bruto, 2)  # waterfall con aprobados
 
     # 2. Reiniciar los contadores de la inscripción a cero para reconstruirlos
@@ -688,9 +1015,8 @@ async def actualizar_saldo_enrollment(
                 tanque_de_agua = 0.0
 
     # 5. Actualizar los totales globales (Total Pagado y Saldo Pendiente)
-    # F-COBRANZA-014: usar el NETO (aprobados - anulados) en vez del bruto.
-    # Antes: enrollment.total_pagado = round(dinero_aprobado_bruto, 2) → inflaba
-    # el contador y descuadraba el reporte de caja.
+    # F-085 (2026-07-28): `total_pagado = sum(aprobados)`. NO restar anulados
+    # (la resta introducida por F-COBRANZA-014 producía números negativos).
     enrollment.total_pagado = dinero_neto_pagado
     enrollment.saldo_pendiente = max(0.0, round(enrollment.total_a_pagar - dinero_neto_pagado, 2))
     
@@ -829,8 +1155,82 @@ async def actualizar_nota_modulo(
         # No modifica ni elimina ningún registro de Payment.
         await actualizar_saldo_enrollment(enrollment_id)
         enrollment = await Enrollment.get(enrollment_id)
-    
+
     return enrollment
+
+
+# ========================================================================
+# F-FIX-DESCUENTO-ITEM (2026-08-05, Kevin): helper para recalcular el
+# total_a_pagar de un enrollment YA EXISTENTE al cual se le acaba de
+# asignar un descuento (individual o del curso). Aplica la logica MAX
+# (max entre descuento del curso y descuento personal) y redistribuye
+# el costo entre los modulos proporcionalmente.
+#
+# Usado por /courses/{id}/initial-enrollments cuando el item trae
+# descuento_id o descuento_personalizado y el estudiante ya estaba
+# inscrito (rama "existing").
+# ========================================================================
+async def _recalcular_total_enrollment(enrollment: Enrollment, course: Course) -> None:
+    """Recalcula total_a_pagar + redistribuye costo entre modulos con la logica MAX.
+
+    F-FIX-DESCUENTO-TOTAL-PAGAR (2026-08-05, Kevin): el bug era que
+    `total_a_pagar` se calculaba desde `enrollment.costo_total` (sin
+    descuento) en vez de sumar los `enrollment.modulos[].costo` (que ya
+    estan con el descuento aplicado a cada modulo). Resultado: para
+    estudiantes con 50% de descuento, total_a_pagar quedaba en 3240
+    (2940 modulos + 300 matricula, sin descuento) en vez de 1770
+    (1470 modulos con 50% + 300 matricula). El Por Cobrar del sistema
+    quedaba inflado en ~Bs 11,550 para DIPL-IA-2026 y ~Bs 23,790
+    sumando todos los programas.
+
+    Fix: total_a_pagar = SUM(modulos[].costo) + costo_matricula + cargo_adicional.
+    Si los modulos no tienen costo seteado, los redistribuimos primero
+    desde colegiatura_final (que SI incluye el descuento)."""
+    desc_curso = float(enrollment.descuento_curso_aplicado or 0)
+    desc_personal = float(enrollment.descuento_personalizado or 0) if enrollment.descuento_personalizado is not None else 0.0
+    # F-LOGICA-DESCUENTOS-MAX: el estudiante se queda con el descuento
+    # de mayor porcentaje. Si personal > curso, gana personal. Si no,
+    # gana el curso.
+    descuento_efectivo = max(desc_curso, desc_personal)
+    colegiatura_final = enrollment.costo_total - (enrollment.costo_total * descuento_efectivo / 100)
+    cargo_adicional = enrollment.get_cargo_adicional_total()
+    # Redistribuir el costo entre los modulos proporcionalmente (solo si
+    # los modulos no tienen ya el costo seteado, ej. cuando se acaba de
+    # asignar el descuento y los modulos siguen con el costo sin descuento).
+    suma_costo_modulos_actual = sum(m.costo or 0 for m in enrollment.modulos)
+    # Si los modulos tienen costo 0 o todos iguales al costo original del
+    # curso, redistribuir. Si ya tienen costos con descuento aplicados
+    # (modulos[i].costo < course.modulos[i].costo), respetarlos.
+    if enrollment.modulos and all(
+        m.costo == (course.modulos[i].costo if i < len(course.modulos) else 0)
+        for i, m in enumerate(enrollment.modulos)
+    ):
+        # Modulos sin descuento previo: redistribuir colegiatura_final
+        suma_costo_modulos = sum(m.costo for m in course.modulos)
+        total_asignado = 0.0
+        for i, mod in enumerate(enrollment.modulos):
+            es_ultimo = i == len(enrollment.modulos) - 1
+            if es_ultimo:
+                mod.costo = max(0.0, round(colegiatura_final - total_asignado, 2))
+            else:
+                if suma_costo_modulos > 0:
+                    proporcion = course.modulos[i].costo / suma_costo_modulos
+                else:
+                    proporcion = 1.0 / len(enrollment.modulos)
+                mod.costo = round(proporcion * colegiatura_final, 2)
+                total_asignado += mod.costo
+            # F-FIX-ESTADO-MODULOS-POST-DESCUENTO (2026-08-08, Kevin): recalcular
+            # estado del modulo despues de cambiar su costo.
+            _recalcular_estado_modulo(mod)
+
+    # F-FIX-DESCUENTO-TOTAL-PAGAR: total_a_pagar se calcula desde la
+    # SUMA de los costos actuales de los modulos (que ya tienen el descuento
+    # aplicado) + matricula + cargo. Esto garantiza que si los modulos
+    # fueron actualizados por separado, total_a_pagar refleja esa realidad.
+    suma_modulos_actual = sum(m.costo or 0 for m in enrollment.modulos)
+    total_final = suma_modulos_actual + enrollment.costo_matricula + cargo_adicional
+    enrollment.total_a_pagar = round(total_final, 2)
+    enrollment.saldo_pendiente = round(max(0.0, enrollment.total_a_pagar - enrollment.total_pagado), 2)
 
 
 # ========================================================================

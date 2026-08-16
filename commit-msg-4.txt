@@ -1,0 +1,8 @@
+F-AJUSTE-PAGOS-EXCEL-FIX-MONTO-VARIABLE v2: fix bug v4 que no paso monto_objetivo
+
+PROBLEMA v4 (176cd73): _crear_pagos_canonicos recibia monto_objetivo como
+parametro, pero el call site en el caso diff/completo (linea 373) NO lo
+pasaba. Resultado: monto_objetivo=None en la funcion, siempre caia en
+el camino de 6 pagos canonicos.
+
+FIX v5: pasar monto_objetivo tambien en el caso diff/completo.
