@@ -1244,7 +1244,11 @@ class TestF026ComprobanteObligatorio:
         """
         src = payments_src.read_text(encoding="utf-8")
         idx = src.find('"/",')
-        bloque = src[idx:idx + 2000]
+        # F-2026-08-11-CAMPOS-EC / F-SYNC-PAGOS-MODULOS fueron agregando
+        # parametros Form(...) y docstring a create_payment, empujando el
+        # bloque de validacion mas alla de una ventana de 2000 chars.
+        # 2800 deja margen para que el endpoint siga creciendo un poco mas.
+        bloque = src[idx:idx + 2800]
         # Debe haber un 'if not file:' que retorne 400
         assert "if not file" in bloque, "Falta validacion 'if not file'"
         # El mensaje debe decir que el comprobante es obligatorio
@@ -1262,7 +1266,13 @@ class TestF026ComprobanteObligatorio:
         """POST /payments/by-staff: file obligatorio."""
         src = payments_src.read_text(encoding="utf-8")
         idx = src.find('"/by-staff"')
-        bloque = src[idx:idx + 1500]
+        # F-SYNC-PAGOS-MODULOS agrego pagos_modulos_json/detalle a la firma,
+        # empujando "file: UploadFile" mas alla de una ventana de 1500 chars.
+        # 1800 alcanza la firma sin llegar al 'if metodo_pago != "Caja"' del
+        # BODY (valida numero_transaccion/banco, no el file — ese check sigue
+        # existiendo legitimamente y no debe confundirse con la vieja excepcion
+        # de comprobante opcional para Caja).
+        bloque = src[idx:idx + 1800]
         assert "Optional[UploadFile]" not in bloque, (
             "by-staff aun acepta file Optional"
         )
@@ -1374,7 +1384,10 @@ class TestF031EnrichAceptaDicts:
         """El codigo debe detectar dicts y NO llamar model_dump() sobre un dict."""
         src = service_src.read_text(encoding="utf-8")
         idx = src.find("async def enrich_payments_with_details_bulk")
-        bloque = src[idx:idx + 3000]
+        # F-PERF-ENRICH-FIX / F-PERF-PAGOS-NO-FILTRO fueron agregando comentarios
+        # extensos antes del loop principal, empujando el check mas alla de una
+        # ventana de 3000 chars (offset real ~3226). 4000 deja margen.
+        bloque = src[idx:idx + 4000]
         # Debe verificar isinstance(payment, dict) antes de model_dump
         assert "isinstance(payment, dict)" in bloque, (
             "enrich debe detectar si payment es dict antes de model_dump"
@@ -1465,7 +1478,10 @@ class TestF034ByStaffSkipOwnershipCheck:
     def test_by_staff_endpoint_convierte_estudiante_id_a_objectid(self, payments_src):
         """El endpoint by-staff debe convertir estudiante_id (str del Form) a PydanticObjectId."""
         idx = payments_src.read_text(encoding="utf-8").find("async def create_payment_by_staff")
-        bloque = payments_src.read_text(encoding="utf-8")[idx:idx + 6000]
+        # La conversion real esta a offset ~6127 (crecio con las validaciones
+        # de F-COBRANZA-026/F-SYNC-PAGOS-MODULOS antes de llegar ahi). 7000
+        # deja margen.
+        bloque = payments_src.read_text(encoding="utf-8")[idx:idx + 7000]
         # Verificar que hace la conversion con PydanticObjectId(estudiante_id)
         assert "PydanticObjectId(estudiante_id)" in bloque or "_POI(estudiante_id)" in bloque, (
             "El endpoint /payments/by-staff debe convertir estudiante_id (string) "

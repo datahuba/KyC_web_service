@@ -168,26 +168,28 @@ def test_pr_service_ts_declara_los_5_campos():
 # FRONTEND: pagina Svelte del wizard
 # ============================================================
 
-def test_pr_page_svelte_tiene_4_pasos():
-    """[slug]/+page.svelte: el wizard debe tener 4 pasos (1, 2, 3, 4).
-    El paso 3 nuevo es 'Datos EC (opcional)'. El paso 4 es 'Confirmar'."""
+def test_pr_page_svelte_tiene_5_pasos():
+    """[slug]/+page.svelte: el wizard tiene 5 pasos (1..5).
+    F-2026-08-12-DESCUENTO-BECA (Kevin 2026-08-12, post-reunion) inserto un
+    paso nuevo 'Título profesional' (esPrimerCarrera) como paso 4, corriendo
+    'Confirmar' de paso 4 a paso 5. El paso 3 sigue siendo 'Datos EC (opcional)'."""
     text = _read(PR_PAGE_SVELTE)
-    # Debe haber 4 bloques {#if currentStep === N}
-    for n in (1, 2, 3, 4):
+    # Debe haber 5 bloques {#if currentStep === N}
+    for n in (1, 2, 3, 4, 5):
         assert f"currentStep === {n}" in text, (
             f"[slug]/+page.svelte no tiene `{{#if currentStep === {n}}}`. "
-            f"Wizard debe tener 4 pasos (Datos EC insertado en paso 3, "
-            f"Confirmar renumerado a paso 4)."
+            f"Wizard debe tener 5 pasos (Datos EC en paso 3, Título "
+            f"profesional en paso 4, Confirmar en paso 5)."
         )
-    # El STEPS array debe tener 4 elementos
+    # El STEPS array debe tener 5 elementos
     match_steps = re.search(r"const STEPS\s*=\s*\[(.*?)\]\s*as const", text, re.DOTALL)
     assert match_steps is not None, "No encontre el array STEPS"
     steps_body = match_steps.group(1)
-    # Contar { id: N, ... } donde N es 1, 2, 3, 4
+    # Contar { id: N, ... } donde N es 1, 2, 3, 4, 5
     step_ids = re.findall(r"\{\s*id:\s*(\d+)\s*,", steps_body)
     step_ids_int = sorted(set(int(x) for x in step_ids))
-    assert step_ids_int == [1, 2, 3, 4], (
-        f"STEPS debe tener 4 elementos con id 1, 2, 3, 4. Encontrado: {step_ids_int}"
+    assert step_ids_int == [1, 2, 3, 4, 5], (
+        f"STEPS debe tener 5 elementos con id 1, 2, 3, 4, 5. Encontrado: {step_ids_int}"
     )
 
 

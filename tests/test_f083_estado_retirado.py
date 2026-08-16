@@ -179,7 +179,12 @@ class TestF083ExcluirPorCobrar:
 
     def test_get_matriz_pagos_excluye_retirado(self):
         content = read(PAYMENT_SERVICE_FILE)
-        idx = content.find("get_matriz_pagos")
+        # F-2026-08-22-PAYMENTS-MATRIZ-PERF agregó comentarios más arriba en
+        # el archivo que también mencionan "get_matriz_pagos" (referencias a
+        # las constantes de proyección), así que find() plano ya no ubica la
+        # función real. Anclamos a la definición exacta.
+        idx = content.find("async def get_matriz_pagos")
+        assert idx != -1, "F-083: no se encontró la definición de get_matriz_pagos"
         bloque = content[idx:idx + 5000]
         assert "RETIRADO" in bloque, (
             "F-083: get_matriz_pagos debe excluir RETIRADO del Por Cobrar"

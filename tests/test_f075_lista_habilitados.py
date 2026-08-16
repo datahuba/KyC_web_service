@@ -21,6 +21,7 @@ from bson import ObjectId
 
 # Importación del service
 from services import payment_service
+from core.config import settings
 
 
 def _make_payment(estado="aprobado", cantidad=294.0, concepto="Módulo 1", fecha=None, trans="12345", inscripcion_id=None):
@@ -80,6 +81,13 @@ def _make_course(curso_id, n_modulos=5, tipo="diplomado", nombre="DIPL-IA-2026")
     c.tipo_curso.value = tipo
     c.matricula_interno = 300.0
     c.costo_total_interno = 2940.0
+    # F-2026-08-12-DESCUENTO-BECA: get_matricula_for_student() ya NO lee
+    # matricula_interno, usa matricula_primer_carrera/profesional (o el
+    # default global si son None). Sin esto, MagicMock auto-crea un
+    # atributo truthy no-None para estos dos campos y float() lo castea
+    # a 1.0 (default de MagicMock.__float__), rompiendo el cálculo.
+    c.matricula_primer_carrera = None
+    c.matricula_profesional = None
     # Módulos
     modulos = []
     for i in range(n_modulos):
@@ -648,11 +656,14 @@ async def test_f077_beca_no_aplica_a_matricula():
         result = await payment_service.generar_lista_habilitados(curso_id=curso_id, modulo_index=0)
 
     row = result["rows"][0]
-    # F-074-FIX-4: la beca NO aplica a matrícula
-    # costo_total = 300 (costo original, sin descuento)
-    # costo_sin_descuento = 300 (también)
-    assert row["costo_total"] == 300.0, f"Matrícula NO debe tener descuento, fue {row['costo_total']}"
-    assert row["costo_sin_descuento"] == 300.0
-    assert row["importe"] == 300.0
-    assert row["estado_pago"] == "PAGADO"  # pagó el costo total de matrícula
+    # F-074-FIX-4: la beca NO aplica a matrícula.
+    # F-2026-08-12-DESCUENTO-BECA: el curso mock no define matricula_primer_carrera
+    # (queda None), así que get_matricula_for_student cae al default global
+    # settings.MATRICULA_PRIMER_CARRERA_DEFAULT — matricula_interno (legado)
+    # ya no interviene en este cálculo.
+    costo_matricula_esperado = settings.MATRICULA_PRIMER_CARRERA_DEFAULT
+    assert row["costo_total"] == costo_matricula_esperado, f"Matrícula NO debe tener descuento, fue {row['costo_total']}"
+    assert row["costo_sin_descuento"] == costo_matricula_esperado
+    assert row["importe"] == 300.0  # lo que efectivamente pagó el estudiante
+    assert row["estado_pago"] == "PAGADO"  # pagó >= el costo de matrícula
     assert row["monto_pendiente"] == 0.0

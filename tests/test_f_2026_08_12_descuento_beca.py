@@ -440,9 +440,14 @@ def test_34_aprobacion_setea_estado_pendiente_si_hay_descuento():
         "approve_submission debe setear descuento_vicerrectorado_monto"
     assert "descuento_vicerrectorado_estado" in bloque, \
         "approve_submission debe setear descuento_vicerrectorado_estado"
-    # Debe convertir el descuento de 0-100% (campo del wizard) a 0-1 (formato DB)
-    assert "/ 100.0" in bloque, \
-        "approve_submission debe convertir el descuento de % a 0-1 (dividir por 100)"
+    # F-FIX-DESCUENTO-DOBLE-DIVISION (Kevin 2026-08-22): la conversión de %
+    # a 0-1 ya NO se hace inline con "/ 100.0" en approve_submission (eso
+    # causaba doble división porque el frontend ya manda 0-1). Ahora se
+    # delega a _normalize_descuento(), que acepta ambos formatos.
+    assert "_normalize_descuento(" in bloque, \
+        "approve_submission debe delegar la normalización de % a _normalize_descuento()"
+    assert "/ 100.0" in src, \
+        "_normalize_descuento debe seguir convirtiendo % a 0-1 (dividir por 100) en algún lugar del archivo"
     # Si no hay descuento, estado='no_aplica'
     assert '"no_aplica"' in bloque, \
         "Si no hay descuento, estado='no_aplica'"
