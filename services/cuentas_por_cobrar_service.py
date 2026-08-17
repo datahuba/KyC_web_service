@@ -117,6 +117,24 @@ def _enrollment_excluido(e: Enrollment) -> bool:
     return e.estado in ESTADOS_EXCLUIDOS_CXC
 
 
+def _nombre_estudiante(s) -> str:
+    """Nombre mostrable de un estudiante, tolerante a datos incompletos.
+
+    Devuelve SIEMPRE un string porque el schema de salida lo exige. Orden de
+    preferencia: nombre real -> registro (util para que cobranzas igual pueda
+    identificar la fila) -> guion. Ver F-FIX-CXC-NOMBRE-NULO.
+    """
+    if s is None:
+        return "—"
+    nombre = getattr(s, "nombre", None)
+    if nombre:
+        return str(nombre)
+    registro = getattr(s, "registro", None)
+    if registro:
+        return "(sin nombre) Reg. %s" % registro
+    return "—"
+
+
 async def generar_resumen_cxc(
     current_user: User,
     curso_id: Optional[str] = None,
@@ -276,7 +294,16 @@ async def generar_resumen_cxc(
         detalle.append(CxCResumenEnrollment(
             enrollment_id=str(e.id),
             estudiante_id=str(e.estudiante_id),
-            estudiante_nombre=s.nombre if s else "—",
+            # F-FIX-CXC-NOMBRE-NULO (2026-08-16): antes era `s.nombre if s else "—"`.
+            # Esa guarda cubre que el estudiante NO EXISTA, pero no que exista
+            # con `nombre = None` — y `Student.nombre` es opcional en el modelo.
+            # Con 2 estudiantes asi en produccion (registros 99001 y 99100), el
+            # schema de salida `EnrollmentCxCOut.estudiante_nombre: str` tiraba
+            # ValidationError y el reporte COMPLETO respondia 500. Un nombre
+            # faltante en una fila no puede tumbar el reporte financiero entero.
+            # El bug estaba tapado por el timeout: antes del fix del N+1 la
+            # request nunca llegaba a serializar.
+            estudiante_nombre=_nombre_estudiante(s),
             estudiante_registro=s.registro if s else None,
             curso_id=str(e.curso_id),
             curso_nombre=curso_nombre,

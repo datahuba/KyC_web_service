@@ -83,3 +83,50 @@ class TestSinConsultaPorInscripcion:
     def test_el_bucle_lee_del_mapa_precargado(self):
         cuerpo = _cuerpo_generar_resumen()
         assert "pagos_por_inscripcion.get(e.id" in cuerpo
+
+
+class TestNombreEstudianteNulo:
+    """
+    F-FIX-CXC-NOMBRE-NULO (2026-08-16): `Student.nombre` es opcional en el
+    modelo y hay 2 estudiantes en produccion con nombre None (registros
+    99001 y 99100). El schema de salida `EnrollmentCxCOut.estudiante_nombre`
+    exige str, asi que esas 2 filas hacian fallar el reporte COMPLETO con
+    500. La guarda vieja (`s.nombre if s else "—"`) cubria que el estudiante
+    no existiera, pero no que existiera sin nombre.
+
+    El bug estaba TAPADO por el timeout: antes del fix del N+1 la request
+    nunca llegaba a serializar, asi que nadie vio nunca el 500.
+    """
+
+    def test_devuelve_string_en_todos_los_casos(self):
+        from services.cuentas_por_cobrar_service import _nombre_estudiante
+
+        class S:
+            def __init__(self, nombre, registro):
+                self.nombre = nombre
+                self.registro = registro
+
+        assert _nombre_estudiante(S("PEREZ JUAN", "123")) == "PEREZ JUAN"
+        assert isinstance(_nombre_estudiante(S(None, "99001")), str)
+        assert isinstance(_nombre_estudiante(S(None, None)), str)
+        assert isinstance(_nombre_estudiante(None), str)
+
+    def test_sin_nombre_cae_al_registro(self):
+        """Cobranzas necesita poder identificar la fila igual."""
+        from services.cuentas_por_cobrar_service import _nombre_estudiante
+
+        class S:
+            nombre = None
+            registro = "99001"
+
+        assert "99001" in _nombre_estudiante(S())
+
+    def test_nombre_vacio_tambien_cae_al_fallback(self):
+        """'' es falsy pero pasaria un chequeo `is not None`."""
+        from services.cuentas_por_cobrar_service import _nombre_estudiante
+
+        class S:
+            nombre = ""
+            registro = "77"
+
+        assert _nombre_estudiante(S()) != ""
