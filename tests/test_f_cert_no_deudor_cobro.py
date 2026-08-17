@@ -341,43 +341,36 @@ class TestMembrete:
         # existentes...") repetia la facultad; ya no debe estar.
         assert "revisando los registros" not in texto
 
-    def test_el_alcance_solo_aparece_si_es_parcial(self):
+    def test_el_documento_no_acota_el_alcance(self):
         """
-        La redaccion que dicto Kevin afirma que no hay deuda "del programa
-        mencionado", sin mas. Eso es correcto SOLO cuando el certificado
-        cubre el programa entero.
+        F-CERT-SIN-ALCANCE (Kevin 2026-08-17): "que el texto 'hasta el modulo
+        1' se elimine y quede lo demas pero que sea coherente lo que queda".
 
-        Si cubre hasta el modulo N de un total mayor hay que decirlo: sin esa
-        aclaracion el documento afirmaria que el estudiante no debe nada de un
-        programa que todavia esta pagando.
+        DECISION DE NEGOCIO, no un descuido: se le señalo que un certificado
+        emitido con alcance parcial (modulo 1 de 5) queda afirmando que el
+        estudiante no debe nada del programa COMPLETO, y aun asi pidio
+        sacarlo. Si algun dia se quiere volver atras, el dato sigue estando
+        en `hasta_modulo_n`; lo unico que se saco es imprimirlo.
         """
         from pypdf import PdfReader
 
-        def texto_de(hasta_n):
+        for hasta_n in (1, 3, 5):
             pdf = cs.render_pdf_no_deudor_membretado(
                 student=_student(), course=_course(), enrollment=_enrollment(n_modulos=5),
-                hasta_modulo_n=hasta_n, folio="N° 043/2026",
+                hasta_modulo_n=hasta_n, folio="N° 007/2026",
                 emitido_en=datetime(2026, 8, 17, tzinfo=timezone.utc),
             )
-            return (PdfReader(io.BytesIO(pdf)).pages[0].extract_text() or "").replace("\n", " ")
+            texto = (PdfReader(io.BytesIO(pdf)).pages[0].extract_text() or "").replace("\n", " ")
+            assert "hasta el Módulo" not in texto, (
+                "con hasta_modulo_n=%d volvio a aparecer el alcance" % hasta_n
+            )
+            assert "del programa mencionado" in texto
 
-        completo = texto_de(5)
-        assert "del programa mencionado" in completo
-        assert "hasta el Módulo" not in completo, (
-            "cubriendo todo el programa no corresponde acotar el alcance"
-        )
-
-        parcial = texto_de(3)
-        assert "hasta el Módulo 3" in parcial, (
-            "un certificado parcial DEBE decir hasta que modulo cubre"
-        )
-
-    def test_sin_fechas_de_modulo_no_queda_un_guion_suelto(self):
+    def test_no_queda_ningun_resto_del_alcance_borrado(self):
         """
-        BUG REAL, encontrado mirando el certificado N° 007/2026 ya emitido a
-        un estudiante: el modulo no tenia fechas cargadas, el helper de rango
-        devolvia "—" y el documento oficial salia diciendo
-        'hasta el Modulo 1 (—)'. Sin fechas, el parentesis se omite entero.
+        Al sacar la frase podia quedar basura: un parentesis vacio, un guion
+        suelto o un espacio doble. El "(—)" es el que ya salio impreso una vez
+        en el certificado N° 007/2026, con modulos sin fechas cargadas.
         """
         from pypdf import PdfReader
 
@@ -391,21 +384,13 @@ class TestMembrete:
             emitido_en=datetime(2026, 8, 17, tzinfo=timezone.utc),
         )
         texto = (PdfReader(io.BytesIO(pdf)).pages[0].extract_text() or "").replace("\n", " ")
-        assert "(—)" not in texto, "quedo el rango vacio entre parentesis"
+        assert "(—)" not in texto
         assert "( )" not in texto
-        assert "Módulo 1" in texto
-
-    def test_con_fechas_el_rango_si_aparece(self):
-        """El arreglo no debe borrar el rango cuando las fechas SI existen."""
-        from pypdf import PdfReader
-
-        pdf = cs.render_pdf_no_deudor_membretado(
-            student=_student(), course=_course(), enrollment=_enrollment(),
-            hasta_modulo_n=1, folio="N° 008/2026",
-            emitido_en=datetime(2026, 8, 17, tzinfo=timezone.utc),
-        )
-        texto = (PdfReader(io.BytesIO(pdf)).pages[0].extract_text() or "").replace("\n", " ")
-        assert "01/03/2026" in texto
+        assert "()" not in texto
+        # La frase tiene que leerse corrida, sin dobles espacios donde estaba
+        # el alcance.
+        assert "PENDIENTE  del" not in texto
+        assert "NO TIENE DEUDA ECONÓMICA PENDIENTE del programa mencionado" in texto
 
     def test_la_facultad_tiene_el_nombre_correcto(self):
         """
