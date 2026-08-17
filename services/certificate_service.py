@@ -946,7 +946,21 @@ def render_pdf_no_deudor_membretado(
     elements.append(Paragraph("CERTIFICA:", styles["certifica_label"]))
 
     ci_full = _format_ci_full(student.carnet, student.extension, student.complemento_carnet)
-    nombre_impreso = _nombre_con_tratamiento(student.nombre or "", tratamiento)
+
+    # Se conserva la ESTRUCTURA del formato original (nombre centrado en su
+    # propia línea, programa destacado en su recuadro, y la frase de no deuda
+    # resaltada): Kevin lo pidió explícitamente, "lo quiero así pero con el
+    # texto cambiado". Lo que cambia es la redacción.
+    #
+    # De paso desaparece la segunda mención a la facultad, que antes venía en
+    # el "Que, revisando los registros de pagos existentes en la Unidad de
+    # Postgrado de la FACULTAD...".
+    elements.append(Paragraph("Que el o la postgraduante:", styles["cuerpo"]))
+    elements.append(Paragraph(
+        f"<b>{_nombre_con_tratamiento(student.nombre or '', tratamiento)}</b><br/>"
+        f"CI. {ci_full}.",
+        styles["cuerpo_centrado"],
+    ))
 
     # Se mantiene en mayúsculas como en el formato original. Solo se
     # normalizan los espacios de más, que vienen en los datos ("APLICADA A
@@ -954,14 +968,16 @@ def render_pdf_no_deudor_membretado(
     nombre_programa = re.sub(r"\s+", " ", (course.nombre_programa or "").strip()).upper()
     partes_programa = [nombre_programa]
     if course.codigo:
-        partes_programa.append(f"({course.codigo})")
-    programa_impreso = " ".join(partes_programa)
+        partes_programa.append(f"CÓDIGO {course.codigo}")
+    elements.append(Paragraph("Del programa:", styles["cuerpo"]))
+    elements.append(Paragraph(" ".join(partes_programa), styles["caja_programa"]))
+    elements.append(Spacer(1, 4 * mm))
 
-    # Alcance. La redacción que pidió Kevin afirma que no hay deuda "del
+    # Alcance. La redacción que dictó Kevin afirma que no hay deuda "del
     # programa mencionado", sin más. Eso es correcto SOLO cuando el
     # certificado cubre el programa entero; si cubre hasta el módulo N de un
-    # total mayor, hay que decirlo, porque si no el documento afirmaría que
-    # no debe nada de un programa que todavía está pagando.
+    # total mayor hay que decirlo, porque si no el documento afirmaría que el
+    # estudiante no debe nada de un programa que todavía está pagando.
     total = len(enrollment.modulos)
     if hasta_modulo_n >= total:
         alcance = ""
@@ -978,14 +994,11 @@ def render_pdf_no_deudor_membretado(
         alcance = f" hasta el <b>Módulo {hasta_modulo_n}</b>{detalle_rango}"
 
     elements.append(Paragraph(
-        f"Que el o la postgraduante <b>{nombre_impreso}</b>, con C.I. {ci_full}, "
-        f"del programa <b>{programa_impreso}</b>, "
-        f'<b>no tiene deuda económica pendiente</b>{alcance} del programa mencionado, '
+        f"<b>NO TIENE DEUDA ECONÓMICA PENDIENTE</b>{alcance} del programa mencionado, "
         f"de acuerdo al compromiso de pago firmado con la Unidad de Postgrado.",
-        styles["cuerpo"],
+        styles["no_deudor_enfasis"],
     ))
 
-    elements.append(Spacer(1, 4 * mm))
     elements.append(Paragraph(
         f"{UAGRM_CIUDAD}, {_format_fecha_larga_es(emitido_en)}.",
         styles["cuerpo"],
