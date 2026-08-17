@@ -31,6 +31,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, 
 from fastapi.responses import StreamingResponse
 
 from api.dependencies import get_current_user
+from core.config import settings
 from models.certificate import Certificate
 from models.certificate_request import CertificateRequest
 from models.enums import TipoCertificado
@@ -419,6 +420,28 @@ async def list_certificates_admin(
         items=[_serializar_cert(c) for c in certs],
         total=total,
     )
+
+
+@router.get(
+    "/arancel-no-deudor",
+    summary="Arancel vigente del Certificado de No Deudor",
+    description=(
+        "Devuelve cuánto cuesta hoy el Certificado de No Deudor "
+        "(F-CERT-NO-DEUDOR-COBRO). Existe para que la pantalla del estudiante "
+        "pueda mostrar el precio ANTES de que solicite, sin hardcodearlo: el "
+        "monto vive en la config del servidor y es provisorio."
+    ),
+)
+async def arancel_no_deudor(
+    current_user: Union[Student, User] = Depends(get_current_user),
+) -> dict:
+    # OJO: esta ruta tiene que declararse ANTES de `/{cert_id}`, que es de un
+    # solo segmento y si no se la comería como si "arancel-no-deudor" fuera
+    # un id de certificado.
+    return {
+        "monto": settings.MONTO_CERTIFICADO_NO_DEUDOR,
+        "moneda": "Bs",
+    }
 
 
 @router.get(
