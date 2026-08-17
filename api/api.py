@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from api import students, courses, enrollments, payments, discounts, users, auth, payment_config, classroom, notifications, account_requests, passive_requests, bank_statements, enrollment_requests, dashboard, pre_registrations, admin, admin_data_health, admin_accounting, certificates, reports, tramite_solicitudes, comunicados, asistencia  # F-2026-08-11-ASISTENCIA: registro de asistencia por sesion/clase
+from api import students, courses, enrollments, payments, discounts, users, auth, payment_config, classroom, notifications, account_requests, passive_requests, bank_statements, enrollment_requests, dashboard, pre_registrations, admin, admin_data_health, admin_accounting, certificates, reports, tramite_solicitudes, comunicados, asistencia, bug_reports  # F-2026-08-11-ASISTENCIA: registro de asistencia por sesion/clase
 
 api_router = APIRouter()
 
@@ -33,6 +33,8 @@ api_router.include_router(certificates.router, prefix="/certificates", tags=["ce
 api_router.include_router(tramite_solicitudes.router, prefix="/tramites", tags=["tramites"])
 # F-CUENTAS-POR-COBRAR (2026-07-29): reporte de CxC real vs estimada.
 api_router.include_router(reports.router, prefix="/reports", tags=["reports"])
+# F-REPORTE-BUGS (2026-08-17): el staff reporta errores desde la app
+api_router.include_router(bug_reports.router, prefix="/bug-reports", tags=["bug-reports"])
 # US-003 (2026-08-03): Comunicados. Anuncios oficiales del personal a estudiantes
 # con pop-up al primer login. Audiencia: solo estudiantes.
 api_router.include_router(comunicados.router, prefix="/comunicados", tags=["comunicados"])
