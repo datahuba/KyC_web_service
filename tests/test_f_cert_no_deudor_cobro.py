@@ -340,6 +340,41 @@ class TestMembrete:
         texto = (PdfReader(io.BytesIO(pdf)).pages[0].extract_text() or "").replace("\n", " ")
         assert "total del costo" in texto
 
+    def test_sin_fechas_de_modulo_no_queda_un_guion_suelto(self):
+        """
+        BUG REAL, encontrado mirando el certificado N° 007/2026 ya emitido a
+        un estudiante: el modulo no tenia fechas cargadas, el helper de rango
+        devolvia "—" y el documento oficial salia diciendo
+        'hasta el Modulo 1 (—)'. Sin fechas, el parentesis se omite entero.
+        """
+        from pypdf import PdfReader
+
+        sin_fechas = _Obj(modulos=[
+            _Obj(nombre=f"Modulo {i}", estado="Pagado", fecha_inicio=None, fecha_fin=None)
+            for i in range(1, 6)
+        ])
+        pdf = cs.render_pdf_no_deudor_membretado(
+            student=_student(), course=_course(), enrollment=sin_fechas,
+            hasta_modulo_n=1, folio="N° 007/2026",
+            emitido_en=datetime(2026, 8, 17, tzinfo=timezone.utc),
+        )
+        texto = (PdfReader(io.BytesIO(pdf)).pages[0].extract_text() or "").replace("\n", " ")
+        assert "(—)" not in texto, "quedo el rango vacio entre parentesis"
+        assert "( )" not in texto
+        assert "Módulo 1" in texto
+
+    def test_con_fechas_el_rango_si_aparece(self):
+        """El arreglo no debe borrar el rango cuando las fechas SI existen."""
+        from pypdf import PdfReader
+
+        pdf = cs.render_pdf_no_deudor_membretado(
+            student=_student(), course=_course(), enrollment=_enrollment(),
+            hasta_modulo_n=1, folio="N° 008/2026",
+            emitido_en=datetime(2026, 8, 17, tzinfo=timezone.utc),
+        )
+        texto = (PdfReader(io.BytesIO(pdf)).pages[0].extract_text() or "").replace("\n", " ")
+        assert "01/03/2026" in texto
+
     def test_si_falta_el_membrete_se_emite_igual(self):
         """
         Un despliegue al que le falte assets/ no deberia dejar a la unidad

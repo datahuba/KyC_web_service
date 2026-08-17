@@ -796,12 +796,18 @@ def render_pdf_no_deudor(
             'del mencionado programa de acuerdo al compromiso de pago firmado con la Unidad de Postgrado.'
         )
     else:
+        # Mismo BUG-FIX que en la versión membretada (2026-08-17): sin fechas
+        # cargadas el rango sale "—" y quedaba un "(—)" suelto en el
+        # documento oficial.
+        rango = _format_rango_modulo(
+            getattr(enrollment.modulos[hasta_modulo_n - 1], "fecha_inicio", None),
+            getattr(enrollment.modulos[hasta_modulo_n - 1], "fecha_fin", None),
+        )
+        detalle_rango = f" ({rango})" if rango and rango != "—" else ""
         texto_no_deuda = (
-            f'<b>"NO TIENE DEUDA ECONOMICA PENDIENTE"</b> hasta el <b>Módulo {hasta_modulo_n}</b> '
-            f'({_format_rango_modulo(
-                getattr(enrollment.modulos[hasta_modulo_n - 1], "fecha_inicio", None),
-                getattr(enrollment.modulos[hasta_modulo_n - 1], "fecha_fin", None),
-            )}) del mencionado programa, de acuerdo al compromiso de pago firmado con la Unidad de Postgrado.'
+            f'<b>"NO TIENE DEUDA ECONOMICA PENDIENTE"</b> hasta el <b>Módulo {hasta_modulo_n}</b>'
+            f'{detalle_rango} del mencionado programa, de acuerdo al compromiso de pago '
+            f'firmado con la Unidad de Postgrado.'
         )
     elements.append(Paragraph(texto_no_deuda, styles["no_deudor_enfasis"]))
 
@@ -908,13 +914,19 @@ def render_pdf_no_deudor_membretado(
             'del mencionado programa de acuerdo al compromiso de pago firmado con la Unidad de Postgrado.'
         )
     else:
+        # BUG-FIX (2026-08-17): si el módulo no tiene fechas cargadas,
+        # `_format_rango_modulo` devuelve "—" y el certificado salía diciendo
+        # "hasta el Módulo 1 (—)". Se vio en el certificado N° 007/2026, ya
+        # emitido a un estudiante real. Cuando no hay rango, el paréntesis
+        # entero se omite en vez de imprimir un guion suelto.
         rango = _format_rango_modulo(
             getattr(enrollment.modulos[hasta_modulo_n - 1], "fecha_inicio", None),
             getattr(enrollment.modulos[hasta_modulo_n - 1], "fecha_fin", None),
         )
+        detalle_rango = f" ({rango})" if rango and rango != "—" else ""
         texto_no_deuda = (
-            f'<b>"NO TIENE DEUDA ECONOMICA PENDIENTE"</b> hasta el <b>Módulo {hasta_modulo_n}</b> '
-            f'({rango}) del mencionado programa, de acuerdo al compromiso de pago firmado '
+            f'<b>"NO TIENE DEUDA ECONOMICA PENDIENTE"</b> hasta el <b>Módulo {hasta_modulo_n}</b>'
+            f'{detalle_rango} del mencionado programa, de acuerdo al compromiso de pago firmado '
             f'con la Unidad de Postgrado.'
         )
     elements.append(Paragraph(texto_no_deuda, styles["no_deudor_enfasis"]))
