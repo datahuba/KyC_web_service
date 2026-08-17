@@ -96,6 +96,26 @@ class TestArancel:
         from models.certificate_request import CertificateRequest
         assert "comprobante_url" in CertificateRequest.model_fields
 
+    def test_el_arancel_se_puede_consultar_antes_de_solicitar(self):
+        """
+        F-CERT-UX-ESTUDIANTE (2026-08-17): el estudiante tiene que ver cuanto
+        cuesta ANTES de crear la solicitud. Antes el monto solo existia dentro
+        de una solicitud ya creada, asi que la pantalla no tenia de donde
+        sacarlo y se enteraba del cobro despues de haber pedido.
+        """
+        src = _fuente("api/certificates.py")
+        assert '"/arancel-no-deudor"' in src
+        assert "settings.MONTO_CERTIFICADO_NO_DEUDOR" in src
+
+    def test_el_arancel_se_declara_antes_de_la_ruta_de_id(self):
+        """
+        `/arancel-no-deudor` y `/{cert_id}` son ambas de UN segmento. Si la
+        generica se declarara primero, FastAPI matchearia "arancel-no-deudor"
+        como si fuera un id de certificado y el endpoint devolveria 400.
+        """
+        src = _fuente("api/certificates.py")
+        assert src.index('"/arancel-no-deudor"') < src.index('"/{cert_id}"')
+
 
 # ==========================================================================
 # 2. Quien aprueba
