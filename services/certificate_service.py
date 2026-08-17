@@ -973,29 +973,20 @@ def render_pdf_no_deudor_membretado(
     elements.append(Paragraph(" ".join(partes_programa), styles["caja_programa"]))
     elements.append(Spacer(1, 4 * mm))
 
-    # Alcance. La redacción que dictó Kevin afirma que no hay deuda "del
-    # programa mencionado", sin más. Eso es correcto SOLO cuando el
-    # certificado cubre el programa entero; si cubre hasta el módulo N de un
-    # total mayor hay que decirlo, porque si no el documento afirmaría que el
-    # estudiante no debe nada de un programa que todavía está pagando.
-    total = len(enrollment.modulos)
-    if hasta_modulo_n >= total:
-        alcance = ""
-    else:
-        # Si el módulo no tiene fechas cargadas, `_format_rango_modulo`
-        # devuelve "—" y antes salía "hasta el Módulo 1 (—)" — visto en el
-        # certificado N° 007/2026, ya emitido. Sin rango se omite el
-        # paréntesis entero.
-        rango = _format_rango_modulo(
-            getattr(enrollment.modulos[hasta_modulo_n - 1], "fecha_inicio", None),
-            getattr(enrollment.modulos[hasta_modulo_n - 1], "fecha_fin", None),
-        )
-        detalle_rango = f" ({rango})" if rango and rango != "—" else ""
-        alcance = f" hasta el <b>Módulo {hasta_modulo_n}</b>{detalle_rango}"
-
+    # F-CERT-SIN-ALCANCE (Kevin 2026-08-17): "que el texto 'hasta el modulo 1'
+    # se elimine y quede lo demas pero que sea coherente lo que queda".
+    #
+    # El documento ya no acota hasta que modulo llega la constancia: dice
+    # simplemente que no hay deuda del programa mencionado. Kevin decidio esto
+    # despues de que se le señalara que un certificado emitido con alcance
+    # parcial (modulo 1 de 5) queda afirmando que no debe nada del programa
+    # completo. Queda registrado que es una decision suya, no un descuido.
+    #
+    # `hasta_modulo_n` se sigue usando internamente (define que modulos entran
+    # en el snapshot y evita duplicados), solo dejo de imprimirse.
     elements.append(Paragraph(
-        f"<b>NO TIENE DEUDA ECONÓMICA PENDIENTE</b>{alcance} del programa mencionado, "
-        f"de acuerdo al compromiso de pago firmado con la Unidad de Postgrado.",
+        "<b>NO TIENE DEUDA ECONÓMICA PENDIENTE</b> del programa mencionado, "
+        "de acuerdo al compromiso de pago firmado con la Unidad de Postgrado.",
         styles["no_deudor_enfasis"],
     ))
 
