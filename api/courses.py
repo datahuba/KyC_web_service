@@ -112,7 +112,16 @@ async def enviar_comunicado_programa(
                         programa=nombre_programa,
                         portal_link=portal_link
                     )
-                    ok = await send_email(st.email, f"{asunto} · {nombre_programa}", html)
+                    from services import email_service
+                    _log = await email_service.enviar(
+                        destinatario=st.email,
+                        asunto=f"{asunto} · {nombre_programa}",
+                        html=html,
+                        tipo=email_service.TipoEmail.COMUNICADO,
+                        destinatario_id=getattr(st, "id", None),
+                        destinatario_nombre=getattr(st, "nombre", None),
+                    )
+                    ok = _log.estado == "enviado"
                     if ok:
                         correos_enviados += 1
                 except Exception as e:

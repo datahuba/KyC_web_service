@@ -61,7 +61,15 @@ async def forgot_password(data: ForgotPasswordRequest, request: Request) -> Any:
         reset_link = f"{settings.FRONTEND_URL.rstrip('/')}/auth/reset-password?token={token}"
         nombre = getattr(target, "nombre", None) or getattr(target, "username", None) or "usuario"
         html = build_password_reset_email(nombre, reset_link, settings.PASSWORD_RESET_EXPIRE_MINUTES)
-        await send_email(email, "Restablece tu contraseña - Posgrado UAGRM", html)
+        # F-CORREOS-REGISTRO: CRITICO — sin este correo el usuario queda
+        # afuera del sistema. Cupo reservado + reintento.
+        from services import email_service
+        await email_service.enviar(
+            destinatario=email,
+            asunto="Restablece tu contraseña - Posgrado UAGRM",
+            html=html,
+            tipo=email_service.TipoEmail.RESET_PASSWORD,
+        )
 
     return {
         "message": "Si el correo está registrado, recibirás un enlace para restablecer tu contraseña."
@@ -167,7 +175,16 @@ async def resend_verification(
     verify_link = f"{settings.FRONTEND_URL.rstrip('/')}/auth/verify-email?token={token}"
     nombre = getattr(current_user, "nombre", None) or getattr(current_user, "username", None) or "usuario"
     html = build_email_verification_email(nombre, verify_link, settings.EMAIL_VERIFICATION_EXPIRE_MINUTES // 60)
-    enviado = await send_email(current_user.email, "Confirma tu correo - Posgrado UAGRM", html)
+    from services import email_service
+    _log = await email_service.enviar(
+        destinatario=current_user.email,
+        asunto="Confirma tu correo - Posgrado UAGRM",
+        html=html,
+        tipo=email_service.TipoEmail.VERIFICACION_EMAIL,
+        destinatario_id=getattr(current_user, "id", None),
+        destinatario_nombre=getattr(current_user, "nombre", None),
+    )
+    enviado = _log.estado == "enviado"
 
     return {
         "enviado": enviado,

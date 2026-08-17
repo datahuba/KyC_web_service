@@ -1046,7 +1046,15 @@ async def create_payment(
                 monto=payment.cantidad_pago,
                 portal_link=portal_link
             )
-            await send_email(_est.email, "Pago Aprobado · Posgrado UAGRM", html)
+            from services import email_service
+            await email_service.enviar(
+                destinatario=_est.email,
+                asunto="Pago Aprobado · Posgrado UAGRM",
+                html=html,
+                tipo=email_service.TipoEmail.PAGO_APROBADO,
+                destinatario_id=getattr(_est, "id", None),
+                destinatario_nombre=getattr(_est, "nombre", None),
+            )
     except Exception as e:
         print(f"Error al enviar correo de pago aprobado: {str(e)}")
 
@@ -1325,7 +1333,15 @@ async def aprobar_pago(
                 monto=payment.cantidad_pago,
                 portal_link=portal_link
             )
-            await send_email(_est.email, "Pago Aprobado · Posgrado UAGRM", html)
+            from services import email_service
+            await email_service.enviar(
+                destinatario=_est.email,
+                asunto="Pago Aprobado · Posgrado UAGRM",
+                html=html,
+                tipo=email_service.TipoEmail.PAGO_APROBADO,
+                destinatario_id=getattr(_est, "id", None),
+                destinatario_nombre=getattr(_est, "nombre", None),
+            )
     except Exception as e:
         print(f"Error al enviar correo de pago aprobado: {str(e)}")
 

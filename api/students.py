@@ -241,11 +241,16 @@ async def enviar_recordatorio_pago(
                 mensaje=payload.mensaje,
                 portal_link=portal_link
             )
-            email_enviado = await send_email(
-                student.email,
-                "Recordatorio de Pago · Posgrado UAGRM",
-                html
+            from services import email_service
+            _log = await email_service.enviar(
+                destinatario=student.email,
+                asunto="Recordatorio de Pago · Posgrado UAGRM",
+                html=html,
+                tipo=email_service.TipoEmail.RECORDATORIO_PAGO,
+                destinatario_id=getattr(student, "id", None),
+                destinatario_nombre=getattr(student, "nombre", None),
             )
+            email_enviado = _log.estado == "enviado"
         except Exception as e:
             print(f"Error enviando correo de recordatorio de pago: {str(e)}")
 

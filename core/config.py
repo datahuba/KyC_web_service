@@ -123,6 +123,19 @@ class Settings(BaseSettings):
     # tocar codigo ni redeployar la imagen.
     MONTO_CERTIFICADO_NO_DEUDOR: float = Field(default=150.0, env="MONTO_CERTIFICADO_NO_DEUDOR")
 
+    # F-CORREOS-REGISTRO (Kevin 2026-08-17): control de cupo diario de correo.
+    #
+    # Brevo en el plan gratis admite 300/dia, y solo los estudiantes ya son
+    # 305: un comunicado masivo agota el dia entero. Kevin eligio quedarse en
+    # el plan gratis y priorizar los correos con credenciales de acceso.
+    #
+    # EMAIL_CUPO_RESERVADO_CRITICOS es el colchon que los correos NO criticos
+    # no pueden tocar. Sirve para que un envio masivo de la mañana no deje sin
+    # credenciales a un alumno que se preinscribe a la tarde. Si se pasa a un
+    # plan pago, subir EMAIL_CUOTA_DIARIA por .env y listo.
+    EMAIL_CUOTA_DIARIA: int = Field(default=300, env="EMAIL_CUOTA_DIARIA")
+    EMAIL_CUPO_RESERVADO_CRITICOS: int = Field(default=50, env="EMAIL_CUPO_RESERVADO_CRITICOS")
+
     model_config = {
         "env_file": ".env",
         "case_sensitive": True
