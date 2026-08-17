@@ -841,7 +841,17 @@ async def update_enrollment(
                 admin_username=current_user.nombre_visible  # ISSUE-R-PERFIL-GENERICO
             )
         
-        if enrollment_in.descuento_personalizado is None and enrollment_in.descuento_id is None and enrollment_in.estado is None:
+        # F-FIX-EXCLUIR-POR-COBRAR (2026-08-16): este endpoint procesa los
+        # campos UNO POR UNO (no hace un setattr generico), asi que sin este
+        # bloque el flag se ignoraba aunque el schema lo aceptara.
+        if enrollment_in.excluir_por_cobrar is not None:
+            enrollment = await enrollment_service.get_enrollment(id)
+            if not enrollment:
+                raise HTTPException(status_code=404, detail="Inscripcion no encontrada")
+            enrollment.excluir_por_cobrar = enrollment_in.excluir_por_cobrar
+            await enrollment.save()
+
+        if enrollment_in.descuento_personalizado is None and enrollment_in.descuento_id is None and enrollment_in.estado is None and enrollment_in.excluir_por_cobrar is None:
             enrollment = await enrollment_service.get_enrollment(id)
             if not enrollment:
                 raise HTTPException(status_code=404, detail="Inscripción no encontrada")

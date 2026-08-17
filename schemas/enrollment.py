@@ -69,6 +69,9 @@ class EnrollmentResponse(BaseModel):
     cargo_adicional_items: List[CargoAdicionalItemSchema] = Field(default_factory=list)
     
     # Descuentos
+    # F-FIX-EXCLUIR-POR-COBRAR (2026-08-16): exponerlo para que la UI pueda
+    # mostrar si una inscripción está excluida del Por Cobrar.
+    excluir_por_cobrar: bool = False
     descuento_curso_id: Optional[PyObjectId] = None
     descuento_curso_aplicado: float
     descuento_estudiante_id: Optional[PyObjectId] = None
@@ -144,6 +147,14 @@ class EnrollmentUpdate(BaseModel):
     descuento_id: Optional[PyObjectId] = None
     descuento_personalizado: Optional[float] = Field(None, ge=0, le=100)
     estado: Optional[EstadoInscripcion] = None
+    # F-FIX-EXCLUIR-POR-COBRAR (2026-08-16): US-004 v4 agrego este flag al
+    # modelo y los dos calculos de dinero ya lo respetan, pero no habia forma
+    # de ACTIVARLO: ningun schema lo declaraba. Era un interruptor muerto.
+    # None = no tocar; True/False = setear explicitamente.
+    excluir_por_cobrar: Optional[bool] = Field(
+        None,
+        description="Si True, esta inscripción deja de sumar al Por Cobrar del dashboard. El estado de la inscripción NO cambia."
+    )
     # AUDITORÍA (BAJO #18): nota_final se eliminó de este schema. Es un campo
     # 100% CALCULADO (promedio de las notas de módulos, ver
     # actualizar_nota_modulo en enrollment_service.py) -- el endpoint nunca
