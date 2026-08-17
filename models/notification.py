@@ -42,6 +42,23 @@ class Notification(MongoBaseModel):
         description="Nivel de alerta visual: 'info', 'success', 'warning', 'error'"
     )
 
+    # F-NOTIF-TIPOS (Kevin 2026-08-17): QUE paso, en contraste con
+    # `tipo_alerta`, que es COMO se ve.
+    #
+    # Antes solo existia la severidad: medido en produccion, 849
+    # notificaciones con apenas 4 valores distintos (info/success/warning/
+    # error). Sin saber el evento no se puede filtrar, agrupar, ni dejar que
+    # cada usuario elija que quiere recibir.
+    #
+    # Es OPCIONAL a proposito: las notificaciones historicas no lo tienen y
+    # no se van a reescribir. El codigo nuevo lo manda; lo viejo sigue
+    # funcionando igual.
+    evento: Optional[str] = Field(
+        None,
+        max_length=60,
+        description="Evento que originó la notificación (ver EventoNotificacion)"
+    )
+
     # ------------------------------------------------------------------
     # DEEP-LINKING: a dónde llevar al usuario cuando hace click en la alerta
     # ------------------------------------------------------------------
@@ -76,5 +93,7 @@ class Notification(MongoBaseModel):
             # Índice compuesto optimizado para consultas de alertas pendientes ordenadas por fecha
             [("destinatario_id", pymongo.ASCENDING), ("leido", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)],
             # Índice simple para reportes cronológicos generales
-            [("created_at", pymongo.DESCENDING)]
+            [("created_at", pymongo.DESCENDING)],
+            # F-NOTIF-TIPOS: filtrado por evento
+            "evento",
         ]

@@ -16,7 +16,8 @@ async def create_notification(
     tipo_alerta: str = "info",
     ruta: Optional[str] = None,
     referencia_tipo: Optional[str] = None,
-    referencia_id: Optional[PydanticObjectId] = None
+    referencia_id: Optional[PydanticObjectId] = None,
+    evento: Optional[str] = None
 ) -> Notification:
     """
     Crear y registrar una notificación in-app.
@@ -37,7 +38,8 @@ async def create_notification(
         tipo_alerta=tipo_alerta,
         ruta=ruta,
         referencia_tipo=referencia_tipo,
-        referencia_id=referencia_id
+        referencia_id=referencia_id,
+        evento=evento
     )
     await notification.insert()
 

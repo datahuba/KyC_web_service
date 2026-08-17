@@ -31,6 +31,7 @@ from models.payment import Payment
 from models.student import Student
 from models.user import User
 from models.enums import EstadoInscripcion, EstadoPago, UserRole
+from models.notification_events import EventoNotificacion
 from core.config import settings
 
 
@@ -177,10 +178,38 @@ async def _notificar_mora_preventiva(enrollment: Enrollment) -> None:
                 tipo_alerta="warning",
                 ruta="/app/enrollments",
                 referencia_tipo="enrollment",
-                referencia_id=enrollment.id
+                referencia_id=enrollment.id,
+                evento=EventoNotificacion.ALERTA_MORA,
             )
         except Exception as e:
             print(f"Error notificando mora preventiva: {str(e)}")
+
+    # F-NOTIF-ESTUDIANTE (Kevin 2026-08-17): el estudiante TAMBIEN se entera.
+    #
+    # Antes esta alerta iba solo al encargado. El resultado era que el unico
+    # que no sabia que estaba por caer en abandono automatico era justamente
+    # el que podia evitarlo pagando. Es la brecha mas clara que aparecio al
+    # revisar los 33 puntos donde se notifica.
+    if student:
+        try:
+            await create_notification(
+                destinatario_id=student.id,
+                tipo_destinatario="student",
+                titulo="Tu inscripción necesita atención",
+                mensaje=(
+                    f"Pasaron más de {settings.DIAS_INACTIVIDAD_MORA} días sin que registres "
+                    f"un pago en tu inscripción. Si ya pagaste, subí tu comprobante; si "
+                    f"tenés una dificultad, acercate a la Unidad de Postgrado antes de que "
+                    f"pasen {settings.DIAS_INACTIVIDAD_ABANDONO} días."
+                ),
+                tipo_alerta="warning",
+                ruta="/app/payments",
+                referencia_tipo="enrollment",
+                referencia_id=enrollment.id,
+                evento=EventoNotificacion.ALERTA_MORA,
+            )
+        except Exception as e:
+            print(f"Error notificando mora preventiva al estudiante: {str(e)}")
 
     enrollment.mora_notificada = True
     enrollment.updated_at = utcnow_naive()
