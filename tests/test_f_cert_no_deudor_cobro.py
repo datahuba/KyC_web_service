@@ -375,6 +375,34 @@ class TestMembrete:
         texto = (PdfReader(io.BytesIO(pdf)).pages[0].extract_text() or "").replace("\n", " ")
         assert "01/03/2026" in texto
 
+    def test_los_firmantes_son_los_correctos(self):
+        """
+        Datos confirmados por Kevin el 2026-08-17. Los anteriores tenian dos
+        errores en un documento oficial ya emitido: decia "Claudio" en una
+        firma cuyo cargo es "COORDINADORA", y la segunda firma era otra
+        persona ("M.Sc. Ortega Blanca Muñoz" en vez del director real).
+
+        Se fija con test porque es el tipo de dato que nadie vuelve a mirar y
+        sale impreso con la firma de la unidad.
+        """
+        assert cs.FIRMANTE_COORD_NOMBRE == "Lic. Claudia R. Cuéllar Paz"
+        assert "Claudio" not in cs.FIRMANTE_COORD_NOMBRE
+        assert cs.FIRMANTE_DIRECTORA_NOMBRE == "Ph.D. Fausto Mendoza Iriarte"
+        assert "DIRECTOR DE POSTGRADO" in cs.FIRMANTE_DIRECTORA_CARGO
+
+    def test_los_firmantes_salen_impresos_en_el_pdf(self):
+        from pypdf import PdfReader
+
+        pdf = cs.render_pdf_no_deudor_membretado(
+            student=_student(), course=_course(), enrollment=_enrollment(),
+            hasta_modulo_n=3, folio="N° 009/2026",
+            emitido_en=datetime(2026, 8, 17, tzinfo=timezone.utc),
+        )
+        texto = (PdfReader(io.BytesIO(pdf)).pages[0].extract_text() or "").replace("\n", " ")
+        assert "Claudia R. Cuéllar Paz" in texto
+        assert "Fausto Mendoza Iriarte" in texto
+        assert "Ortega Blanca Muñoz" not in texto
+
     def test_si_falta_el_membrete_se_emite_igual(self):
         """
         Un despliegue al que le falte assets/ no deberia dejar a la unidad

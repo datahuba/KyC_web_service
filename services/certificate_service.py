@@ -50,11 +50,33 @@ UAGRM_EMAIL = "postgradocontaduria@uagrm.edu.bo"
 UAGRM_TELEFONO = "Telf. Fax: 337-0569"
 UAGRM_CIUDAD = "Santa Cruz"
 
-# Firmantes (PLACEHOLDERS — se reemplazan con PNG transparente en follow-up)
-FIRMANTE_COORD_NOMBRE = "Lic. Claudio R. Cuéllar Paz"
-FIRMANTE_COORD_CARGO = "COORDINADORA ADMINISTRATIVA Y FINANCIERA\nPOSTGRADO DE AUDITORIA FINANCIERA\nO CONTADURIA PUBLICA"
-FIRMANTE_DIRECTORA_NOMBRE = "M.Sc. Ortega Blanca Muñoz"
-FIRMANTE_DIRECTORA_CARGO = "DIRECTORA\nPOSTGRADO DE AUDITORIA FINANCIERA\nO CONTADURIA PUBLICA"
+# ========================================================================
+# Firmantes de los certificados
+# ========================================================================
+# Datos confirmados por Kevin el 2026-08-17 tras revisar el certificado
+# N° 007/2026 ya emitido. Los valores anteriores tenian DOS errores en un
+# documento oficial que la unidad entrega firmado:
+#
+#   1. El nombre decia "Claudio" (masculino) en vez de "Claudia", en una
+#      firma cuyo cargo dice "COORDINADORA".
+#   2. La segunda firma era otra persona: figuraba "M.Sc. Ortega Blanca
+#      Muñoz / DIRECTORA", cuando quien dirige Postgrado es el Ph.D. Fausto
+#      Mendoza Iriarte.
+#
+# Estos datos los usan los DOS tipos de certificado (Notas y No Deudor).
+FIRMANTE_COORD_NOMBRE = "Lic. Claudia R. Cuéllar Paz"
+FIRMANTE_COORD_CARGO = (
+    "COORDINADORA ADMINISTRATIVA Y FINANCIERA\n"
+    "POSTGRADO DE AUDITORIA FINANCIERA\n"
+    "O CONTADURIA PUBLICA"
+)
+FIRMANTE_DIRECTORA_NOMBRE = "Ph.D. Fausto Mendoza Iriarte"
+FIRMANTE_DIRECTORA_CARGO = (
+    "DIRECTOR DE POSTGRADO\n"
+    "FACULTAD DE CIENCIAS CONTABLES, AUDITORÍA,\n"
+    "SISTEMAS DE CONTROL DE GESTIÓN Y FINANZAS\n"
+    "U.A.G.R.M."
+)
 
 # Roles staff (los únicos que pueden ver/descargar certificados de cualquier estudiante)
 # BUG FIX (2026-07-30): los valores del enum UserRole están en MINÚSCULAS
