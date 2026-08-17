@@ -1,0 +1,330 @@
+"""
+F-CERT-NO-DEUDOR-COBRO (2026-08-17)
+===================================
+
+El Certificado de No Deudor pasa a tener arancel, aprobacion restringida y
+un segundo paso de firma fisica antes de que el estudiante pueda descargarlo.
+
+Decisiones que estos tests fijan (transcripcion de la charla + confirmaciones
+de Kevin del 2026-08-17):
+
+1. Arancel de Bs 150, configurable por entorno. Se guarda como SNAPSHOT en la
+   solicitud: si manana la tarifa cambia, la solicitud vieja conserva el monto
+   que se le informo al estudiante.
+2. El No Deudor lo aprueban SOLO el coordinador financiero y el superadmin.
+   Es mas restrictivo que el certificado de Notas a proposito: este acredita
+   que no hay deuda Y cobra, o sea que es una decision economica.
+3. Aprobar NO habilita la descarga. Kevin: "el coordinador hace firmar la
+   copia fisica y debe habilitar o aprobar al estudiante para que lo tenga".
+   Sin el bloqueo de descarga el segundo paso seria decorativo, porque el PDF
+   ya existe desde que se aprobo.
+4. Tratamiento profesional (Lic./Ing./...) antes del nombre, elegido por quien
+   aprueba y no por el estudiante: es el que conoce el titulo real y el que
+   firma. Los de diplomado continuo no llevan, por eso None es valido.
+5. El PDF final va sobre la hoja membretada. Los membretes que paso Kevin son
+   PDF SOLO GRAFICOS (0 texto extraible), asi que el texto se superpone.
+"""
+
+import io
+import os
+from datetime import datetime, timezone
+
+import pytest
+
+import services.certificate_service as cs
+
+
+# ==========================================================================
+# Stubs: los modelos Beanie necesitan BD inicializada, y estos tests corren
+# sin base. Se usan objetos con los mismos atributos que consume el render.
+# ==========================================================================
+
+class _Obj:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+def _student(nombre="Kevin Andres Soto Villarroel"):
+    return _Obj(nombre=nombre, carnet="7654321", extension="SC", complemento_carnet=None)
+
+
+def _course():
+    return _Obj(nombre_programa="Inteligencia Artificial Aplicada", codigo="DIPL-IA-2026")
+
+
+def _enrollment(n_modulos=5):
+    mods = [
+        _Obj(
+            nombre=f"Modulo {i}",
+            estado="Pagado",
+            fecha_inicio=datetime(2026, 3, 1, tzinfo=timezone.utc),
+            fecha_fin=datetime(2026, 3, 28, tzinfo=timezone.utc),
+        )
+        for i in range(1, n_modulos + 1)
+    ]
+    return _Obj(modulos=mods)
+
+
+def _fuente(nombre_archivo):
+    ruta = os.path.join(os.path.dirname(__file__), "..", nombre_archivo)
+    return io.open(ruta, encoding="utf-8").read()
+
+
+# ==========================================================================
+# 1. Arancel
+# ==========================================================================
+
+class TestArancel:
+    def test_monto_default_es_150(self):
+        from core.config import settings
+        assert settings.MONTO_CERTIFICADO_NO_DEUDOR == 150.0
+
+    def test_el_monto_se_guarda_como_snapshot_en_la_solicitud(self):
+        """
+        Si la tarifa cambia, la solicitud vieja tiene que conservar la suya.
+        Por eso `monto` es un campo del documento y no se lee de config al
+        momento de cobrar.
+        """
+        from models.certificate_request import CertificateRequest
+        assert "monto" in CertificateRequest.model_fields
+
+    def test_solo_las_solicitudes_de_no_deudor_llevan_monto(self):
+        src = _fuente("services/certificate_request_service.py")
+        assert "if data.tipo == TipoCertificado.NO_DEUDOR else None" in src
+
+    def test_hay_campo_para_el_comprobante_de_pago(self):
+        from models.certificate_request import CertificateRequest
+        assert "comprobante_url" in CertificateRequest.model_fields
+
+
+# ==========================================================================
+# 2. Quien aprueba
+# ==========================================================================
+
+class TestQuienAprueba:
+    def _user(self, rol, subtipo=None, cursos=None):
+        from models.enums import UserRole
+        from models.user import User
+        u = User.model_construct(
+            rol=rol,
+            subtipo_coordinador=subtipo,
+            cursos_asignados=cursos or [],
+            username="tester",
+        )
+        return u
+
+    def test_superadmin_aprueba_no_deudor(self):
+        from models.enums import UserRole
+        from services.certificate_request_service import puede_aprobar_solicitud_cert
+        u = self._user(UserRole.SUPERADMIN)
+        assert puede_aprobar_solicitud_cert(u, "curso1", "no_deudor") is True
+
+    def test_coordinador_financiero_aprueba_no_deudor(self):
+        from models.enums import UserRole
+        from services.certificate_request_service import puede_aprobar_solicitud_cert
+        u = self._user(UserRole.COORDINADOR, subtipo="financiero")
+        assert puede_aprobar_solicitud_cert(u, "curso1", "no_deudor") is True
+
+    def test_coordinador_academico_NO_aprueba_no_deudor(self):
+        """El subtipo importa: solo el financiero decide sobre plata."""
+        from models.enums import UserRole
+        from services.certificate_request_service import puede_aprobar_solicitud_cert
+        u = self._user(UserRole.COORDINADOR, subtipo="academico")
+        assert puede_aprobar_solicitud_cert(u, "curso1", "no_deudor") is False
+
+    def test_encargado_de_curso_NO_aprueba_no_deudor(self):
+        """
+        Sigue aprobando certificados de NOTAS de sus cursos, pero el de No
+        Deudor no: Kevin fue explicito con quienes lo aprueban.
+        """
+        from models.enums import UserRole
+        from services.certificate_request_service import puede_aprobar_solicitud_cert
+        u = self._user(UserRole.ENCARGADO_CURSO, cursos=["curso1"])
+        assert puede_aprobar_solicitud_cert(u, "curso1", "no_deudor") is False
+        assert puede_aprobar_solicitud_cert(u, "curso1", "notas") is True
+
+    def test_admin_NO_aprueba_no_deudor_pero_si_notas(self):
+        from models.enums import UserRole
+        from services.certificate_request_service import puede_aprobar_solicitud_cert
+        u = self._user(UserRole.ADMIN)
+        assert puede_aprobar_solicitud_cert(u, "curso1", "no_deudor") is False
+        assert puede_aprobar_solicitud_cert(u, "curso1", "notas") is True
+
+    def test_sin_tipo_se_comporta_como_antes(self):
+        """
+        Los llamadores viejos pasan 2 argumentos. No pueden romperse por
+        agregar el tercero.
+        """
+        from models.enums import UserRole
+        from services.certificate_request_service import puede_aprobar_solicitud_cert
+        u = self._user(UserRole.ADMIN)
+        assert puede_aprobar_solicitud_cert(u, "curso1") is True
+
+
+# ==========================================================================
+# 3. Firma fisica: aprobar no alcanza
+# ==========================================================================
+
+class TestFirmaFisica:
+    def test_el_modelo_registra_quien_y_cuando_confirmo(self):
+        from models.certificate_request import CertificateRequest
+        campos = CertificateRequest.model_fields
+        for c in ("firma_fisica_confirmada", "fecha_firma_fisica", "confirmada_por"):
+            assert c in campos, f"falta {c}"
+        assert campos["firma_fisica_confirmada"].default is False
+
+    def test_no_deudor_aprobado_sin_firma_NO_es_descargable(self):
+        from models.certificate_request import CertificateRequest
+        from services.certificate_request_service import es_descargable
+        req = CertificateRequest.model_construct(
+            tipo="no_deudor", estado="aprobada", certificate_id="c1",
+            firma_fisica_confirmada=False,
+        )
+        assert es_descargable(req) is False
+
+    def test_no_deudor_aprobado_con_firma_SI_es_descargable(self):
+        from models.certificate_request import CertificateRequest
+        from services.certificate_request_service import es_descargable
+        req = CertificateRequest.model_construct(
+            tipo="no_deudor", estado="aprobada", certificate_id="c1",
+            firma_fisica_confirmada=True,
+        )
+        assert es_descargable(req) is True
+
+    def test_notas_no_necesita_firma_fisica(self):
+        """El flujo de Notas no cambia: aprobado es descargable."""
+        from models.certificate_request import CertificateRequest
+        from services.certificate_request_service import es_descargable
+        req = CertificateRequest.model_construct(
+            tipo="notas", estado="aprobada", certificate_id="c1",
+            firma_fisica_confirmada=False,
+        )
+        assert es_descargable(req) is True
+
+    def test_la_descarga_esta_bloqueada_de_verdad_en_el_endpoint(self):
+        """
+        Sin este chequeo el segundo paso seria decorativo: el PDF ya existe
+        desde que se aprobo, asi que el estudiante podria bajarselo igual.
+        """
+        src = _fuente("api/certificates.py")
+        assert "motivo_bloqueo_descarga" in src
+        assert "isinstance(current_user, Student)" in src
+
+    def test_el_staff_no_queda_bloqueado(self):
+        """Alguien tiene que poder imprimirlo para hacerlo firmar."""
+        src = _fuente("services/certificate_request_service.py")
+        assert "async def motivo_bloqueo_descarga" in src
+        assert "if cert.tipo != TipoCertificado.NO_DEUDOR:" in src
+
+
+# ==========================================================================
+# 4. Tratamiento profesional
+# ==========================================================================
+
+class TestTratamiento:
+    def test_antepone_el_tratamiento_al_nombre(self):
+        assert cs._nombre_con_tratamiento("Kevin Soto", "Lic.") == "LIC. KEVIN SOTO"
+        assert cs._nombre_con_tratamiento("Kevin Soto", "Ing.") == "ING. KEVIN SOTO"
+
+    def test_sin_tratamiento_el_nombre_sale_solo(self):
+        """Los de diplomado continuo no llevan tratamiento."""
+        assert cs._nombre_con_tratamiento("Kevin Soto", None) == "KEVIN SOTO"
+        assert cs._nombre_con_tratamiento("Kevin Soto", "") == "KEVIN SOTO"
+        assert cs._nombre_con_tratamiento("Kevin Soto", "   ") == "KEVIN SOTO"
+
+    def test_rechaza_tratamientos_inventados(self):
+        from pydantic import ValidationError
+        from schemas.certificate_request import CertificateRequestAprobar
+        with pytest.raises(ValidationError):
+            CertificateRequestAprobar(tratamiento="Sr.")
+
+    def test_acepta_los_tratamientos_de_la_lista(self):
+        from schemas.certificate_request import CertificateRequestAprobar, TRATAMIENTOS_VALIDOS
+        for t in TRATAMIENTOS_VALIDOS:
+            assert CertificateRequestAprobar(tratamiento=t).tratamiento == t
+
+    def test_vacio_se_normaliza_a_None(self):
+        from schemas.certificate_request import CertificateRequestAprobar
+        assert CertificateRequestAprobar(tratamiento="  ").tratamiento is None
+
+    def test_el_certificado_guarda_el_tratamiento_usado(self):
+        """
+        Hace falta para que el re-render de respaldo reproduzca el documento
+        tal cual se emitio.
+        """
+        from models.certificate import Certificate
+        assert "tratamiento" in Certificate.model_fields
+        assert "membrete" in Certificate.model_fields
+
+
+# ==========================================================================
+# 5. Hoja membretada
+# ==========================================================================
+
+class TestMembrete:
+    def test_los_dos_membretes_estan_presentes(self):
+        assert cs.hay_membrete("CARTA") is True
+        assert cs.hay_membrete("OFICIO") is True
+
+    def test_formato_desconocido_no_revienta(self):
+        assert cs.hay_membrete("A3") is False
+
+    def test_carta_y_oficio_tienen_zonas_seguras_distintas(self):
+        """
+        El pie del OFICIO es mucho mas alto que el de CARTA (64.9mm contra
+        41.6mm, medido sobre el archivo real). Usar el mismo margen para los
+        dos meteria el texto debajo del grafico.
+        """
+        carta = cs.MEMBRETE_LAYOUT["CARTA"]
+        oficio = cs.MEMBRETE_LAYOUT["OFICIO"]
+        assert oficio["bottom_mm"] > carta["bottom_mm"]
+
+    def test_el_pdf_sale_del_tamano_de_la_hoja(self):
+        from pypdf import PdfReader
+        for formato in ("CARTA", "OFICIO"):
+            pdf = cs.render_pdf_no_deudor_membretado(
+                student=_student(), course=_course(), enrollment=_enrollment(),
+                hasta_modulo_n=3, folio="N° 042/2026",
+                emitido_en=datetime(2026, 8, 17, tzinfo=timezone.utc),
+                tratamiento="Lic.", formato=formato,
+            )
+            pagina = PdfReader(io.BytesIO(pdf)).pages[0]
+            esperado = cs.MEMBRETE_LAYOUT[formato]
+            assert abs(float(pagina.mediabox.width) - esperado["ancho_pt"]) < 1
+            assert abs(float(pagina.mediabox.height) - esperado["alto_pt"]) < 1
+
+    def test_el_texto_del_certificado_queda_en_el_pdf(self):
+        """
+        El membrete es solo grafico; lo que tiene que ser texto real es el
+        cuerpo del certificado, para que se pueda buscar y copiar.
+        """
+        from pypdf import PdfReader
+        pdf = cs.render_pdf_no_deudor_membretado(
+            student=_student(), course=_course(), enrollment=_enrollment(),
+            hasta_modulo_n=3, folio="N° 042/2026",
+            emitido_en=datetime(2026, 8, 17, tzinfo=timezone.utc),
+            tratamiento="Lic.",
+        )
+        texto = PdfReader(io.BytesIO(pdf)).pages[0].extract_text() or ""
+        assert "CERTIFICADO DE NO DEUDOR" in texto
+        assert "LIC. KEVIN ANDRES SOTO VILLARROEL" in texto
+        assert "NO TIENE DEUDA ECONOMICA PENDIENTE" in texto
+
+    def test_hasta_el_ultimo_modulo_dice_el_total_del_programa(self):
+        from pypdf import PdfReader
+        pdf = cs.render_pdf_no_deudor_membretado(
+            student=_student(), course=_course(), enrollment=_enrollment(n_modulos=5),
+            hasta_modulo_n=5, folio="N° 043/2026",
+            emitido_en=datetime(2026, 8, 17, tzinfo=timezone.utc),
+        )
+        texto = (PdfReader(io.BytesIO(pdf)).pages[0].extract_text() or "").replace("\n", " ")
+        assert "total del costo" in texto
+
+    def test_si_falta_el_membrete_se_emite_igual(self):
+        """
+        Un despliegue al que le falte assets/ no deberia dejar a la unidad
+        sin poder emitir certificados.
+        """
+        src = _fuente("services/certificate_service.py")
+        assert "usar_membrete = hay_membrete(formato_membrete)" in src
+        assert "Se emite con el formato" in src

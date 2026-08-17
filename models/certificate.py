@@ -107,6 +107,22 @@ class Certificate(MongoBaseModel):
     # PERSISTENCIA DEL PDF (snapshot inmutable en Cloudinary)
     # ========================================================================
 
+    # F-CERT-NO-DEUDOR-COBRO (2026-08-17): tratamiento profesional impreso
+    # antes del nombre ("LIC. KEVIN SOTO") y formato de hoja membretada usado.
+    #
+    # `membrete=None` significa "emitido antes de este cambio, sin membrete".
+    # Se guarda para que el re-render de respaldo (cuando Cloudinary falla)
+    # reproduzca el documento tal cual se emitió, en vez de darle a un
+    # certificado de julio el diseño de agosto.
+    tratamiento: Optional[str] = Field(
+        default=None,
+        description="Tratamiento profesional impreso antes del nombre: 'Lic.', 'Ing.', etc. None si no corresponde."
+    )
+    membrete: Optional[str] = Field(
+        default=None,
+        description="Formato de hoja membretada usado ('CARTA' | 'OFICIO'). None = emitido sin membrete."
+    )
+
     pdf_url: str = Field(..., description="URL pública del PDF en Cloudinary (folder kyc/certificates/)")
     pdf_filename: str = Field(..., description="Nombre del archivo PDF para descarga (ej: 'certificado_notas_N042_2026_SANGUINO_RIBERA.pdf')")
 

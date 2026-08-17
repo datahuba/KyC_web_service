@@ -114,6 +114,15 @@ class Settings(BaseSettings):
     MATRICULA_PRIMER_CARRERA_DEFAULT: float = Field(default=200.0, env="MATRICULA_PRIMER_CARRERA_DEFAULT")
     MATRICULA_PROFESIONAL_DEFAULT: float = Field(default=500.0, env="MATRICULA_PROFESIONAL_DEFAULT")
 
+    # F-CERT-NO-DEUDOR-COBRO (Kevin 2026-08-17): el Certificado de No Deudor
+    # pasa a tener costo. Kevin: "pongamos solo un monto y lo cambiamos luego
+    # si es que difiere, pongamos ahora 150".
+    #
+    # Va como variable de entorno justamente porque el monto es provisorio:
+    # cuando el arancel real se confirme se cambia en el .env del VPS, sin
+    # tocar codigo ni redeployar la imagen.
+    MONTO_CERTIFICADO_NO_DEUDOR: float = Field(default=150.0, env="MONTO_CERTIFICADO_NO_DEUDOR")
+
     model_config = {
         "env_file": ".env",
         "case_sensitive": True
