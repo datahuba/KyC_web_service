@@ -15,23 +15,24 @@ from models.student import Student
 from schemas.notification import NotificationResponse, NotificationUnreadCount
 from services import notification_service
 from services.sse_bus import sse_bus
-from core.security import decode_access_token
+from services.sse_ticket_service import sse_ticket_service
 from api.dependencies import get_current_user
 
 router = APIRouter()
 _sse_logger = logging.getLogger("kyc.sse")
 
 
-async def _resolve_user_from_query(token: str) -> Union[User, Student]:
+async def _resolve_user_from_ticket(ticket: str) -> Union[User, Student]:
     """
-    TECH-003: el browser EventSource no permite enviar headers custom, así
-    que pasamos el JWT via query string. Esta función valida el token y
-    devuelve el User/Student asociado. Replica la lógica de get_current_user
-    pero acepta token por query.
+    El browser EventSource no permite enviar headers custom, así que no
+    puede mandar el JWT por Authorization. En vez de pasar el JWT por la
+    query string (queda expuesto en historial, logs de Nginx y Referer),
+    el cliente primero pide un ticket de un solo uso autenticado
+    normalmente (POST /notifications/stream-ticket) y lo usa acá. El
+    ticket se consume al primer uso y expira a los 30s.
     """
     from core.config import settings
     if settings.DEVELOPMENT_MODE:
-        from core.config import settings as _s
         # En dev, devolver admin mock (igual que get_current_user)
         from models.enums import UserRole
         return User(
@@ -43,15 +44,10 @@ async def _resolve_user_from_query(token: str) -> Union[User, Student]:
             activo=True
         )
 
-    payload = decode_access_token(token)
-    if payload is None:
-        raise HTTPException(status_code=401, detail="Token inválido o expirado")
-    if payload.get("purpose") in ("password_reset", "email_verification"):
-        raise HTTPException(status_code=401, detail="Token de un solo uso, no válido para streaming")
-    user_id = payload.get("sub")
-    user_type = payload.get("user_type")
-    if not user_id or not user_type:
-        raise HTTPException(status_code=401, detail="Token inválido")
+    resolved = await sse_ticket_service.consume(ticket)
+    if resolved is None:
+        raise HTTPException(status_code=401, detail="Ticket inválido, expirado o ya utilizado")
+    user_id, user_type = resolved
 
     if user_type == "student":
         user = await Student.get(PydanticObjectId(user_id))
@@ -130,11 +126,28 @@ async def read_all_notifications(
     }
 
 
+@router.post(
+    "/stream-ticket",
+    summary="Emitir ticket de un solo uso para abrir el stream SSE",
+)
+async def issue_stream_ticket(
+    current_user: Union[User, Student] = Depends(get_current_user)
+) -> Any:
+    """
+    Requiere sesión normal (header Authorization). Devuelve un ticket de
+    un solo uso, válido 30s, para abrir `/notifications/stream?ticket=...`
+    sin exponer el JWT en la URL.
+    """
+    user_type = "student" if isinstance(current_user, Student) else "user"
+    ticket = await sse_ticket_service.issue(str(current_user.id), user_type)
+    return {"ticket": ticket}
+
+
 # TECH-003: Server-Sent Events para push de notificaciones en tiempo real.
-# Reemplaza el polling cada 45s del frontend. El cliente abre
-# `EventSource('/api/v1/notifications/stream')` y recibe eventos
-# `notification` con JSON payload cada vez que se crea una nueva
-# notificación para este usuario.
+# Reemplaza el polling cada 45s del frontend. El cliente pide un ticket vía
+# POST /stream-ticket y abre `EventSource('/api/v1/notifications/stream?ticket=...')`,
+# recibiendo eventos `notification` con JSON payload cada vez que se crea una
+# nueva notificación para este usuario.
 @router.get(
     "/stream",
     summary="Stream SSE de notificaciones en tiempo real",
@@ -142,16 +155,15 @@ async def read_all_notifications(
 )
 async def stream_notifications(
     request: Request,
-    token: Optional[str] = Query(default=None, description="JWT para autenticar el stream SSE (alternativa al header Authorization porque EventSource no soporta headers custom)")
+    ticket: Optional[str] = Query(default=None, description="Ticket de un solo uso obtenido de POST /notifications/stream-ticket")
 ):
     """Stream persistente SSE. Heartbeat cada 30s para mantener viva la
     conexión a través de proxies intermedios. Se desconecta automáticamente
     cuando el cliente cierra la pestaña."""
 
-    # TECH-003: resolver user desde query token (EventSource no soporta headers)
-    current_user = await _resolve_user_from_query(token) if token else None
+    current_user = await _resolve_user_from_ticket(ticket) if ticket else None
     if current_user is None:
-        raise HTTPException(status_code=401, detail="Se requiere token de autenticación")
+        raise HTTPException(status_code=401, detail="Se requiere un ticket de autenticación válido")
 
     user_id = current_user.id
     queue = await sse_bus.subscribe(user_id)

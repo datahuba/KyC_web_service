@@ -487,12 +487,29 @@ async def _build_dashboard_v2(current_user: User) -> dict:
         enrollments=enrollments_all,
     )
 
+    # F-FIX-DASHBOARD-CXC-DIFF (2026-08-17, Kevin): el dashboard mostraba
+    # Bs 966.672 de "por cobrar" mientras la pagina real de Cuentas por
+    # Cobrar (services/cuentas_por_cobrar_service.py) mostraba Bs 968.872
+    # para el mismo universo de inscripciones. Causa: aca abajo se
+    # calculaba el saldo con los campos CACHEADOS `modulos[].monto_pagado`
+    # / `enrollment.total_pagado`, que pueden desincronizarse del estado
+    # real de pagos aprobados. El servicio de CxC real, en cambio, SIEMPRE
+    # recalcula sumando los Payment con estado_pago=APROBADO de esa
+    # inscripcion (ver docstring de generar_resumen_cxc). Ahora el
+    # dashboard usa la misma fuente: agrupamos `pagos_all` (que ya viene
+    # cargado y filtrado por aprobados) por inscripcion_id, igual que el
+    # reporte real, para que ambas cifras coincidan siempre.
+    pagos_por_inscripcion: dict = {}
+    for p in pagos_all:
+        pagos_por_inscripcion.setdefault(p.inscripcion_id, []).append(p)
+
     # ============================================================
     # 4) RESUMEN ECONOMICO (4 cards ingreso)
     # ============================================================
     resumen_economico = _build_resumen_economico_from_memory(
         pagos=pagos_all,
         enrollments=enrollments_all,
+        pagos_por_inscripcion=pagos_por_inscripcion,
     )
 
     # ============================================================
@@ -501,6 +518,7 @@ async def _build_dashboard_v2(current_user: User) -> dict:
     cxc_resumen = _build_cxc_resumen_from_memory(
         enrollments=enrollments_all,
         pagos=pagos_all,
+        pagos_por_inscripcion=pagos_por_inscripcion,
     )
 
     # ============================================================
@@ -778,6 +796,7 @@ def _build_resumen_economico_from_memory(
     *,
     pagos: list[Payment],
     enrollments: list[Enrollment],
+    pagos_por_inscripcion: Optional[dict] = None,
 ) -> dict:
     """
     F-PERF-DASHBOARD-V2: replica en memoria de get_resumen_economico.
@@ -812,22 +831,16 @@ def _build_resumen_economico_from_memory(
             continue
         if getattr(e, "excluir_por_cobrar", False):
             continue
-        # F-DASHBOARD-POR-COBRAR-REAL (2026-08-10, Kevin): antes este calculo
-        # usaba SOLO los modulos del enrollment. Pero muchos enrollments
-        # historicos (DIPL-INVCI-2026/1, DIPL-DDU-2026/1) tienen modulos=[]
-        # porque se cargaron sin desglose por modulo. En ese caso, el
-        # calculo daba 0 de costo, lo que subestimaba el por_cobrar.
-        #
-        # Ahora usamos la mejor fuente disponible:
-        # 1. Si hay modulos, sumar costo/monto_pagado de los modulos
-        # 2. Si no hay modulos, usar total_a_pagar / total_pagado del enrollment
-        modulos = getattr(e, "modulos", None) or []
-        if modulos:
-            costo_total = sum(float(m.costo or 0.0) for m in modulos)
-            pagos_total = sum(float(m.monto_pagado or 0.0) for m in modulos)
+        # F-FIX-DASHBOARD-CXC-DIFF (2026-08-17, Kevin): igual que
+        # generar_resumen_cxc (la fuente de verdad del reporte real), el
+        # costo es `total_a_pagar` y los pagos se recalculan sumando los
+        # Payment aprobados de esa inscripcion — NO se confia en el campo
+        # cacheado `enrollment.total_pagado` / `modulos[].monto_pagado`,
+        # que puede desincronizarse del estado real de pagos.
+        costo_total = float(getattr(e, "total_a_pagar", 0) or 0)
+        if pagos_por_inscripcion is not None:
+            pagos_total = sum(float(p.cantidad_pago or 0.0) for p in pagos_por_inscripcion.get(e.id, []))
         else:
-            # Fallback: usar los campos del enrollment
-            costo_total = float(getattr(e, "total_a_pagar", 0) or 0)
             pagos_total = float(getattr(e, "total_pagado", 0) or 0)
         saldo = max(0, costo_total - pagos_total)
         por_cobrar += saldo
@@ -849,6 +862,7 @@ def _build_cxc_resumen_from_memory(
     *,
     enrollments: list[Enrollment],
     pagos: list[Payment],
+    pagos_por_inscripcion: Optional[dict] = None,
 ) -> dict:
     """
     F-PERF-DASHBOARD-V2: replica simplificada de CxCResumenReducido.
@@ -876,14 +890,17 @@ def _build_cxc_resumen_from_memory(
         total_estimado += float(getattr(e, "total_a_pagar", 0) or 0)
         if e.estado in estados_excluidos:
             continue
-        # F-DASHBOARD-POR-COBRAR-REAL: usar modulos si existen, sino campos
-        # del enrollment (mismo fix que _build_resumen_economico_from_memory)
-        modulos = getattr(e, "modulos", None) or []
-        if modulos:
-            costo_total = sum(float(m.costo or 0.0) for m in modulos)
-            pagos_total = sum(float(m.monto_pagado or 0.0) for m in modulos)
+        # F-FIX-DASHBOARD-CXC-DIFF (2026-08-17, Kevin): mismo criterio que
+        # generar_resumen_cxc (services/cuentas_por_cobrar_service.py, la
+        # fuente de verdad del reporte real de Cuentas por Cobrar): costo =
+        # total_a_pagar, pagos = suma de Payment aprobados de la inscripcion
+        # (NO el campo cacheado total_pagado/monto_pagado). Antes este
+        # calculo en memoria usaba el campo cacheado y podia desincronizarse
+        # del reporte real, dando cifras distintas para lo mismo.
+        costo_total = float(getattr(e, "total_a_pagar", 0) or 0)
+        if pagos_por_inscripcion is not None:
+            pagos_total = sum(float(p.cantidad_pago or 0.0) for p in pagos_por_inscripcion.get(e.id, []))
         else:
-            costo_total = float(getattr(e, "total_a_pagar", 0) or 0)
             pagos_total = float(getattr(e, "total_pagado", 0) or 0)
         por_cobrar += max(0, costo_total - pagos_total)
 
