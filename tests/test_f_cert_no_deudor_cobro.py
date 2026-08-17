@@ -333,8 +333,13 @@ class TestMembrete:
         # (programa) no tiene deuda economica pendiente del programa
         # mencionado de acuerdo al compromiso...".
         assert "Que el o la postgraduante" in texto
-        assert "no tiene deuda económica pendiente" in texto
+        assert "Del programa" in texto
+        assert "NO TIENE DEUDA ECONÓMICA PENDIENTE" in texto
+        assert "del programa mencionado" in texto
         assert "de acuerdo al compromiso de pago firmado" in texto
+        # La redaccion vieja ("Que, revisando los registros de pagos
+        # existentes...") repetia la facultad; ya no debe estar.
+        assert "revisando los registros" not in texto
 
     def test_el_alcance_solo_aparece_si_es_parcial(self):
         """
