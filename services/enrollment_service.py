@@ -1330,10 +1330,14 @@ async def validar_nota_borrador(
                     nota=nota_a_oficializar,
                     portal_link=portal_link
                 )
-                await send_email(
-                    student.email,
-                    f"Nota validada: {nombre_modulo} · Posgrado UAGRM",
-                    html
+                from services import email_service
+                await email_service.enviar(
+                    destinatario=student.email,
+                    asunto=f"Nota validada: {nombre_modulo} · Posgrado UAGRM",
+                    html=html,
+                    tipo=email_service.TipoEmail.NOTA_VALIDADA,
+                    destinatario_id=getattr(student, "id", None),
+                    destinatario_nombre=getattr(student, "nombre", None),
                 )
     except Exception as e:
         print(f"Error enviando correo de nota validada: {str(e)}")

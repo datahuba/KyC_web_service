@@ -334,10 +334,13 @@ async def submit_public_form(slug: str, data: PreRegistrationSubmit) -> PreRegis
             submission_id=str(sub.id),
             admin_url=f"{settings.FRONTEND_URL.rstrip('/')}/app/pre-registros",
         )
-        await send_email(
-            payload["email"],
-            f"Recibimos tu pre-inscripción a {form.nombre}",
-            html,
+        from services import email_service
+        await email_service.enviar(
+            destinatario=payload["email"],
+            asunto=f"Recibimos tu pre-inscripción a {form.nombre}",
+            html=html,
+            tipo=email_service.TipoEmail.PRE_REGISTRO_RECIBIDO,
+            destinatario_nombre=payload.get("nombre"),
         )
     except Exception as e:
         print(f"[pre-registration] Error enviando email de confirmacion al visitante: {e}")
@@ -607,10 +610,18 @@ async def approve_submission(submission_id: PydanticObjectId, admin_username: st
                 f"al estudiante {student.id} en el programa del form {sub.form_id}: {e}"
             )
 
-    # Email de bienvenida con contraseña inicial (best-effort, no bloqueante)
+    # Email de bienvenida con contraseña inicial (best-effort, no bloqueante).
+    #
+    # F-CORREOS-REGISTRO (2026-08-17): va por `email_service` con prioridad
+    # CRITICA. Es EL correo que Kevin pidio blindar: lleva el usuario y la
+    # contraseña inicial, asi que si no llega el alumno no puede entrar al
+    # sistema. Tiene cupo reservado que ningun envio masivo puede consumir, y
+    # si aun asi falla queda registrado y se reintenta, en vez de perderse en
+    # silencio como pasaba antes.
     try:
         from core.config import settings
-        from core.email_utils import send_email, build_welcome_pre_registration_email
+        from core.email_utils import build_welcome_pre_registration_email
+        from services import email_service
 
         html = build_welcome_pre_registration_email(
             nombre=nombre,
@@ -618,10 +629,13 @@ async def approve_submission(submission_id: PydanticObjectId, admin_username: st
             initial_password=initial_password_plain,
             login_url=f"{settings.FRONTEND_URL.rstrip('/')}/auth/sign-in",
         )
-        await send_email(
-            email,
-            "Bienvenido a Posgrado UAGRM - Tus credenciales de acceso",
-            html,
+        await email_service.enviar(
+            destinatario=email,
+            asunto="Bienvenido a Posgrado UAGRM - Tus credenciales de acceso",
+            html=html,
+            tipo=email_service.TipoEmail.CREDENCIALES_PREINSCRIPCION,
+            destinatario_id=getattr(student, "id", None),
+            destinatario_nombre=nombre,
         )
     except Exception as e:
         print(f"[pre-registration] Error enviando email de bienvenida: {e}")

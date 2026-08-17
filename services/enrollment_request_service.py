@@ -222,10 +222,14 @@ async def approve_enrollment_request(request_id: PydanticObjectId, admin_usernam
                 matricula=enrollment.costo_matricula,
                 portal_link=portal_link
             )
-            await send_email(
-                student.email,
-                f"Inscripción aprobada - {course.nombre_programa} · Posgrado UAGRM",
-                html
+            from services import email_service
+            await email_service.enviar(
+                destinatario=student.email,
+                asunto=f"Inscripción aprobada - {course.nombre_programa} · Posgrado UAGRM",
+                html=html,
+                tipo=email_service.TipoEmail.INSCRIPCION_APROBADA,
+                destinatario_id=getattr(student, "id", None),
+                destinatario_nombre=getattr(student, "nombre", None),
             )
     except Exception as e:
         print(f"Error enviando correo de aprobación de inscripción: {str(e)}")

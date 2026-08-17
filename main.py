@@ -254,6 +254,40 @@ async def global_exception_handler(request: Request, exc: Exception):
         content={"detail": "Error interno del servidor. El equipo técnico ha sido notificado."},
     )
 
+# F-CORREOS-REGISTRO (2026-08-17, Kevin): job que vacia la cola de correo.
+#
+# Hace falta porque el envio ahora respeta un cupo diario: lo que no entra en
+# el dia queda ENCOLADO. Sin alguien que lo procese, esos correos no saldrian
+# nunca.
+#
+# Corre cada 10 minutos, que alcanza de sobra para el volumen real medido
+# (~24 eventos por dia). Es corto a proposito: asi un correo diferido por
+# falta de cupo sale apenas se libera, y un critico que fallo por un problema
+# momentaneo de SMTP se reintenta rapido.
+_INTERVALO_JOB_CORREOS_SEGUNDOS = 10 * 60
+
+
+async def _job_procesar_cola_correos():
+    from services import email_service
+
+    logger.info(
+        "[job-correos] INICIADO - cada %d min",
+        _INTERVALO_JOB_CORREOS_SEGUNDOS // 60,
+    )
+    while True:
+        # Mismo criterio que el job de congelado: se espera el intervalo ANTES
+        # de la primera corrida. Con uvicorn --reload el startup se dispara en
+        # cada guardado de archivo, y no conviene mandar correos reales en cada
+        # Ctrl+S contra la base compartida con produccion.
+        await asyncio.sleep(_INTERVALO_JOB_CORREOS_SEGUNDOS)
+        try:
+            resumen = await email_service.procesar_pendientes(limite=100)
+            if resumen.get("procesados"):
+                logger.info("[job-correos] %s", resumen)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[job-correos] error procesando la cola: %s", e)
+
+
 @app.on_event("startup")
 async def start_db():
     await init_db()
@@ -277,6 +311,13 @@ async def start_db():
     # de los casos. El job vive en core/dashboard_precomputer.py.
     from core.dashboard_precomputer import start_precomputer
     start_precomputer()
+
+    # F-CORREOS-REGISTRO (2026-08-17): vacia la cola de correo. Se apoya en el
+    # mismo switch que el job de congelado para poder apagarlo en desarrollo.
+    if settings.JOB_CONGELADO_ACTIVO:
+        _task_correos = asyncio.create_task(_job_procesar_cola_correos())
+        _job_procesar_cola_correos._task = _task_correos  # type: ignore
+        logger.info("[job-correos] task creada y referenciada")
 
 @app.get("/")
 async def root():
