@@ -302,3 +302,69 @@ class TestPanel:
         """
         src = _fuente("api/email_logs.py")
         assert "_re.escape(destinatario)" in src
+
+
+# ==========================================================================
+# 7. Tipos de notificacion (F-NOTIF-TIPOS)
+# ==========================================================================
+
+class TestTiposDeNotificacion:
+    def test_hay_catalogo_de_eventos(self):
+        """
+        Antes `tipo_alerta` guardaba solo la SEVERIDAD visual
+        (info/success/warning/error). Medido en produccion: 849
+        notificaciones con apenas esos 4 valores. Sin saber QUE paso no se
+        puede filtrar, agrupar ni dar preferencias por tipo.
+        """
+        from models.notification_events import EventoNotificacion
+        eventos = EventoNotificacion.todos()
+        assert len(eventos) > 25, "el catalogo quedo demasiado corto"
+        # Sale de los titulos que el codigo ya usaba, no es inventado.
+        for esperado in ("pago_aprobado", "nota_validada", "alerta_mora",
+                         "documento_rechazado", "inscripcion_aprobada"):
+            assert esperado in eventos
+
+    def test_el_campo_es_opcional(self):
+        """
+        Las 849 notificaciones historicas no lo tienen y no se van a
+        reescribir. Si fuera obligatorio, leerlas reventaria.
+        """
+        from models.notification import Notification
+        campo = Notification.model_fields["evento"]
+        assert campo.default is None
+        assert not campo.is_required()
+
+    def test_el_servicio_acepta_el_evento(self):
+        import inspect
+        from services.notification_service import create_notification
+        assert "evento" in inspect.signature(create_notification).parameters
+
+    def test_cada_evento_tiene_grupo_para_la_ui(self):
+        """Sin agrupar, la UI mostraria una lista plana de 33 eventos."""
+        from models.notification_events import GRUPO_POR_EVENTO, EventoNotificacion
+        for e in EventoNotificacion.todos():
+            assert e in GRUPO_POR_EVENTO, f"el evento '{e}' no tiene grupo"
+
+
+# ==========================================================================
+# 8. El estudiante se entera de la mora (F-NOTIF-ESTUDIANTE)
+# ==========================================================================
+
+class TestMoraAlEstudiante:
+    def test_la_alerta_de_mora_tambien_le_llega_al_estudiante(self):
+        """
+        Antes la alerta preventiva iba SOLO al encargado. O sea que el unico
+        que no sabia que estaba por caer en abandono automatico era
+        justamente el que podia evitarlo pagando.
+
+        Es la brecha mas clara que aparecio al revisar los 33 puntos donde se
+        notifica: el resto de los eventos que le importan al estudiante
+        (pagos, notas, documentos, inscripciones) ya lo incluian.
+        """
+        src = _fuente("services/congelado_service.py")
+        bloque = src[src.index("async def _notificar_mora_preventiva"):]
+        bloque = bloque[: bloque.index("async def _marcar_abandono_automatico")]
+        assert 'tipo_destinatario="user"' in bloque, "se perdio la notificacion al encargado"
+        assert 'tipo_destinatario="student"' in bloque, "el estudiante no se entera de la mora"
+        # Y que lo lleve a donde puede resolverlo, no a una pantalla de lectura.
+        assert '"/app/payments"' in bloque
