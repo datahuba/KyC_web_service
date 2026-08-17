@@ -11,6 +11,7 @@ from .config import settings
 
 # Importar todos los modelos para registrarlos en Beanie
 from models.user import User
+from models.bug_report import BugReport  # F-REPORTE-BUGS (2026-08-17)
 from models.student import Student
 from models.course import Course
 from models.enrollment import Enrollment
@@ -193,6 +194,7 @@ async def init_db():
     await init_beanie(
         database=db,
         document_models=[
+            BugReport,  # F-REPORTE-BUGS (2026-08-17)
             User,
             Student,
             Notification,
