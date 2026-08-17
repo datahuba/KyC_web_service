@@ -27,7 +27,7 @@ import logging
 from typing import List, Optional, Union
 from bson import ObjectId
 from bson.errors import InvalidId
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
 
 from api.dependencies import get_current_user
@@ -42,8 +42,11 @@ from schemas.certificate import (
     CertificateOut,
     CertificateModuloOut,
 )
+from core.cloudinary_utils import upload_document
 from schemas.certificate_request import (
+    CertificateRequestAprobar,
     CertificateRequestCancelar,
+    CertificateRequestConfirmarFirma,
     CertificateRequestCreate,
     CertificateRequestListResponse,
     CertificateRequestOut,
@@ -445,6 +448,14 @@ async def download_certificate_pdf(
     # RBAC
     certificate_service.verificar_acceso_certificado(cert, current_user)
 
+    # F-CERT-NO-DEUDOR-COBRO (2026-08-17): el estudiante no puede bajar el
+    # Certificado de No Deudor hasta que se confirme la firma física. El
+    # staff sí, porque es quien tiene que imprimirlo para hacerlo firmar.
+    if isinstance(current_user, Student):
+        motivo = await cert_request_service.motivo_bloqueo_descarga(cert)
+        if motivo:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=motivo)
+
     # Descargar PDF desde Cloudinary (con fallback a re-render si falla)
     try:
         pdf_bytes = await certificate_service.descargar_pdf_bytes(cert)
@@ -618,11 +629,76 @@ async def marcar_en_revision_solicitud_cert(
 )
 async def aprobar_solicitud_cert(
     request_id: str,
+    data: Optional[CertificateRequestAprobar] = None,
     current_user: Union[Student, User] = Depends(get_current_user),
 ) -> CertificateRequestOut:
     if not isinstance(current_user, User):
         raise HTTPException(status_code=403, detail="Solo personal autorizado.")
-    req = await cert_request_service.aprobar_solicitud(request_id, current_user)
+    # El body es opcional para no romper a quien ya llamaba este endpoint sin
+    # cuerpo (el flujo de certificado de Notas nunca lo necesitó).
+    req = await cert_request_service.aprobar_solicitud(
+        request_id, current_user, tratamiento=(data.tratamiento if data else None)
+    )
+    return CertificateRequestOut(**cert_request_service._serializar_solicitud(req))
+
+
+@router.patch(
+    "/requests/{request_id}/confirmar-firma",
+    response_model=CertificateRequestOut,
+    summary="[Coordinador financiero/Superadmin] Confirmar la firma física y habilitar la descarga",
+    description=(
+        "Segundo paso de la aprobación del Certificado de No Deudor "
+        "(F-CERT-NO-DEUDOR-COBRO, Kevin 2026-08-17). Aprobar ya emitió el PDF, "
+        "pero el estudiante no puede descargarlo hasta que el coordinador haga "
+        "firmar la copia física y lo habilite acá. Solo aplica a 'no_deudor': "
+        "el certificado de Notas queda disponible apenas se aprueba."
+    ),
+)
+async def confirmar_firma_fisica_cert(
+    request_id: str,
+    data: Optional[CertificateRequestConfirmarFirma] = None,
+    current_user: Union[Student, User] = Depends(get_current_user),
+) -> CertificateRequestOut:
+    if not isinstance(current_user, User):
+        raise HTTPException(status_code=403, detail="Solo personal autorizado.")
+    req = await cert_request_service.confirmar_firma_fisica(
+        request_id, current_user, observacion=(data.observacion if data else None)
+    )
+    return CertificateRequestOut(**cert_request_service._serializar_solicitud(req))
+
+
+@router.post(
+    "/requests/{request_id}/comprobante",
+    response_model=CertificateRequestOut,
+    summary="[Estudiante] Adjuntar el comprobante de pago del arancel",
+    description=(
+        "El Certificado de No Deudor tiene arancel (F-CERT-NO-DEUDOR-COBRO). "
+        "El estudiante sube acá el comprobante para que el coordinador lo vea "
+        "junto a la solicitud. Se puede reemplazar mientras la solicitud siga "
+        "pendiente o en revisión."
+    ),
+)
+async def subir_comprobante_cert(
+    request_id: str,
+    archivo: UploadFile = File(..., description="Imagen o PDF del comprobante"),
+    current_user: Union[Student, User] = Depends(get_current_user),
+) -> CertificateRequestOut:
+    if not isinstance(current_user, Student):
+        raise HTTPException(
+            status_code=403,
+            detail="Solo el estudiante dueño de la solicitud puede subir el comprobante.",
+        )
+    try:
+        url = await upload_document(file=archivo, folder="certificados-comprobantes")
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"No se pudo subir el comprobante: {e}",
+        )
+    if not url:
+        raise HTTPException(status_code=502, detail="No se pudo subir el comprobante.")
+
+    req = await cert_request_service.adjuntar_comprobante(request_id, url, current_user)
     return CertificateRequestOut(**cert_request_service._serializar_solicitud(req))
 
 
