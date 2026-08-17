@@ -351,20 +351,56 @@ async def _build_dashboard_v2(current_user: User) -> dict:
         enr_filter_curso = scope_filter  # ya es dict {"$in": [...]}
     # Si no hay scope, no filtramos por curso_id: trae TODOS los enrollments
 
+    # F-HISTORICOS-FUERA-DEL-DASHBOARD (2026-08-16, Kevin): los programas
+    # historicos dejan de contar en las cifras economicas del dashboard.
+    #
+    # Historia de este criterio, porque cambio dos veces:
+    #   - antes del 2026-08-10: enrollments excluia historicos pero pagos NO,
+    #     asi que total_ingresos no cuadraba con total_inscritos/por_cobrar.
+    #   - 2026-08-10 (F-PERF-DASHBOARD-HISTORICOS-CONSISTENTE): se unifico
+    #     INCLUYENDO todo, con el argumento de que el dinero de un historico
+    #     es dinero real cobrado.
+    #   - 2026-08-16 (esto): Kevin define que un programa historico "ya no
+    #     debe contarse como actual, solo son datos para tener guardados", y
+    #     que tenga su propio apartado de Cuentas Historicas con informes
+    #     propios. Ademas el criterio viejo dejaba DOS cifras distintas para
+    #     lo mismo: el dashboard reportaba Bs 1.056.240 por cobrar mientras
+    #     la pagina de Cuentas por Cobrar mostraba Bs 968.872. Ahora ambas
+    #     usan el mismo criterio y coinciden.
+    #
+    # Excepcion: EC/COORDINADOR pueden tener SOLO historicos asignados. Para
+    # ellos no se excluye nada, o su dashboard quedaria vacio — misma regla
+    # que ya aplicaba F-2026-08-12-EC-DASHBOARD-HISTORICOS al courseBreakdown.
+    curso_ids_historicos_dash = (
+        set()
+        if es_perfil_encargado
+        else {c.id for c in cursos_all if getattr(c, "es_historico", False)}
+    )
+
+    def _sin_historicos(f: dict) -> dict:
+        """Agrega la exclusion de historicos respetando un filtro de curso previo."""
+        if not curso_ids_historicos_dash:
+            return f
+        actual = f.get("curso_id")
+        if isinstance(actual, dict) and "$in" in actual:
+            f["curso_id"] = {
+                "$in": [cid for cid in actual["$in"] if cid not in curso_ids_historicos_dash]
+            }
+        else:
+            f["curso_id"] = {"$nin": list(curso_ids_historicos_dash)}
+        return f
+
     def _enr_filter() -> dict:
         f = {"estado": {"$ne": "cancelado"}}
         if enr_filter_curso is not None:
             f["curso_id"] = enr_filter_curso
-        return f
+        return _sin_historicos(f)
 
     def _pag_filter() -> dict:
-        # Mismo criterio que /dashboard/stats: NO filtrar por historicos
-        # (los pagos de historicos son dinero real, cuentan en revenue).
-        # Solo filtrar por cursos_asignados si hay scope, sino TODOS los pagos.
         f = {"estado_pago": {"$in": [EstadoPago.APROBADO.value, "pagado"]}}
         if current_user.cursos_asignados:
             f["curso_id"] = {"$in": current_user.cursos_asignados}
-        return f
+        return _sin_historicos(f)
 
     def _recent_enr_filter() -> dict:
         if current_user.cursos_asignados:
