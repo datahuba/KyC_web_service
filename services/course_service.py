@@ -12,6 +12,7 @@ from models.course import Course, calcular_estado_actual
 from models.enrollment import Enrollment
 from models.student import Student
 from models.discount import Discount
+from models.user import User
 from schemas.course import CourseCreate, CourseUpdate, CourseEnrolledStudent
 from beanie import PydanticObjectId
 
@@ -261,9 +262,32 @@ async def _sincronizar_requisitos_inscripciones(course: Course) -> None:
         await asyncio.gather(*saves_pendientes, return_exceptions=True)
 
 async def delete_course(id: PydanticObjectId) -> Optional[Course]:
-    """Elimina un curso"""
+    """
+    Elimina un curso y limpia las referencias que quedan apuntandole.
+
+    F-FIX-CURSOS-ASIGNADOS-HUERFANOS (2026-08-16): antes esta funcion solo
+    hacia `course.delete()`. El id borrado seguia vivo dentro de
+    `users.cursos_asignados` de cada encargado/coordinador/cobranza que lo
+    tuviera asignado, y como esa lista es la que define el alcance del rol,
+    quedaba una referencia colgada que no resolvia a ningun curso.
+
+    Sintoma observado en produccion: el usuario SZSENCARGADO mostraba dos
+    entradas "Curso no encontrado" en /app/users. Los dos ids correspondian
+    a cursos creados el 2026-08-10 (04:17 y 04:22 UTC) y borrados despues,
+    sin ninguna inscripcion ni pago asociados.
+
+    No es solo cosmetico: `filtro_cursos_por_rol` arma sus queries con esta
+    lista, asi que arrastrar ids muertos ensucia los filtros de todos los
+    listados que ese usuario ve.
+    """
     course = await Course.get(id)
     if course:
+        # Primero limpiar las referencias, despues borrar. Si el borrado
+        # fallara, es preferible haber limpiado de mas que dejar el id
+        # colgado apuntando a un curso inexistente.
+        await User.find({"cursos_asignados": id}).update(
+            {"$pull": {"cursos_asignados": id}}
+        )
         await course.delete()
     return course
 
