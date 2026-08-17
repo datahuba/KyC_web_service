@@ -2495,14 +2495,31 @@ async def get_matriz_por_pago(
     # F-CXC-EXCLUIR-HISTORICOS (2026-08-04, Kevin): los pagos de cursos
     # historicos NO cuentan en esta vista de auditoria. Es dinero retroactivo
     # cargado para tener el expediente completo, no es deuda real a cobrar.
-    cursos_historicos = await Course.find(Course.es_historico == True).to_list()
-    curso_historico_ids = [c.id for c in cursos_historicos]
-    if curso_historico_ids:
-        if "curso_id" in match and isinstance(match["curso_id"], dict) and "$in" in match["curso_id"]:
-            # Merge con cursos_permitidos si existe
-            match["curso_id"]["$nin"] = list(curso_historico_ids)
-        else:
-            match["curso_id"] = {"$nin": list(curso_historico_ids)}
+    # F-FIX-PORPAGO-FILTRO-CURSO (2026-08-16): este bloque PISABA el filtro de
+    # curso que eligio el usuario. Cuando llegaba `curso_id`, `match["curso_id"]`
+    # era un ObjectId pelado — no un dict con "$in" — asi que la condicion de
+    # abajo daba False y el `else` REEMPLAZABA el filtro entero por
+    # {"$nin": historicos}. Resultado: en Gestion de Pagos > vista "Por Pago",
+    # elegir cualquier programa devolvia SIEMPRE lo mismo (todos los pagos no
+    # historicos). Como el unico curso no historico con pagos es IA, la vista
+    # mostraba IA sin importar que se seleccionara. Reportado por Kevin.
+    #
+    # Regla nueva: una seleccion EXPLICITA de curso manda. Si el usuario pide
+    # un programa concreto, ve ese programa — incluso si es historico, porque
+    # justamente para auditar un historico hay que poder abrirlo. La exclusion
+    # de historicos aplica solo a la vista "todos los cursos".
+    if curso_id is not None:
+        match["curso_id"] = curso_id
+    else:
+        cursos_historicos = await Course.find(Course.es_historico == True).to_list()
+        curso_historico_ids = [c.id for c in cursos_historicos]
+        if curso_historico_ids:
+            if isinstance(match.get("curso_id"), dict) and "$in" in match["curso_id"]:
+                # cursos_permitidos (rol segmentado): se conserva y se le resta
+                # el conjunto de historicos.
+                match["curso_id"]["$nin"] = list(curso_historico_ids)
+            else:
+                match["curso_id"] = {"$nin": list(curso_historico_ids)}
 
     pagos = await Payment.find(match).sort("+fecha_subida").to_list()
 
