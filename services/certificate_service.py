@@ -43,8 +43,14 @@ logger = logging.getLogger(__name__)
 # ========================================================================
 
 UAGRM_NOMBRE = "UNIDAD DE POSTGRADO"
-UAGRM_FACULTAD = "FACULTAD DE AUDITORIA FINANCIERA O CONTADURIA PUBLICA"
-UAGRM_UNIVERSIDAD = 'UNIVERSIDAD AUTONOMA "GABRIEL RENE MORENO"'
+# CORREGIDO (Kevin 2026-08-17): el nombre que estaba, "FACULTAD DE AUDITORIA
+# FINANCIERA O CONTADURIA PUBLICA", no es el de la facultad. El correcto es el
+# que figura en la hoja membretada y en el cargo del director.
+UAGRM_FACULTAD = (
+    "FACULTAD DE CIENCIAS CONTABLES, AUDITORÍA, "
+    "SISTEMAS DE CONTROL DE GESTIÓN Y FINANZAS"
+)
+UAGRM_UNIVERSIDAD = 'UNIVERSIDAD AUTÓNOMA "GABRIEL RENÉ MORENO"'
 UAGRM_DIRECCION = "Av. Centenario entre primer y segundo anillo"
 UAGRM_EMAIL = "postgradocontaduria@uagrm.edu.bo"
 UAGRM_TELEFONO = "Telf. Fax: 337-0569"
@@ -65,10 +71,12 @@ UAGRM_CIUDAD = "Santa Cruz"
 #
 # Estos datos los usan los DOS tipos de certificado (Notas y No Deudor).
 FIRMANTE_COORD_NOMBRE = "Lic. Claudia R. Cuéllar Paz"
+# El cargo ya no repite el nombre de la facultad: la hoja membretada lo trae
+# impreso arriba y el cuerpo del certificado lo dice una vez. Repetirlo en el
+# pie de firma era la cuarta aparición en la misma carilla.
 FIRMANTE_COORD_CARGO = (
     "COORDINADORA ADMINISTRATIVA Y FINANCIERA\n"
-    "POSTGRADO DE AUDITORIA FINANCIERA\n"
-    "O CONTADURIA PUBLICA"
+    "UNIDAD DE POSTGRADO"
 )
 FIRMANTE_DIRECTORA_NOMBRE = "Ph.D. Fausto Mendoza Iriarte"
 FIRMANTE_DIRECTORA_CARGO = (
@@ -382,8 +390,18 @@ def _make_pdf_styles():
     return styles
 
 
-def _header_table(folio: str, styles: dict):
-    """Tabla de encabezado: titulos UAGRM centrados + folio a la derecha."""
+def _header_table(folio: str, styles: dict, ancho_total: float = 200.0):
+    """
+    Tabla de encabezado: titulos UAGRM centrados + folio a la derecha.
+
+    `ancho_total` se agrego el 2026-08-17 al corregir el nombre de la
+    facultad: el nuevo ("FACULTAD DE CIENCIAS CONTABLES, AUDITORÍA, SISTEMAS
+    DE CONTROL DE GESTIÓN Y FINANZAS") es mucho mas largo que el anterior y
+    con las 150pt fijas que tenia la columna se partia en cuatro renglones,
+    el folio salia cortado ("N° 010/" y "2026" en lineas distintas) y el
+    certificado de Notas se iba a DOS paginas. La tabla ahora usa el ancho
+    util real del marco.
+    """
     from reportlab.platypus import Table, TableStyle, Paragraph
     from reportlab.lib import colors
 
@@ -394,9 +412,11 @@ def _header_table(folio: str, styles: dict):
     titulos = [p_top, p_fac, p_uni]
     folio_p = Paragraph(folio, styles["folio"])
 
+    # El folio necesita ancho fijo para no cortarse; el resto va a los titulos.
+    ancho_folio = 70.0
     t = Table(
         [[titulos, folio_p]],
-        colWidths=[150, 50],
+        colWidths=[max(ancho_total - ancho_folio, 130.0), ancho_folio],
     )
     t.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -408,11 +428,16 @@ def _header_table(folio: str, styles: dict):
     return t
 
 
-def _linea_horizontal():
-    """Línea horizontal separadora (decorativa, color institucional)."""
+def _linea_horizontal(ancho: float = 200.0):
+    """
+    Línea horizontal separadora (decorativa, color institucional).
+
+    Toma el ancho para acompañar al encabezado: con las 200pt fijas quedaba
+    una rayita corta debajo de un bloque que ocupa todo el marco.
+    """
     from reportlab.platypus import Table, TableStyle
     from reportlab.lib import colors
-    t = Table([[""]], colWidths=[200], rowHeights=[1])
+    t = Table([[""]], colWidths=[ancho], rowHeights=[1])
     t.setStyle(TableStyle([
         ("LINEABOVE", (0, 0), (-1, 0), 1, colors.HexColor("#023273")),
     ]))
@@ -616,8 +641,9 @@ def render_pdf_notas(
 
     elements = []
     # Encabezado
-    elements.append(_header_table(folio, styles))
-    elements.append(_linea_horizontal())
+    ancho_util_a4 = 170 * mm
+    elements.append(_header_table(folio, styles, ancho_total=ancho_util_a4))
+    elements.append(_linea_horizontal(ancho_util_a4))
     elements.append(Spacer(1, 6 * mm))
 
     # Título
@@ -773,8 +799,9 @@ def render_pdf_no_deudor(
     )
 
     elements = []
-    elements.append(_header_table(folio, styles))
-    elements.append(_linea_horizontal())
+    ancho_util_a4 = 170 * mm
+    elements.append(_header_table(folio, styles, ancho_total=ancho_util_a4))
+    elements.append(_linea_horizontal(ancho_util_a4))
     elements.append(Spacer(1, 6 * mm))
 
     elements.append(Paragraph("CERTIFICADO DE NO DEUDOR", styles["titulo_doc"]))
@@ -902,6 +929,15 @@ def render_pdf_no_deudor_membretado(
 
     elements.append(Paragraph("CERTIFICADO DE NO DEUDOR", styles["titulo_doc"]))
 
+    # F-CERT-REDACCION (Kevin 2026-08-17): "que no repita lo mismo".
+    #
+    # La versión anterior nombraba a la facultad TRES veces en media carilla:
+    # en la línea de presentación, otra vez dentro del "Que, revisando los
+    # registros...", y una tercera en el pie de cada firma. Encima la hoja
+    # membretada ya la trae impresa arriba, así que eran cuatro.
+    #
+    # Ahora se nombra UNA sola vez, en la presentación, y el cuerpo va
+    # directo al grano con la redacción que dictó Kevin.
     elements.append(Paragraph(
         f"La Unidad de Postgrado de la {UAGRM_FACULTAD} de la {UAGRM_UNIVERSIDAD}.",
         styles["cuerpo"],
@@ -910,49 +946,46 @@ def render_pdf_no_deudor_membretado(
     elements.append(Paragraph("CERTIFICA:", styles["certifica_label"]))
 
     ci_full = _format_ci_full(student.carnet, student.extension, student.complemento_carnet)
-    elements.append(Paragraph(
-        f"Que, revisando los registros de pagos existentes en la Unidad de Postgrado de la "
-        f"{UAGRM_FACULTAD}, se puede evidenciar que el (la):",
-        styles["cuerpo"],
-    ))
-    elements.append(Paragraph(
-        f"<b>{_nombre_con_tratamiento(student.nombre or '', tratamiento)}</b><br/>"
-        f"CI. {ci_full}.",
-        styles["cuerpo_centrado"],
-    ))
+    nombre_impreso = _nombre_con_tratamiento(student.nombre or "", tratamiento)
 
-    partes_nombre = [(course.nombre_programa or "").upper()]
+    # Se mantiene en mayúsculas como en el formato original. Solo se
+    # normalizan los espacios de más, que vienen en los datos ("APLICADA A
+    # LA  EDUCACIÓN,  LA INVESTIGACIÓN") y ensuciaban el renglón.
+    nombre_programa = re.sub(r"\s+", " ", (course.nombre_programa or "").strip()).upper()
+    partes_programa = [nombre_programa]
     if course.codigo:
-        partes_nombre.append(f"CÓDIGO {course.codigo}")
-    prog_label = " ".join(partes_nombre)
-    elements.append(Paragraph("Del Programa Académico DIPLOMADO en:", styles["cuerpo"]))
-    elements.append(Paragraph(prog_label, styles["caja_programa"]))
-    elements.append(Spacer(1, 4 * mm))
+        partes_programa.append(f"({course.codigo})")
+    programa_impreso = " ".join(partes_programa)
 
+    # Alcance. La redacción que pidió Kevin afirma que no hay deuda "del
+    # programa mencionado", sin más. Eso es correcto SOLO cuando el
+    # certificado cubre el programa entero; si cubre hasta el módulo N de un
+    # total mayor, hay que decirlo, porque si no el documento afirmaría que
+    # no debe nada de un programa que todavía está pagando.
     total = len(enrollment.modulos)
     if hasta_modulo_n >= total:
-        texto_no_deuda = (
-            '<b>"NO TIENE DEUDA ECONOMICA PENDIENTE"</b>, habiendo cancelado el total del costo '
-            'del mencionado programa de acuerdo al compromiso de pago firmado con la Unidad de Postgrado.'
-        )
+        alcance = ""
     else:
-        # BUG-FIX (2026-08-17): si el módulo no tiene fechas cargadas,
-        # `_format_rango_modulo` devuelve "—" y el certificado salía diciendo
-        # "hasta el Módulo 1 (—)". Se vio en el certificado N° 007/2026, ya
-        # emitido a un estudiante real. Cuando no hay rango, el paréntesis
-        # entero se omite en vez de imprimir un guion suelto.
+        # Si el módulo no tiene fechas cargadas, `_format_rango_modulo`
+        # devuelve "—" y antes salía "hasta el Módulo 1 (—)" — visto en el
+        # certificado N° 007/2026, ya emitido. Sin rango se omite el
+        # paréntesis entero.
         rango = _format_rango_modulo(
             getattr(enrollment.modulos[hasta_modulo_n - 1], "fecha_inicio", None),
             getattr(enrollment.modulos[hasta_modulo_n - 1], "fecha_fin", None),
         )
         detalle_rango = f" ({rango})" if rango and rango != "—" else ""
-        texto_no_deuda = (
-            f'<b>"NO TIENE DEUDA ECONOMICA PENDIENTE"</b> hasta el <b>Módulo {hasta_modulo_n}</b>'
-            f'{detalle_rango} del mencionado programa, de acuerdo al compromiso de pago firmado '
-            f'con la Unidad de Postgrado.'
-        )
-    elements.append(Paragraph(texto_no_deuda, styles["no_deudor_enfasis"]))
+        alcance = f" hasta el <b>Módulo {hasta_modulo_n}</b>{detalle_rango}"
 
+    elements.append(Paragraph(
+        f"Que el o la postgraduante <b>{nombre_impreso}</b>, con C.I. {ci_full}, "
+        f"del programa <b>{programa_impreso}</b>, "
+        f'<b>no tiene deuda económica pendiente</b>{alcance} del programa mencionado, '
+        f"de acuerdo al compromiso de pago firmado con la Unidad de Postgrado.",
+        styles["cuerpo"],
+    ))
+
+    elements.append(Spacer(1, 4 * mm))
     elements.append(Paragraph(
         f"{UAGRM_CIUDAD}, {_format_fecha_larga_es(emitido_en)}.",
         styles["cuerpo"],

@@ -325,20 +325,47 @@ class TestMembrete:
             emitido_en=datetime(2026, 8, 17, tzinfo=timezone.utc),
             tratamiento="Lic.",
         )
-        texto = PdfReader(io.BytesIO(pdf)).pages[0].extract_text() or ""
+        texto = (PdfReader(io.BytesIO(pdf)).pages[0].extract_text() or "").replace("\n", " ")
         assert "CERTIFICADO DE NO DEUDOR" in texto
         assert "LIC. KEVIN ANDRES SOTO VILLARROEL" in texto
-        assert "NO TIENE DEUDA ECONOMICA PENDIENTE" in texto
+        # F-CERT-REDACCION (Kevin 2026-08-17): la redaccion la dicto el:
+        # "certifica que el o la postgraduante (nombre) del programa
+        # (programa) no tiene deuda economica pendiente del programa
+        # mencionado de acuerdo al compromiso...".
+        assert "Que el o la postgraduante" in texto
+        assert "no tiene deuda económica pendiente" in texto
+        assert "de acuerdo al compromiso de pago firmado" in texto
 
-    def test_hasta_el_ultimo_modulo_dice_el_total_del_programa(self):
+    def test_el_alcance_solo_aparece_si_es_parcial(self):
+        """
+        La redaccion que dicto Kevin afirma que no hay deuda "del programa
+        mencionado", sin mas. Eso es correcto SOLO cuando el certificado
+        cubre el programa entero.
+
+        Si cubre hasta el modulo N de un total mayor hay que decirlo: sin esa
+        aclaracion el documento afirmaria que el estudiante no debe nada de un
+        programa que todavia esta pagando.
+        """
         from pypdf import PdfReader
-        pdf = cs.render_pdf_no_deudor_membretado(
-            student=_student(), course=_course(), enrollment=_enrollment(n_modulos=5),
-            hasta_modulo_n=5, folio="N° 043/2026",
-            emitido_en=datetime(2026, 8, 17, tzinfo=timezone.utc),
+
+        def texto_de(hasta_n):
+            pdf = cs.render_pdf_no_deudor_membretado(
+                student=_student(), course=_course(), enrollment=_enrollment(n_modulos=5),
+                hasta_modulo_n=hasta_n, folio="N° 043/2026",
+                emitido_en=datetime(2026, 8, 17, tzinfo=timezone.utc),
+            )
+            return (PdfReader(io.BytesIO(pdf)).pages[0].extract_text() or "").replace("\n", " ")
+
+        completo = texto_de(5)
+        assert "del programa mencionado" in completo
+        assert "hasta el Módulo" not in completo, (
+            "cubriendo todo el programa no corresponde acotar el alcance"
         )
-        texto = (PdfReader(io.BytesIO(pdf)).pages[0].extract_text() or "").replace("\n", " ")
-        assert "total del costo" in texto
+
+        parcial = texto_de(3)
+        assert "hasta el Módulo 3" in parcial, (
+            "un certificado parcial DEBE decir hasta que modulo cubre"
+        )
 
     def test_sin_fechas_de_modulo_no_queda_un_guion_suelto(self):
         """
@@ -374,6 +401,40 @@ class TestMembrete:
         )
         texto = (PdfReader(io.BytesIO(pdf)).pages[0].extract_text() or "").replace("\n", " ")
         assert "01/03/2026" in texto
+
+    def test_la_facultad_tiene_el_nombre_correcto(self):
+        """
+        Kevin, 2026-08-17: el nombre que estaba ("FACULTAD DE AUDITORIA
+        FINANCIERA O CONTADURIA PUBLICA") no es el de la facultad. El correcto
+        es el que figura en la hoja membretada y en el cargo del director.
+        """
+        assert "CIENCIAS CONTABLES" in cs.UAGRM_FACULTAD
+        assert "SISTEMAS DE CONTROL DE GESTIÓN Y FINANZAS" in cs.UAGRM_FACULTAD
+        assert "AUDITORIA FINANCIERA O CONTADURIA" not in cs.UAGRM_FACULTAD
+
+    def test_la_facultad_se_nombra_una_sola_vez(self):
+        """
+        Kevin: "que no repita lo mismo". Antes la facultad aparecia TRES veces
+        en media carilla (presentacion, cuerpo, y pie de cada firma), mas la
+        que ya trae impresa la hoja membretada.
+        """
+        from pypdf import PdfReader
+
+        pdf = cs.render_pdf_no_deudor_membretado(
+            student=_student(), course=_course(), enrollment=_enrollment(),
+            hasta_modulo_n=3, folio="N° 044/2026",
+            emitido_en=datetime(2026, 8, 17, tzinfo=timezone.utc),
+        )
+        texto = (PdfReader(io.BytesIO(pdf)).pages[0].extract_text() or "").replace("\n", " ")
+        # El unico lugar donde queda es la linea de presentacion y el cargo del
+        # director (que Kevin paso con la facultad incluida). Dos, no cuatro.
+        assert texto.count("CIENCIAS CONTABLES") <= 2, (
+            "la facultad se sigue repitiendo de mas: %d veces"
+            % texto.count("CIENCIAS CONTABLES")
+        )
+        # El cargo de la coordinadora ya no la repite.
+        assert "UNIDAD DE POSTGRADO" in cs.FIRMANTE_COORD_CARGO
+        assert "CONTADURIA" not in cs.FIRMANTE_COORD_CARGO
 
     def test_los_firmantes_son_los_correctos(self):
         """
