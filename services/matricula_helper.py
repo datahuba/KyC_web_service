@@ -114,12 +114,15 @@ def normalizar_matriculas(course: "Course") -> None:
     ambito = course.ambito
 
     if ambito == AmbitoFormacion.PROFESIONAL:
-        # Sin matricula institucional: el costo ya esta dentro del programa.
-        # Se escriben CEROS EXPLICITOS, no None, justamente para no caer en
-        # los defaults globales.
-        course.matricula_interno = 0.0
-        course.matricula_primer_carrera = 0.0
-        course.matricula_profesional = 0.0
+        # Matricula UNICA: la que el programa define en `matricula_interno`,
+        # igual para todos los alumnos. Se copia a los dos campos
+        # diferenciados para que queden coherentes y, sobre todo, para que
+        # NUNCA queden en None — None significa "cobra el default global"
+        # (200 / 500), que es justo lo que descolocaba el cobro.
+        unica = float(course.matricula_interno or 0)
+        course.matricula_interno = unica
+        course.matricula_primer_carrera = unica
+        course.matricula_profesional = unica
         return
 
     # Educacion continua: manda la matricula diferenciada. Si no vino, se
@@ -159,17 +162,24 @@ def get_matricula_for_student(
         >>> get_matricula_for_student(curso, estudiante_profesional)
         600.0
     """
-    # P-AMBITO-FORMACION (2026-08-18): un programa profesional NO tiene
-    # matricula institucional, el costo ya esta dentro del programa. Se corta
-    # aca antes de mirar los overrides, porque si esos campos quedaron en
-    # None el bloque de abajo devolveria los defaults globales (200 / 500) y
-    # le cobraria al estudiante una matricula que no existe.
+    # P-AMBITO-FORMACION (2026-08-18, corregido por Kevin la misma noche):
+    # un programa PROFESIONAL cobra matricula UNICA, igual para todos, la que
+    # el programa define en `matricula_interno`. Lo que es exclusivo de
+    # educacion continua es la matricula DIFERENCIADA (200 primera carrera /
+    # 500 profesional), que depende del alumno.
     #
-    # Este chequeo es la red de seguridad de los programas ya creados: los
-    # nuevos pasan por normalizar_matriculas() y guardan ceros explicitos,
-    # pero los que estan en la base desde antes siguen con None.
+    # Primera version de este fix asumia que profesional = sin matricula.
+    # Kevin lo corrigio con dos casos reales: MAES-GTAF-2026/1 cobra 1300 y
+    # DIPL-IA-2026 cobra 300, y los dos son profesionales.
+    #
+    # ESTE ES EL BUG DE FONDO: `matricula_interno` es el campo que el
+    # encargado completa en el formulario, y hasta ahora esta funcion ni lo
+    # miraba. Caia siempre en los diferenciados y, si estaban en None, en los
+    # defaults globales. Efecto medido en produccion: los 87 inscritos de
+    # MAES-GTAF-2026/1 quedaron con costo_matricula=200 en vez de 1300, o sea
+    # 1.100 Bs menos por alumno — 95.700 Bs sin facturar.
     if getattr(course, "ambito", None) == AmbitoFormacion.PROFESIONAL:
-        return 0.0
+        return float(course.matricula_interno or 0)
 
     # Default conservador: si no hay estudiante, asumimos primer carrera
     # (cobra menos, mas seguro). Tambien si el dato es None o False
