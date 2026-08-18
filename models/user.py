@@ -11,7 +11,7 @@ from typing import Optional, List
 import pymongo
 from pydantic import Field, EmailStr
 from .base import MongoBaseModel, PyObjectId
-from .enums import UserRole, SubtipoCoordinador
+from .enums import UserRole, SubtipoCoordinador, AmbitoFormacion
 
 class User(MongoBaseModel):
     """
@@ -59,6 +59,30 @@ class User(MongoBaseModel):
     subtipo_coordinador: Optional[SubtipoCoordinador] = Field(
         None,
         description="Subtipo del rol Coordinador. Solo 'financiero' ve lo económico. Obligatorio si rol es COORDINADOR."
+    )
+
+    # P-AMBITO-FORMACION (2026-08-18, Kevin en la capacitacion):
+    # "desde el momento de crear los usuarios, cuando se creen los
+    # encargados, hay una opcion para separar educacion continua con
+    # profesionales, y educacion continua en sus propios datos sale
+    # diferente y profesionales tambien".
+    #
+    # Determina QUE VE el encargado: el de programas profesionales no ve
+    # ningun campo de matricula, el de educacion continua ve solo los
+    # diferenciados. Como cada encargado es de UN solo tipo (decision de
+    # Kevin), tambien sirve para no preguntarle el ambito al crear un
+    # programa: lo hereda.
+    #
+    # NO es la fuente de verdad de lo que ES un programa — eso vive en
+    # `Course.ambito`. Aca solo dice a que mundo pertenece esta persona.
+    ambito: Optional[AmbitoFormacion] = Field(
+        None,
+        description=(
+            "P-AMBITO-FORMACION: ambito del encargado/coordinador "
+            "(educacion_continua o profesional). Define que campos ve y el "
+            "ambito por defecto de los programas que crea. None = sin "
+            "definir, se le pregunta al crear."
+        )
     )
 
     # ISSUE-A-VERIFICACION: Verificación de Correo Electrónico (NO bloqueante)

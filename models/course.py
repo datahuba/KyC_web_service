@@ -22,7 +22,7 @@ from typing import Optional, List
 import pymongo
 from pydantic import BaseModel, Field, validator
 from .base import MongoBaseModel, PyObjectId
-from .enums import TipoCurso, Modalidad
+from .enums import TipoCurso, Modalidad, AmbitoFormacion
 from .estado_programa import EstadoPrograma, calcular_estado_actual
 from .requisito import RequisitoTemplate
 
@@ -165,6 +165,28 @@ class Course(MongoBaseModel):
         ge=0,
         description="F-2026-08-12-DESCUENTO-BECA: override de matricula para estudiantes que YA TIENEN TITULO PROFESIONAL. "
                     "Si None, usa settings.MATRICULA_PROFESIONAL_DEFAULT (500 Bs por default)."
+    )
+
+    # ========================================================================
+    # P-AMBITO-FORMACION (2026-08-18, Kevin en la capacitacion)
+    # ========================================================================
+    # Que ES el programa. Es la fuente de verdad para las reglas de matricula
+    # y lo que permite separar ingresos de educacion continua vs postgrado en
+    # los reportes.
+    #
+    # Vive en el Course y no solo en el usuario a proposito: si dependiera de
+    # quien lo creo, al editarlo un CPD o superadmin (que no son ni una cosa
+    # ni la otra) no habria forma de saber que reglas aplicar.
+    #
+    # Optional por compatibilidad: los programas creados antes de este campo
+    # lo tienen en None. `resolver_ambito()` los interpreta por su tipo_curso.
+    ambito: Optional[AmbitoFormacion] = Field(
+        default=None,
+        description=(
+            "P-AMBITO-FORMACION: educacion_continua (cobra matricula "
+            "diferenciada) o profesional (sin matricula institucional). "
+            "None en programas anteriores al campo; se deduce del tipo_curso."
+        ),
     )
 
     # ========================================================================

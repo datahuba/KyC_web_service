@@ -1010,6 +1010,28 @@ async def create_course(
         # usamos otro campo dedicado (ej: `archivado`).
         course.creado_por_id = current_user.id
         course.activo = True
+
+        # P-AMBITO-FORMACION (2026-08-18): resolver el ambito y dejar las
+        # matriculas en numeros concretos ANTES de guardar.
+        #
+        # Es lo que impide repetir lo que paso en la capacitacion del
+        # 2026-08-18: se creo un programa profesional con "Matricula = 0"
+        # pero el bloque diferenciado vacio, y como None significa "cobra el
+        # default global", cada estudiante quedaba con 200 o 500 Bs de
+        # matricula fantasma que ademas le impedia pasar a "Activo".
+        from services.matricula_helper import resolver_ambito, normalizar_matriculas
+
+        course.ambito = resolver_ambito(
+            tipo_curso=str(getattr(course.tipo_curso, "value", course.tipo_curso)),
+            ambito_explicito=getattr(course_in, "ambito", None),
+            ambito_del_creador=(
+                str(current_user.ambito.value)
+                if getattr(current_user, "ambito", None)
+                else None
+            ),
+        )
+        normalizar_matriculas(course)
+
         await course.save()
 
         # F-2026-08-12-EC-AUTOASIGNAR-CURSO (Kevin 2026-08-12 post-reunion):
@@ -1127,6 +1149,29 @@ async def update_course(
 
     try:
         course = await course_service.update_course(course=course, course_in=course_in)
+
+        # P-AMBITO-FORMACION (2026-08-18): re-resolver y normalizar tambien al
+        # editar. Sin esto, un programa creado antes del campo seguiria con
+        # ambito None y matriculas en None para siempre: editarlo es
+        # justamente la oportunidad de sanearlo. Ademas evita que un cambio de
+        # tipo_curso (a maestria, por ejemplo) deje un ambito incoherente.
+        from services.matricula_helper import resolver_ambito, normalizar_matriculas
+
+        course.ambito = resolver_ambito(
+            tipo_curso=str(getattr(course.tipo_curso, "value", course.tipo_curso)),
+            ambito_explicito=(
+                getattr(course_in, "ambito", None)
+                or (str(course.ambito.value) if course.ambito else None)
+            ),
+            ambito_del_creador=(
+                str(current_user.ambito.value)
+                if getattr(current_user, "ambito", None)
+                else None
+            ),
+        )
+        normalizar_matriculas(course)
+        await course.save()
+
         # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): popular
         # estado_calculado para que el frontend muestre el badge correcto.
         course.estado_calculado = course.get_estado_actual()

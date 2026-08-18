@@ -187,6 +187,38 @@ class UserRole(str, Enum):
     COORDINADOR = "coordinador"  # NUEVO (ISSUE-R-ROLES): supervisa Encargados de Curso de una misma área
 
 
+class AmbitoFormacion(str, Enum):
+    """
+    P-AMBITO-FORMACION (2026-08-18, Kevin durante la capacitacion).
+
+    Separa los dos mundos de la Unidad de Postgrado, que tienen reglas de
+    matricula distintas:
+
+    - EDUCACION_CONTINUA: cursos, talleres y algunos diplomados. El
+      estudiante paga matricula institucional, DIFERENCIADA segun sea
+      primera carrera o ya profesional (200 / 500 Bs por default).
+    - PROFESIONAL: maestrias, doctorados y los diplomados profesionales.
+      NO hay matricula institucional; el costo ya esta dentro del programa.
+
+    Por que un campo propio y no derivarlo de `TipoCurso`: maestria y
+    doctorado son siempre profesionales y curso/taller siempre continua,
+    pero el DIPLOMADO es ambiguo — Kevin, 2026-08-18: "hay diplomados uno
+    educacion continua y el otro profesional". Deducirlo seria adivinar, y
+    lo que esta en juego es cuanto se le cobra al estudiante.
+    """
+    EDUCACION_CONTINUA = "educacion_continua"
+    PROFESIONAL = "profesional"
+
+
+#: Tipos de curso cuyo ambito NO se pregunta: siempre son profesionales.
+#: Kevin (2026-08-18): "de ahi los demas, maestrias, doctorados, todos son
+#: profesionales".
+TIPOS_CURSO_SIEMPRE_PROFESIONAL = {"maestría", "doctorado"}
+
+#: Tipos de curso que por defecto son educacion continua.
+TIPOS_CURSO_DEFAULT_CONTINUA = {"curso", "taller"}
+
+
 class SubtipoCoordinador(str, Enum):
     """
     Subtipo del rol COORDINADOR (ISSUE-R-PERFIL-GENERICO). Hay 3 coordinadores:
