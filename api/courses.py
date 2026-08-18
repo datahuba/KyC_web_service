@@ -966,30 +966,37 @@ async def create_course(
             ),
         )
 
-    # F-2026-08-12-EC-HISTORICO-CREAR (Kevin 2026-08-12 post-reunion):
-    # cualquier EC puede crear cualquier tipo, pero:
-    # - Si es historico (es_historico=True), NO exigimos fecha_fin
-    #   (programas del pasado lejano pueden no tener fecha exacta).
-    # - Si NO es historico y trae fecha_fin, validamos que sea pasada
-    #   (es coherente con que es un programa "historico/cerrado").
+    # F-FIX-FECHA-FIN-INVERTIDA (2026-08-18, Kevin): esta validacion estaba
+    # AL REVES y se contradecia a si misma.
     #
-    # FIX-ISSUE-251 (2026-08-14): el mensaje era confuso. Ahora claro.
-    if not es_historico_flag:
+    # Decia: si el programa NO es historico y la fecha_fin es futura -> error.
+    # O sea, le exigia a un programa EN EJECUCION haber terminado en el
+    # pasado. Y el propio mensaje ofrecia como salida "usa una fecha futura
+    # si es un programa programado o en ejecucion", que era exactamente lo
+    # que disparaba el error.
+    #
+    # Consecuencia real: al crear la maestria MAES-GTAF-2026/1 (que va de
+    # mayo 2026 a diciembre 2027) hubo que poner una fecha_fin FALSA del
+    # pasado para poder guardar. Quedo un dato incorrecto en produccion.
+    #
+    # La regla correcta es la inversa: el que cierra en el pasado es el
+    # HISTORICO. Un programa en ejecucion o programado termina en el futuro,
+    # que es lo normal y no tiene nada que validar.
+    if es_historico_flag:
         fecha_fin = getattr(course_in, "fecha_fin", None)
         if fecha_fin is not None:
             if isinstance(fecha_fin, _dt):
                 fin_dt = fecha_fin
             else:
                 fin_dt = _dt.combine(fecha_fin, _dt.min.time())
-            now_naive = utcnow_naive()
-            if fin_dt >= now_naive:
+            if fin_dt >= utcnow_naive():
                 raise HTTPException(
                     status_code=400,
                     detail=(
-                        "La fecha_fin debe ser ANTERIOR a hoy cuando el programa "
-                        "NO es historico. Tienes 2 opciones: (1) marca es_historico=true "
-                        "si es un programa del pasado, o (2) deja fecha_fin null "
-                        "o usa una fecha futura si es un programa programado o en ejecucion."
+                        "Un programa historico ya tiene que haber terminado: la "
+                        "fecha de fin debe ser anterior a hoy. Si el programa "
+                        "sigue vigente, elegi 'En ejecucion' o 'Proximo' en vez "
+                        "de 'Historico'."
                     ),
                 )
     try:
