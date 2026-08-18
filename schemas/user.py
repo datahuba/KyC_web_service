@@ -14,7 +14,7 @@ Schemas incluidos:
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator, AliasChoices
-from models.enums import UserRole, SubtipoCoordinador, MAX_PROGRAMAS_POR_ENCARGADO
+from models.enums import UserRole, SubtipoCoordinador, AmbitoFormacion, MAX_PROGRAMAS_POR_ENCARGADO
 from models.base import PyObjectId
 
 # Roles que requieren nombre_funcional obligatorio (ISSUE-R-ROLES + ISSUE-R-PERFIL-GENERICO)
@@ -71,6 +71,12 @@ class UserCreate(BaseModel):
         if rol in _ROLES_REQUIEREN_NOMBRE_FUNCIONAL and not v:
             raise ValueError("nombre_funcional es obligatorio para los roles Encargado de Curso, Coordinador y Cobranza")
         return v
+
+    # P-AMBITO-FORMACION (2026-08-18, Kevin): "separar las cuentas de
+    # encargados de los de educacion continua y los de profesionales, asi
+    # sabemos cual es cual". Define que campos de matricula ve al crear un
+    # programa y el ambito por defecto de los programas que crea.
+    ambito: Optional[AmbitoFormacion] = None
 
     @field_validator("subtipo_coordinador")
     @classmethod
@@ -143,6 +149,11 @@ class UserResponse(BaseModel):
     cursos_asignados: List[PyObjectId] = Field(default_factory=list)
     carnet: Optional[str] = None  # GAP-1
     subtipo_coordinador: Optional[SubtipoCoordinador] = None  # ISSUE-R-PERFIL-GENERICO
+    # P-AMBITO-FORMACION (2026-08-18, Kevin): "separar las cuentas de
+    # encargados de los de educacion continua y los de profesionales, asi
+    # sabemos cual es cual". Define que campos de matricula ve al crear un
+    # programa y el ambito por defecto de los programas que crea.
+    ambito: Optional[AmbitoFormacion] = None
     cv_url: Optional[str] = None  # HOJA-DE-VIDA-DOCENTE
 
 
@@ -179,6 +190,11 @@ class UserUpdate(BaseModel):
     cursos_asignados: Optional[List[PyObjectId]] = None
     carnet: Optional[str] = Field(None, max_length=20)  # GAP-1
     subtipo_coordinador: Optional[SubtipoCoordinador] = None  # ISSUE-R-PERFIL-GENERICO
+    # P-AMBITO-FORMACION (2026-08-18, Kevin): "separar las cuentas de
+    # encargados de los de educacion continua y los de profesionales, asi
+    # sabemos cual es cual". Define que campos de matricula ve al crear un
+    # programa y el ambito por defecto de los programas que crea.
+    ambito: Optional[AmbitoFormacion] = None
     cv_url: Optional[str] = None  # HOJA-DE-VIDA-DOCENTE
 
     @field_validator("nombre_funcional")
