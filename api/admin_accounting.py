@@ -342,8 +342,48 @@ async def _aplicar_ajuste(
         # PASO 2: Actualizar modulos y enrollment
         if tipo == "completo":
             from models.enrollment import ModuloEstado
-            enrollment.modulos = [ModuloEstado(**m) for m in MODULOS_CANONICOS]
-            modulos_actualizados = 6
+            # F-FIX-AJUSTE-BORRA-NOTAS (2026-08-18, Kevin): esta linea
+            # reemplazaba el arreglo de modulos ENTERO por MODULOS_CANONICOS,
+            # que solo describe la parte financiera (costo, monto_pagado,
+            # estado). Como ModuloEstado nace con `nota=None` y
+            # `estado_academico="Cursando"`, un ajuste CONTABLE borraba de
+            # paso TODO el historial ACADEMICO del estudiante: la nota, si
+            # aprobo o reprobo, la asistencia, el borrador del docente y la
+            # marca de que CPD ya lo habia validado.
+            #
+            # Y lo borraba en silencio: nadie revisa notas despues de correr
+            # un ajuste de plata, asi que se descubriria recien cuando un
+            # alumno abre su libreta y no encuentra su calificacion.
+            #
+            # Ahora se arma lo financiero desde el canonico y se ARRASTRA lo
+            # academico del modulo que ya existia en esa posicion. Los
+            # modulos nuevos (si el canonico tiene mas) nacen vacios, que es
+            # lo correcto: no hubo nota que preservar.
+            CAMPOS_ACADEMICOS = (
+                "nota",
+                "estado_academico",
+                "nota_borrador",
+                "estado_validacion_nota",
+                "asistencia_porcentaje",
+                "iniciado_en",
+                "finalizado_en",
+            )
+            modulos_previos = list(enrollment.modulos or [])
+            nuevos_modulos = []
+            for i, plantilla in enumerate(MODULOS_CANONICOS):
+                datos = dict(plantilla)
+                if i < len(modulos_previos):
+                    anterior = modulos_previos[i]
+                    for campo in CAMPOS_ACADEMICOS:
+                        valor = getattr(anterior, campo, None)
+                        # `estado_academico` y `estado_validacion_nota` son str
+                        # con default, asi que un None no deberia pisar el
+                        # default del canonico; el resto se arrastra tal cual.
+                        if valor is not None:
+                            datos[campo] = valor
+                nuevos_modulos.append(ModuloEstado(**datos))
+            enrollment.modulos = nuevos_modulos
+            modulos_actualizados = len(nuevos_modulos)
         else:  # diff
             # F-FIX-IMPUTAR-MODULOS (2026-08-11, Kevin): antes, cuando
             # monto_objetivo < 1470 (casos especiales: Adolfo 245, Anabel
