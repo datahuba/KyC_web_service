@@ -135,16 +135,44 @@ class TestMatriculaFantasma:
         assert cobro == settings.MATRICULA_PRIMER_CARRERA_DEFAULT
         assert cobro != 0.0, "poner 0 en 'Matricula' no evitaba el cobro"
 
-    def test_un_programa_profesional_no_cobra_matricula(self):
+    def test_un_programa_profesional_cobra_su_matricula_unica(self):
         """
-        Con el ambito marcado, el mismo curso mal configurado ya no cobra:
-        es la red de seguridad para los programas que ya estan en la base.
-        """
-        curso = _CursoFake(ambito=AmbitoFormacion.PROFESIONAL)
+        Profesional = matricula UNICA, igual para todos, la del programa.
 
-        assert get_matricula_for_student(curso, _EstudianteFake(True)) == 0.0
+        Kevin lo corrigio con dos casos reales: MAES-GTAF-2026/1 cobra 1300 y
+        DIPL-IA-2026 cobra 300, y los dos son profesionales. La primera
+        version de este fix asumia que profesional no cobraba nada.
+        """
+        curso = _CursoFake(ambito=AmbitoFormacion.PROFESIONAL, matricula_interno=1300.0)
+
+        # No depende del alumno: es el mismo monto para todos.
+        assert get_matricula_for_student(curso, _EstudianteFake(True)) == 1300.0
+        assert get_matricula_for_student(curso, _EstudianteFake(False)) == 1300.0
+        assert get_matricula_for_student(curso, None) == 1300.0
+
+    def test_profesional_ignora_los_defaults_globales(self):
+        """
+        El caso exacto de produccion: los 87 de MAES-GTAF-2026/1 quedaron con
+        costo_matricula=200 (el default de primera carrera) en vez de 1300,
+        porque esta funcion no miraba `matricula_interno`. Eran 1.100 Bs
+        menos por alumno: 95.700 Bs sin facturar.
+        """
+        curso = _CursoFake(
+            ambito=AmbitoFormacion.PROFESIONAL,
+            matricula_interno=1300.0,
+            primer_carrera=None,
+            profesional=None,
+        )
+
+        cobro = get_matricula_for_student(curso, _EstudianteFake(True))
+
+        assert cobro == 1300.0
+        assert cobro != settings.MATRICULA_PRIMER_CARRERA_DEFAULT
+
+    def test_profesional_sin_matricula_configurada_cobra_cero(self):
+        """Un profesional que realmente no cobra matricula pone 0."""
+        curso = _CursoFake(ambito=AmbitoFormacion.PROFESIONAL, matricula_interno=0.0)
         assert get_matricula_for_student(curso, _EstudianteFake(False)) == 0.0
-        assert get_matricula_for_student(curso, None) == 0.0
 
     def test_educacion_continua_sigue_cobrando_diferenciado(self):
         """El comportamiento de educacion continua NO cambia."""
@@ -170,23 +198,23 @@ class TestMatriculaFantasma:
 # normalizar_matriculas: despues de esto, ningun None sobrevive
 # ============================================================================
 class TestNormalizarMatriculas:
-    def test_profesional_deja_los_tres_campos_en_cero_explicito(self):
+    def test_profesional_propaga_la_matricula_unica_a_los_tres_campos(self):
         """
-        Ceros explicitos, NO None: None es exactamente lo que dispara los
-        defaults de 200/500.
+        Los tres quedan con el MISMO numero y ninguno en None: None es
+        exactamente lo que dispara los defaults de 200/500.
         """
         curso = _CursoFake(
             ambito=AmbitoFormacion.PROFESIONAL,
             primer_carrera=None,
             profesional=None,
-            matricula_interno=500.0,
+            matricula_interno=1300.0,
         )
 
         normalizar_matriculas(curso)
 
-        assert curso.matricula_interno == 0.0
-        assert curso.matricula_primer_carrera == 0.0
-        assert curso.matricula_profesional == 0.0
+        assert curso.matricula_interno == 1300.0
+        assert curso.matricula_primer_carrera == 1300.0
+        assert curso.matricula_profesional == 1300.0
         assert curso.matricula_primer_carrera is not None
         assert curso.matricula_profesional is not None
 
@@ -231,13 +259,14 @@ class TestNormalizarMatriculas:
         assert curso.matricula_primer_carrera == 0.0
         assert curso.matricula_profesional == 0.0
 
-    def test_el_ciclo_completo_no_cobra_en_profesional(self):
+    def test_el_ciclo_completo_cobra_lo_que_configuro_el_encargado(self):
         """
-        Extremo a extremo: se resuelve el ambito, se normaliza y se cobra.
-        Es el escenario de la capacitacion, ahora correcto.
+        Extremo a extremo con los datos reales de MAES-GTAF-2026/1: se
+        resuelve el ambito, se normaliza y se cobra. Antes de este fix el
+        mismo recorrido terminaba cobrando 200.
         """
-        curso = _CursoFake(matricula_interno=0.0)
+        curso = _CursoFake(matricula_interno=1300.0)
         curso.ambito = resolver_ambito("maestría")
         normalizar_matriculas(curso)
 
-        assert get_matricula_for_student(curso, _EstudianteFake(False)) == 0.0
+        assert get_matricula_for_student(curso, _EstudianteFake(False)) == 1300.0
