@@ -1,4 +1,4 @@
-from typing import List, Any, Union, Optional, Dict
+from typing import List, Any, Union, Optional, Dict, Literal
 import asyncio
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
@@ -349,6 +349,13 @@ class InitialEnrollmentResultado(BaseModel):
     success: bool
     message: str
     enrollment_id: Optional[str] = None
+    # F-CARGA-CONTEO-ESTRUCTURADO (2026-08-18): antes los totales de la
+    # respuesta se calculaban buscando substrings dentro de `message`
+    # ("actualizaron pagos", "ya esta inscrito"). Cualquier cambio de
+    # redaccion rompia el conteo en silencio, sin fallar ningun test.
+    # Ahora la accion se declara de forma explicita y `message` queda
+    # como texto libre para mostrarle al usuario.
+    accion: Literal["creado", "actualizado", "ya_inscrito", "error"] = "error"
 
 
 class InitialEnrollmentResponse(BaseModel):
@@ -389,14 +396,20 @@ async def post_initial_enrollments(
     """
     from services import enrollment_service
 
-    # 1. Verificar permisos del encargado_curso
+    # 1. Verificar permisos por curso asignado.
+    # F-CARGA-COORD-SEGMENTA (2026-08-18, Kevin): el COORDINADOR tambien queda
+    # restringido a sus cursos_asignados. Antes solo se restringia al
+    # ENCARGADO_CURSO, asi que un coordinador podia hacer carga inicial en
+    # CUALQUIER curso aunque en los listados solo viera los suyos
+    # (filtro_cursos_por_rol en dependencies.py ya lo segmentaba para LECTURA
+    # sin excepcion). Esa asimetria lectura/escritura no era intencional.
     if (
-        current_user.rol == UserRole.ENCARGADO_CURSO
+        current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR)
         and id not in (current_user.cursos_asignados or [])
     ):
         raise HTTPException(
             status_code=403,
-            detail="No tienes asignado este curso (encargado_curso).",
+            detail="No tienes asignado este curso.",
         )
 
     # 2. Cargar el curso
@@ -432,6 +445,14 @@ async def post_initial_enrollments(
     ya_inscritos_count = 0
     fallidos = 0
     resultados: List[InitialEnrollmentResultado] = []
+
+    # F-CARGA-RACE-INSCRITOS (2026-08-18): acumuladores de referencias cruzadas.
+    # Las tareas concurrentes NO escriben sobre `course` ni sobre cada
+    # `student`; solo anotan aca bajo lock, y al final se persiste todo en
+    # dos escrituras (un course.save() y un update_many de estudiantes).
+    links_lock = asyncio.Lock()
+    inscritos_a_agregar: set = set()
+    estudiantes_a_vincular: set = set()
 
     # F-HISTORICO-EXCEL-PARALLEL (2026-08-04): procesar items en paralelo
     # con asyncio.gather y un semaforo para no saturar la BD. El loop
@@ -561,6 +582,7 @@ async def post_initial_enrollments(
                     success=True,
                     message="Ya estaba inscrito; se actualizaron pagos" if actualizado else "Ya esta inscrito en este curso",
                     enrollment_id=str(existing.id),
+                    accion="actualizado" if actualizado else "ya_inscrito",
                 )
 
             # Crear la inscripcion (carga inicial, bypasea validaciones de
@@ -693,31 +715,44 @@ async def post_initial_enrollments(
                 enrollment.estado = EstadoInscripcion.ACTIVO.value
             await enrollment.save()
 
-            # Batch update de referencias cruzadas
-            if course.id not in student.lista_cursos_ids:
-                student.lista_cursos_ids.append(course.id)
-                await student.save()
-            if student.id not in course.inscritos:
-                course.inscritos.append(student.id)
-                await course.save()
+            # F-CARGA-RACE-INSCRITOS (2026-08-18): NO tocar course/student aca.
+            # Este bloque corre bajo asyncio.gather, y `course` es UN SOLO
+            # objeto compartido por todas las tareas. Hacer
+            # `course.inscritos.append(...)` + `await course.save()` en
+            # paralelo produce perdida de escrituras: dos tareas guardan
+            # snapshots distintos del mismo documento y la ultima pisa a la
+            # anterior, dejando `course.inscritos` con MENOS estudiantes que
+            # los Enrollment realmente creados. Ni Course ni Student declaran
+            # `use_revision`, asi que Beanie no detecta el conflicto.
+            # El docstring de enrollment_service.create_enrollment ya advertia
+            # de esto para `skip_link_updates=True`, y student_service lo
+            # resuelve batcheando. Aca se hace igual: se acumula bajo lock y
+            # se persiste una sola vez despues del gather.
+            async with links_lock:
+                inscritos_a_agregar.add(student.id)
+                if course.id not in (student.lista_cursos_ids or []):
+                    estudiantes_a_vincular.add(student.id)
 
             return InitialEnrollmentResultado(
                 estudiante_id=est_id_str,
                 success=True,
                 message="Inscripcion creada como carga inicial",
                 enrollment_id=str(enrollment.id),
+                accion="creado",
             )
         except ValueError as e:
             return InitialEnrollmentResultado(
                 estudiante_id=est_id_str,
                 success=False,
                 message=str(e),
+                accion="error",
             )
         except Exception as e:
             return InitialEnrollmentResultado(
                 estudiante_id=est_id_str,
                 success=False,
                 message=f"Error inesperado: {str(e)}",
+                accion="error",
             )
 
     # Procesar items con semaforo para no saturar la BD
@@ -732,6 +767,29 @@ async def post_initial_enrollments(
     tasks = [procesar_con_semaforo(item) for item in payload.estudiantes]
     results_raw = await asyncio.gather(*tasks, return_exceptions=True)
 
+    # F-CARGA-RACE-INSCRITOS (2026-08-18): persistir las referencias cruzadas
+    # acumuladas, ya fuera del contexto concurrente. Dos escrituras en total
+    # en vez de dos por estudiante, y sin riesgo de pisarse entre si.
+    if inscritos_a_agregar:
+        # Releer el curso para no guardar un snapshot viejo: entre que se
+        # cargo `course` y ahora, create_enrollment y otros procesos pudieron
+        # haberlo modificado. Se re-lee, se agrega lo que falte y se guarda.
+        course_fresco = await Course.get(course.id)
+        if course_fresco is not None:
+            existentes = set(course_fresco.inscritos or [])
+            faltantes = inscritos_a_agregar - existentes
+            if faltantes:
+                course_fresco.inscritos = list(existentes | faltantes)
+                await course_fresco.save()
+
+    if estudiantes_a_vincular:
+        # AddToSet agrega sin duplicar y sin reescribir el resto de la lista,
+        # asi no se pisan otros cursos que el estudiante ya tuviera.
+        from beanie.operators import AddToSet
+        await Student.find(In(Student.id, list(estudiantes_a_vincular))).update(
+            AddToSet({"lista_cursos_ids": course.id})
+        )
+
     for r in results_raw:
         if isinstance(r, Exception):
             fallidos += 1
@@ -739,16 +797,17 @@ async def post_initial_enrollments(
                 estudiante_id="?",
                 success=False,
                 message=f"Error inesperado: {str(r)}",
+                accion="error",
             ))
             continue
         resultados.append(r)
-        if r.success:
-            if "actualizaron pagos" in (r.message or ""):
-                exitosos += 1
-            elif "ya esta inscrito" in (r.message or "").lower() or "ya estaba inscrito" in (r.message or "").lower():
-                ya_inscritos_count += 1
-            else:
-                exitosos += 1
+        # F-CARGA-CONTEO-ESTRUCTURADO (2026-08-18): contar por el campo
+        # `accion`, no por substrings del mensaje. "actualizado" sigue
+        # contando como exitoso (hubo escritura real), igual que antes.
+        if r.accion in ("creado", "actualizado"):
+            exitosos += 1
+        elif r.accion == "ya_inscrito":
+            ya_inscritos_count += 1
         else:
             fallidos += 1
 
@@ -800,15 +859,35 @@ async def patch_estado_override(
 async def put_resolucion(
     id: PydanticObjectId,
     file: UploadFile = File(..., description="PDF de la resolución"),
-    current_user: User = Depends(require_cpd)
+    current_user: User = Depends(require_encargado_curso)
 ) -> Any:
     """
     Sube el PDF de la resolución que respalda el programa y guarda la URL.
     Acepta cualquier hosting (Cloudinary, S3, local). Aquí lo subimos a
     Cloudinary igual que los otros documentos del sistema.
+
+    F-EC-RESOLUCION-REEMPLAZAR (2026-08-18, Kevin en capacitacion): antes
+    este endpoint exigia `require_cpd`, lo que dejaba al encargado sin poder
+    REEMPLAZAR la resolucion de su propio programa, aunque SI puede subirla
+    al crearlo (`POST /courses/upload-resolucion-temp` ya usa
+    `require_encargado_curso`) y aunque puede editar el resto del programa
+    (`update_course`, FIX-ISSUE-258). Era el mismo documento y la misma
+    persona, con dos criterios distintos segun el momento. Se unifica con el
+    criterio de update_course: EC/COORD solo sobre sus cursos_asignados.
     """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Solo se aceptan archivos PDF")
+
+    # Mismo control que update_course: el EC/COORD solo toca lo suyo.
+    if current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
+        if id not in (current_user.cursos_asignados or []):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "No tienes asignado este programa. Solo puedes subir la "
+                    "resolucion de programas en tu lista de cursos asignados."
+                ),
+            )
 
     # Subir a Cloudinary (mismo patrón que el resto del sistema)
     try:
