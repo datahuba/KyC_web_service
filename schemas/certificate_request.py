@@ -33,6 +33,18 @@ class CertificateRequestCreate(BaseModel):
         description="Motivo o comentario del estudiante (mín 5 caracteres)",
     )
 
+    # F-CERT-COMPROBANTE-OBLIGATORIO (2026-08-18, Kevin): "hay que solicitar
+    # obviamente el comprobante al estudiante. Una vez sube el comprobante,
+    # recien se pueda dejar enviar la solicitud".
+    #
+    # Solo se exige para 'no_deudor', que es el unico tipo con arancel
+    # (MONTO_CERTIFICADO_NO_DEUDOR). Para 'notas' no hay nada que pagar.
+    # La validacion vive en crear_solicitud(), que es donde se conoce el tipo.
+    comprobante_url: Optional[str] = Field(
+        default=None,
+        description="URL del comprobante de pago del arancel. Obligatorio para 'no_deudor'.",
+    )
+
     @field_validator("enrollment_id")
     @classmethod
     def validar_enrollment_id(cls, v: str) -> str:
