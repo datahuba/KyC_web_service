@@ -122,7 +122,11 @@ async def create_enrollment(
 ) -> Any:
     """Crear nueva inscripción de estudiante a un curso"""
     # ISSUE-R-ROLES: un Encargado de Curso solo puede inscribir en sus cursos asignados
-    if current_user.rol == UserRole.ENCARGADO_CURSO and enrollment_in.curso_id not in current_user.cursos_asignados:
+    # F-CARGA-COORD-SEGMENTA (2026-08-18, Kevin): el COORDINADOR tambien.
+    if (
+        current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR)
+        and enrollment_in.curso_id not in (current_user.cursos_asignados or [])
+    ):
         raise HTTPException(status_code=403, detail="No tienes asignado este curso")
 
     try:
@@ -167,16 +171,20 @@ async def create_enrollments_bulk(
     Permisos:
     - superadmin / admin / cpd: cualquier curso.
     - encargado_curso: solo cursos en cursos_asignados.
-    - coordinador: cualquier curso.
+    - coordinador: solo cursos en cursos_asignados (F-CARGA-COORD-SEGMENTA).
     """
-    # 1. Verificar que el usuario puede inscribir en este curso
+    # 1. Verificar que el usuario puede inscribir en este curso.
+    # F-CARGA-COORD-SEGMENTA (2026-08-18, Kevin): el COORDINADOR queda
+    # restringido a sus cursos_asignados igual que el ENCARGADO_CURSO. Antes
+    # podia inscribir en cualquier curso pese a que filtro_cursos_por_rol
+    # (dependencies.py) ya lo segmentaba para LECTURA.
     if (
-        current_user.rol == UserRole.ENCARGADO_CURSO
+        current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR)
         and bulk_in.curso_id not in (current_user.cursos_asignados or [])
     ):
         raise HTTPException(
             status_code=403,
-            detail="No tienes asignado este curso (encargado_curso).",
+            detail="No tienes asignado este curso.",
         )
 
     # 2. Cargar el curso UNA vez (reutilizado para todos los estudiantes)
