@@ -300,6 +300,28 @@ async def crear_solicitud(
     # conservan el que se le informó al estudiante cuando la hizo.
     monto = settings.MONTO_CERTIFICADO_NO_DEUDOR if data.tipo == TipoCertificado.NO_DEUDOR else None
 
+    # F-CERT-COMPROBANTE-OBLIGATORIO (2026-08-18, Kevin): sin comprobante no
+    # se envia la solicitud. Textual: "hay que solicitar obviamente el
+    # comprobante al estudiante. Una vez sube el comprobante, recien se pueda
+    # dejar enviar la solicitud".
+    #
+    # Se bloquea el ENVIO y no la aprobacion a proposito. Bloquear la
+    # aprobacion dejaba sin camino al cobro en ventanilla: el estudiante paga
+    # en caja, no tiene comprobante digital, y el coordinador no podia aprobar
+    # aunque le constara el pago. Exigirlo al enviar no tiene ese problema:
+    # el alumno le saca una foto a su recibo de caja igual.
+    #
+    # Solo aplica a 'no_deudor', el unico tipo con arancel.
+    if data.tipo == TipoCertificado.NO_DEUDOR and not (data.comprobante_url or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Para solicitar el Certificado de No Deudor tenes que adjuntar "
+                f"el comprobante del pago del arancel (Bs {monto:g}). Si pagaste "
+                f"en caja, sirve una foto del recibo."
+            ),
+        )
+
     req = CertificateRequest(
         tipo=data.tipo,
         estudiante_id=current_user.id,
@@ -312,6 +334,7 @@ async def crear_solicitud(
         motivo=data.motivo,
         estado=EstadoTramite.PENDIENTE,
         monto=monto,
+        comprobante_url=(data.comprobante_url or "").strip() or None,
     )
     await req.save()
     logger.info(
