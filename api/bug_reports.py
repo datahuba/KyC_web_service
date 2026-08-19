@@ -140,9 +140,15 @@ async def crear_reporte(
     fallidos: List[str] = []
     for archivo in reales:
         try:
-            url = await upload_document(file=archivo, folder="bug-reports")
-            if url:
-                urls.append(url)
+            # F-FIX-COMPROBANTE-DICT (2026-08-19): upload_document() devuelve
+            # un DICT ({url, public_id, resource_type, mime_type,
+            # size_bytes}), no un string. Guardar el dict entero en
+            # `adjuntos: List[str]` rompia la visualizacion de adjuntos (y
+            # es el mismo bug encontrado hoy en el flujo de certificados:
+            # ver api/certificates.py).
+            resultado = await upload_document(file=archivo, folder="bug-reports")
+            if resultado and resultado.get("url"):
+                urls.append(resultado["url"])
         except Exception:
             fallidos.append(archivo.filename)
 

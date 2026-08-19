@@ -712,7 +712,16 @@ async def subir_comprobante_cert(
             detail="Solo el estudiante dueño de la solicitud puede subir el comprobante.",
         )
     try:
-        url = await upload_document(file=archivo, folder="certificados-comprobantes")
+        # F-FIX-COMPROBANTE-DICT (2026-08-19): upload_document() devuelve un
+        # DICT ({url, public_id, resource_type, mime_type, size_bytes}), no
+        # un string. Guardar el dict entero en un campo `str` producia un
+        # 422 "Input should be a valid string" en cualquier endpoint que
+        # despues intentara VALIDAR ese valor como string (el nuevo
+        # upload-comprobante-temp lo expuso). Hay que extraer ["url"].
+        resultado = await upload_document(file=archivo, folder="certificados-comprobantes")
+        url = resultado["url"]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=502,
@@ -748,7 +757,16 @@ async def upload_comprobante_temp(
             detail="Solo el estudiante puede subir su comprobante.",
         )
     try:
-        url = await upload_document(file=archivo, folder="certificados-comprobantes/temp")
+        # F-FIX-COMPROBANTE-DICT (2026-08-19): mismo bug que
+        # subir_comprobante_cert de arriba, ver ese comentario. Reproducido
+        # en vivo: Kevin probando el flujo nuevo se llevaba un 422 "Input
+        # should be a valid string" en /certificates/requests/ porque
+        # comprobante_url terminaba siendo el DICT completo de Cloudinary
+        # en vez del string de la URL.
+        resultado = await upload_document(file=archivo, folder="certificados-comprobantes/temp")
+        url = resultado["url"]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=502,
