@@ -94,6 +94,55 @@ class CertificateRequest(MongoBaseModel):
         None, description="ID del Certificate emitido al aprobar (null mientras pendiente)"
     )
 
+    # ====================================================================
+    # F-CERT-NO-DEUDOR-COBRO (Kevin 2026-08-17)
+    # ====================================================================
+    # El Certificado de No Deudor pasa a tener costo y a exigir la firma
+    # fisica del coordinador antes de que el estudiante pueda descargarlo.
+    # Todos estos campos son opcionales porque el certificado de NOTAS sigue
+    # funcionando exactamente como antes.
+
+    monto: Optional[float] = Field(
+        None, ge=0,
+        description="Arancel del certificado en Bs. Snapshot al crear la solicitud: "
+                    "si despues cambia la tarifa, la solicitud vieja conserva la suya.",
+    )
+    comprobante_url: Optional[str] = Field(
+        None, max_length=1000,
+        description="URL del comprobante de pago del arancel subido por el estudiante",
+    )
+
+    # Tratamiento profesional que se imprime antes del nombre en el PDF.
+    # Kevin: "a los profesionales debe decir lic. o ing. o lo que sea respecto
+    # a su carrera... tipo lic. kevin soto o ing. kevin soto". Los de diplomado
+    # continuo no llevan tratamiento, por eso el default es None y no "Lic.".
+    # Lo elige el coordinador al aprobar, no el estudiante: es el que conoce
+    # el titulo real y el que firma.
+    tratamiento: Optional[str] = Field(
+        None, max_length=20,
+        description="Tratamiento profesional: 'Lic.' | 'Ing.' | 'Arq.' | 'Dr.' | 'Dra.' | 'Lic.a' | None",
+    )
+
+    # --- Segundo paso: firma fisica ---
+    # Aprobar emite el PDF, pero el estudiante NO lo ve hasta que el
+    # coordinador hace firmar la copia fisica y lo habilita. Kevin: "el
+    # coordinador hace firmar la copia fisica y debe habilitar o aprobar al
+    # estudiante para que lo tenga".
+    firma_fisica_confirmada: bool = Field(
+        default=False,
+        description="True cuando el coordinador confirmo que la copia fisica ya esta firmada",
+    )
+    fecha_firma_fisica: Optional[datetime] = Field(
+        None, description="Cuando se confirmo la firma fisica"
+    )
+    confirmada_por: Optional[str] = Field(
+        None, description="Username del coordinador/superadmin que confirmo la firma"
+    )
+    observacion_firma: Optional[str] = Field(
+        None, max_length=500,
+        description="Nota del coordinador al confirmar la firma (ej. a quien se entrego la copia fisica)",
+    )
+
     class Settings:
         name = "certificate_requests"
         use_revision = True

@@ -24,7 +24,7 @@ from fastapi.responses import StreamingResponse
 
 from api.dependencies import require_staff
 from models.user import User
-from services import cuentas_por_cobrar_service
+from services import cuentas_por_cobrar_service, cuentas_historicas_service
 from services.cuentas_por_cobrar_service import CxCResumen
 from pydantic import BaseModel, Field
 
@@ -304,6 +304,171 @@ async def export_cuentas_por_cobrar_xlsx(
     buf.seek(0)
 
     filename = f"cuentas_por_cobrar_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(buf.getbuffer().nbytes),
+        },
+    )
+
+
+# ============================================================================
+# CUENTAS HISTORICAS (F-CUENTAS-HISTORICAS, 2026-08-16)
+# ============================================================================
+# Los programas historicos salieron del Dashboard y de Cuentas por Cobrar
+# (ver F-HISTORICOS-FUERA-DEL-DASHBOARD). Estos endpoints son su contraparte:
+# el expediente economico de esos programas, aparte de la cartera corriente.
+
+
+class HistEnrollmentOut(BaseModel):
+    enrollment_id: str
+    estudiante_id: str
+    estudiante_nombre: str
+    estudiante_registro: Optional[str] = None
+    curso_id: str
+    curso_nombre: str
+    estado: str
+    total_a_pagar: float
+    total_pagado: float
+    saldo: float
+
+
+class HistCursoOut(BaseModel):
+    curso_id: str
+    curso_nombre: str
+    curso_codigo: Optional[str] = None
+    fecha_inicio: Optional[datetime] = None
+    fecha_fin: Optional[datetime] = None
+    cantidad_estudiantes: int
+    total_esperado: float
+    total_cobrado: float
+    saldo_pendiente: float
+    avance_pct: float
+
+
+class HistResumenOut(BaseModel):
+    total_programas: int
+    total_estudiantes: int
+    total_esperado: float
+    total_cobrado: float
+    saldo_pendiente: float
+    avance_pct: float
+    por_curso: List[HistCursoOut]
+    detalle: List[HistEnrollmentOut]
+    generado_en: datetime
+
+
+def _hist_to_out(r) -> HistResumenOut:
+    return HistResumenOut(
+        total_programas=r.total_programas,
+        total_estudiantes=r.total_estudiantes,
+        total_esperado=r.total_esperado,
+        total_cobrado=r.total_cobrado,
+        saldo_pendiente=r.saldo_pendiente,
+        avance_pct=r.avance_pct,
+        por_curso=[HistCursoOut(**vars(c)) for c in r.por_curso],
+        detalle=[HistEnrollmentOut(**vars(d)) for d in r.detalle],
+        generado_en=r.generado_en,
+    )
+
+
+@router.get(
+    "/cuentas-historicas",
+    response_model=HistResumenOut,
+    summary="[Staff] Resumen economico de los programas historicos",
+)
+async def get_cuentas_historicas(
+    curso_id: Optional[str] = Query(None, description="Filtrar por un programa historico"),
+    current_user: User = Depends(require_staff),
+) -> HistResumenOut:
+    """
+    Expediente economico de los programas marcados `es_historico=True`.
+
+    Son programas de carga retroactiva que ya NO cuentan como cartera
+    corriente (quedan fuera del Dashboard y de Cuentas por Cobrar), pero
+    cuyos datos hay que conservar y poder consultar.
+
+    A diferencia de CxC, aca SI se cuentan las inscripciones COMPLETADO: en
+    un historico ese es el estado esperado, y excluirlas dejaria el informe
+    practicamente vacio. Se siguen excluyendo CANCELADO y RETIRADO.
+    """
+    resumen = await cuentas_historicas_service.generar_resumen_historico(
+        current_user=current_user,
+        curso_id=curso_id,
+    )
+    return _hist_to_out(resumen)
+
+
+@router.get(
+    "/cuentas-historicas/xlsx",
+    summary="[Staff] Exportar Cuentas Historicas a XLSX",
+    response_class=StreamingResponse,
+)
+async def export_cuentas_historicas_xlsx(
+    curso_id: Optional[str] = Query(None),
+    current_user: User = Depends(require_staff),
+) -> StreamingResponse:
+    """Mismo reporte en Excel, con dos hojas: resumen por programa y detalle."""
+    import io as _io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    r = await cuentas_historicas_service.generar_resumen_historico(
+        current_user=current_user, curso_id=curso_id
+    )
+
+    wb = Workbook()
+    encabezado = Font(bold=True, color="FFFFFF")
+    fondo = PatternFill("solid", fgColor="8A1F2F")  # guindo UAGRM
+    centro = Alignment(horizontal="center")
+
+    def _encabezar(ws, columnas):
+        ws.append(columnas)
+        for celda in ws[1]:
+            celda.font = encabezado
+            celda.fill = fondo
+            celda.alignment = centro
+
+    ws1 = wb.active
+    ws1.title = "Resumen por programa"
+    _encabezar(ws1, [
+        "Codigo", "Programa", "Estudiantes",
+        "Total esperado (Bs)", "Cobrado (Bs)", "Saldo (Bs)", "Avance %",
+    ])
+    for c in r.por_curso:
+        ws1.append([
+            c.curso_codigo or "", c.curso_nombre, c.cantidad_estudiantes,
+            c.total_esperado, c.total_cobrado, c.saldo_pendiente, c.avance_pct,
+        ])
+    ws1.append([])
+    ws1.append([
+        "TOTAL", "", r.total_estudiantes,
+        r.total_esperado, r.total_cobrado, r.saldo_pendiente, r.avance_pct,
+    ])
+    for celda in ws1[ws1.max_row]:
+        celda.font = Font(bold=True)
+    for col, ancho in zip("ABCDEFG", (18, 52, 12, 20, 16, 16, 10)):
+        ws1.column_dimensions[col].width = ancho
+
+    ws2 = wb.create_sheet("Detalle por estudiante")
+    _encabezar(ws2, [
+        "Programa", "Estudiante", "Registro", "Estado",
+        "Total a pagar (Bs)", "Pagado (Bs)", "Saldo (Bs)",
+    ])
+    for d in r.detalle:
+        ws2.append([
+            d.curso_nombre, d.estudiante_nombre, d.estudiante_registro or "",
+            d.estado, d.total_a_pagar, d.total_pagado, d.saldo,
+        ])
+    for col, ancho in zip("ABCDEFG", (52, 34, 14, 14, 18, 16, 16)):
+        ws2.column_dimensions[col].width = ancho
+
+    buf = _io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    filename = "cuentas-historicas-%s.xlsx" % datetime.now().strftime("%Y%m%d")
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

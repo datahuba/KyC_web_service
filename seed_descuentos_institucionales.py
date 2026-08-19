@@ -18,13 +18,29 @@ Uso:
     python seed_descuentos_institucionales.py --apply      # Aplica
 """
 import argparse
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
 from pymongo import MongoClient
 
-MONGODB_URL = "mongodb+srv://joelgonzalesdmc:yBSZrAirOJXt0J6T@kyc.eflzqkm.mongodb.net/?appName=KyC"
+# F-SEC-CREDENCIALES (2026-08-16): antes esta cadena venia HARDCODEADA con
+# usuario y contrasena de Atlas, y el archivo estaba commiteado en el repo.
+# Ahora se lee del entorno, igual que `core/config.py`.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
+MONGODB_URL = os.getenv("MONGODB_URL")
+if not MONGODB_URL:
+    sys.exit(
+        "ERROR: falta la variable de entorno MONGODB_URL. "
+        "Defini el .env del proyecto o exportala antes de correr este script."
+    )
 DB_NAME = "KyC"
 
 # F-MAESTRIA-EN-EJECUCION (2026-08-05, Kevin): 3 descuentos institucionales

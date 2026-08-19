@@ -33,6 +33,18 @@ class CertificateRequestCreate(BaseModel):
         description="Motivo o comentario del estudiante (mín 5 caracteres)",
     )
 
+    # F-CERT-COMPROBANTE-OBLIGATORIO (2026-08-18, Kevin): "hay que solicitar
+    # obviamente el comprobante al estudiante. Una vez sube el comprobante,
+    # recien se pueda dejar enviar la solicitud".
+    #
+    # Solo se exige para 'no_deudor', que es el unico tipo con arancel
+    # (MONTO_CERTIFICADO_NO_DEUDOR). Para 'notas' no hay nada que pagar.
+    # La validacion vive en crear_solicitud(), que es donde se conoce el tipo.
+    comprobante_url: Optional[str] = Field(
+        default=None,
+        description="URL del comprobante de pago del arancel. Obligatorio para 'no_deudor'.",
+    )
+
     @field_validator("enrollment_id")
     @classmethod
     def validar_enrollment_id(cls, v: str) -> str:
@@ -51,6 +63,59 @@ class CertificateRequestCreate(BaseModel):
         if v not in {"notas", "no_deudor"}:
             raise ValueError("tipo debe ser 'notas' o 'no_deudor'")
         return v
+
+
+# ========================================================================
+# F-CERT-NO-DEUDOR-COBRO (Kevin 2026-08-17): aprobar y confirmar firma
+# ========================================================================
+
+# Tratamientos admitidos. Kevin: "a los profesionales debe decir lic. o ing.
+# o lo que sea respecto a su carrera". Los de diplomado continuo NO llevan
+# tratamiento, por eso None es una opcion valida y es el default.
+TRATAMIENTOS_VALIDOS = {"Lic.", "Lic.a", "Ing.", "Arq.", "Dr.", "Dra.", "Msc.", "Tec."}
+
+
+class CertificateRequestAprobar(BaseModel):
+    """
+    Body para PATCH /certificates/requests/{id}/approve.
+
+    El tratamiento lo elige quien aprueba, no el estudiante: es el que conoce
+    el titulo real y el que firma el documento. Va vacio para los de diplomado
+    continuo.
+    """
+    tratamiento: Optional[str] = Field(
+        default=None, max_length=20,
+        description="Tratamiento profesional a imprimir antes del nombre. "
+                    "Vacio para estudiantes de diplomado continuo.",
+    )
+
+    @field_validator("tratamiento")
+    @classmethod
+    def validar_tratamiento(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        if v not in TRATAMIENTOS_VALIDOS:
+            raise ValueError(
+                f"Tratamiento invalido. Debe ser uno de: {', '.join(sorted(TRATAMIENTOS_VALIDOS))}, "
+                f"o vacio si no corresponde."
+            )
+        return v
+
+
+class CertificateRequestConfirmarFirma(BaseModel):
+    """
+    Body para PATCH /certificates/requests/{id}/confirmar-firma.
+
+    Segundo paso de la aprobacion: el coordinador ya hizo firmar la copia
+    fisica y recien ahi habilita al estudiante a descargar el PDF.
+    """
+    observacion: Optional[str] = Field(
+        default=None, max_length=500,
+        description="Nota opcional (ej. a quien se le entrego la copia fisica)",
+    )
 
 
 # ========================================================================
@@ -104,6 +169,20 @@ class CertificateRequestOut(BaseModel):
     fecha_cancelacion: Optional[datetime] = None
 
     certificate_id: Optional[str] = None
+
+    # F-CERT-NO-DEUDOR-COBRO (2026-08-17): arancel, comprobante, tratamiento
+    # y firma física. Van en el mismo Out porque el panel del coordinador
+    # necesita los cuatro para decidir.
+    monto: Optional[float] = None
+    comprobante_url: Optional[str] = None
+    tratamiento: Optional[str] = None
+    firma_fisica_confirmada: bool = False
+    fecha_firma_fisica: Optional[datetime] = None
+    confirmada_por: Optional[str] = None
+    observacion_firma: Optional[str] = None
+    # Calculado, no persistido: si el estudiante ya puede bajarse el PDF.
+    # Para 'notas' es True apenas se aprueba; para 'no_deudor' exige la firma.
+    descargable: bool = False
 
     # Fechas de auditoría (vienen de MongoBaseModel: created_at, updated_at)
     created_at: Optional[datetime] = None

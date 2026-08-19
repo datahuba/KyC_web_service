@@ -27,10 +27,11 @@ import logging
 from typing import List, Optional, Union
 from bson import ObjectId
 from bson.errors import InvalidId
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
 
 from api.dependencies import get_current_user
+from core.config import settings
 from models.certificate import Certificate
 from models.certificate_request import CertificateRequest
 from models.enums import TipoCertificado
@@ -42,8 +43,11 @@ from schemas.certificate import (
     CertificateOut,
     CertificateModuloOut,
 )
+from core.cloudinary_utils import upload_document
 from schemas.certificate_request import (
+    CertificateRequestAprobar,
     CertificateRequestCancelar,
+    CertificateRequestConfirmarFirma,
     CertificateRequestCreate,
     CertificateRequestListResponse,
     CertificateRequestOut,
@@ -419,6 +423,28 @@ async def list_certificates_admin(
 
 
 @router.get(
+    "/arancel-no-deudor",
+    summary="Arancel vigente del Certificado de No Deudor",
+    description=(
+        "Devuelve cuánto cuesta hoy el Certificado de No Deudor "
+        "(F-CERT-NO-DEUDOR-COBRO). Existe para que la pantalla del estudiante "
+        "pueda mostrar el precio ANTES de que solicite, sin hardcodearlo: el "
+        "monto vive en la config del servidor y es provisorio."
+    ),
+)
+async def arancel_no_deudor(
+    current_user: Union[Student, User] = Depends(get_current_user),
+) -> dict:
+    # OJO: esta ruta tiene que declararse ANTES de `/{cert_id}`, que es de un
+    # solo segmento y si no se la comería como si "arancel-no-deudor" fuera
+    # un id de certificado.
+    return {
+        "monto": settings.MONTO_CERTIFICADO_NO_DEUDOR,
+        "moneda": "Bs",
+    }
+
+
+@router.get(
     "/{cert_id}/pdf",
     summary="Descarga el PDF de un certificado emitido",
     response_class=StreamingResponse,
@@ -444,6 +470,14 @@ async def download_certificate_pdf(
 
     # RBAC
     certificate_service.verificar_acceso_certificado(cert, current_user)
+
+    # F-CERT-NO-DEUDOR-COBRO (2026-08-17): el estudiante no puede bajar el
+    # Certificado de No Deudor hasta que se confirme la firma física. El
+    # staff sí, porque es quien tiene que imprimirlo para hacerlo firmar.
+    if isinstance(current_user, Student):
+        motivo = await cert_request_service.motivo_bloqueo_descarga(cert)
+        if motivo:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=motivo)
 
     # Descargar PDF desde Cloudinary (con fallback a re-render si falla)
     try:
@@ -618,12 +652,129 @@ async def marcar_en_revision_solicitud_cert(
 )
 async def aprobar_solicitud_cert(
     request_id: str,
+    data: Optional[CertificateRequestAprobar] = None,
     current_user: Union[Student, User] = Depends(get_current_user),
 ) -> CertificateRequestOut:
     if not isinstance(current_user, User):
         raise HTTPException(status_code=403, detail="Solo personal autorizado.")
-    req = await cert_request_service.aprobar_solicitud(request_id, current_user)
+    # El body es opcional para no romper a quien ya llamaba este endpoint sin
+    # cuerpo (el flujo de certificado de Notas nunca lo necesitó).
+    req = await cert_request_service.aprobar_solicitud(
+        request_id, current_user, tratamiento=(data.tratamiento if data else None)
+    )
     return CertificateRequestOut(**cert_request_service._serializar_solicitud(req))
+
+
+@router.patch(
+    "/requests/{request_id}/confirmar-firma",
+    response_model=CertificateRequestOut,
+    summary="[Coordinador financiero/Superadmin] Confirmar la firma física y habilitar la descarga",
+    description=(
+        "Segundo paso de la aprobación del Certificado de No Deudor "
+        "(F-CERT-NO-DEUDOR-COBRO, Kevin 2026-08-17). Aprobar ya emitió el PDF, "
+        "pero el estudiante no puede descargarlo hasta que el coordinador haga "
+        "firmar la copia física y lo habilite acá. Solo aplica a 'no_deudor': "
+        "el certificado de Notas queda disponible apenas se aprueba."
+    ),
+)
+async def confirmar_firma_fisica_cert(
+    request_id: str,
+    data: Optional[CertificateRequestConfirmarFirma] = None,
+    current_user: Union[Student, User] = Depends(get_current_user),
+) -> CertificateRequestOut:
+    if not isinstance(current_user, User):
+        raise HTTPException(status_code=403, detail="Solo personal autorizado.")
+    req = await cert_request_service.confirmar_firma_fisica(
+        request_id, current_user, observacion=(data.observacion if data else None)
+    )
+    return CertificateRequestOut(**cert_request_service._serializar_solicitud(req))
+
+
+@router.post(
+    "/requests/{request_id}/comprobante",
+    response_model=CertificateRequestOut,
+    summary="[Estudiante] Adjuntar el comprobante de pago del arancel",
+    description=(
+        "El Certificado de No Deudor tiene arancel (F-CERT-NO-DEUDOR-COBRO). "
+        "El estudiante sube acá el comprobante para que el coordinador lo vea "
+        "junto a la solicitud. Se puede reemplazar mientras la solicitud siga "
+        "pendiente o en revisión."
+    ),
+)
+async def subir_comprobante_cert(
+    request_id: str,
+    archivo: UploadFile = File(..., description="Imagen o PDF del comprobante"),
+    current_user: Union[Student, User] = Depends(get_current_user),
+) -> CertificateRequestOut:
+    if not isinstance(current_user, Student):
+        raise HTTPException(
+            status_code=403,
+            detail="Solo el estudiante dueño de la solicitud puede subir el comprobante.",
+        )
+    try:
+        # F-FIX-COMPROBANTE-DICT (2026-08-19): upload_document() devuelve un
+        # DICT ({url, public_id, resource_type, mime_type, size_bytes}), no
+        # un string. Guardar el dict entero en un campo `str` producia un
+        # 422 "Input should be a valid string" en cualquier endpoint que
+        # despues intentara VALIDAR ese valor como string (el nuevo
+        # upload-comprobante-temp lo expuso). Hay que extraer ["url"].
+        resultado = await upload_document(file=archivo, folder="certificados-comprobantes")
+        url = resultado["url"]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"No se pudo subir el comprobante: {e}",
+        )
+    if not url:
+        raise HTTPException(status_code=502, detail="No se pudo subir el comprobante.")
+
+    req = await cert_request_service.adjuntar_comprobante(request_id, url, current_user)
+    return CertificateRequestOut(**cert_request_service._serializar_solicitud(req))
+
+
+@router.post(
+    "/requests/upload-comprobante-temp",
+    summary="[Estudiante] Subir el comprobante ANTES de crear la solicitud de No Deudor",
+    description=(
+        "F-CERT-COMPROBANTE-OBLIGATORIO (2026-08-18, Kevin): 'una vez sube el "
+        "comprobante, recien se pueda dejar enviar la solicitud'. El endpoint "
+        "de arriba (/requests/{request_id}/comprobante) exige una solicitud ya "
+        "creada, pero ahora el comprobante tiene que existir ANTES de poder "
+        "enviarla. Mismo patron que POST /courses/upload-resolucion-temp: sube "
+        "el archivo sin asociarlo a nada, devuelve la URL, y el frontend la "
+        "manda en `comprobante_url` al crear la solicitud."
+    ),
+)
+async def upload_comprobante_temp(
+    archivo: UploadFile = File(..., description="Imagen o PDF del comprobante"),
+    current_user: Union[Student, User] = Depends(get_current_user),
+) -> dict:
+    if not isinstance(current_user, Student):
+        raise HTTPException(
+            status_code=403,
+            detail="Solo el estudiante puede subir su comprobante.",
+        )
+    try:
+        # F-FIX-COMPROBANTE-DICT (2026-08-19): mismo bug que
+        # subir_comprobante_cert de arriba, ver ese comentario. Reproducido
+        # en vivo: Kevin probando el flujo nuevo se llevaba un 422 "Input
+        # should be a valid string" en /certificates/requests/ porque
+        # comprobante_url terminaba siendo el DICT completo de Cloudinary
+        # en vez del string de la URL.
+        resultado = await upload_document(file=archivo, folder="certificados-comprobantes/temp")
+        url = resultado["url"]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"No se pudo subir el comprobante: {e}",
+        )
+    if not url:
+        raise HTTPException(status_code=502, detail="No se pudo subir el comprobante.")
+    return {"url": url}
 
 
 @router.patch(

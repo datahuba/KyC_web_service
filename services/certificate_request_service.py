@@ -15,13 +15,14 @@ Estados:
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple, Union
 
 from beanie import PydanticObjectId
 from bson import ObjectId
 from fastapi import HTTPException, status
 
+from core.config import settings
 from models.certificate import Certificate
 from models.certificate_request import CertificateRequest
 from models.course import Course
@@ -43,19 +44,55 @@ logger = logging.getLogger(__name__)
 # RBAC
 # ========================================================================
 
-def puede_aprobar_solicitud_cert(user: User, course_id: PydanticObjectId) -> bool:
+def es_coordinador_financiero(user: User) -> bool:
+    """
+    True si el usuario es COORDINADOR con subtipo 'financiero'.
+
+    El subtipo puede venir como enum o como string plano segun de donde se
+    haya cargado el documento, asi que se compara sobre el valor.
+    """
+    if not isinstance(user, User):
+        return False
+    if user.rol != UserRole.COORDINADOR:
+        return False
+    subtipo = getattr(user, "subtipo_coordinador", None)
+    return str(getattr(subtipo, "value", subtipo) or "").lower() == "financiero"
+
+
+def puede_aprobar_solicitud_cert(
+    user: User,
+    course_id: PydanticObjectId,
+    tipo: Optional[str] = None,
+) -> bool:
     """
     Devuelve True si el usuario puede APROBAR/RECHAZAR/REVISAR solicitudes
     de certificado del programa course_id.
 
-    Reglas (Kevin 2026-07-30):
+    Certificado de NOTAS (regla original, Kevin 2026-07-30):
     - ADMIN, SUPERADMIN: pueden aprobar CUALQUIER solicitud (backup)
     - ENCARGADO_CURSO: solo si course_id está en sus cursos_asignados
-    - CPD, COORDINADOR, MAE, COBRANZA: NO pueden aprobar certificados
-      (solo los roles de arriba; el resto ve pero no aprueba)
+    - CPD, COORDINADOR, MAE, COBRANZA: NO pueden aprobar
+
+    Certificado de NO DEUDOR (F-CERT-NO-DEUDOR-COBRO, Kevin 2026-08-17):
+    - SUPERADMIN y COORDINADOR FINANCIERO, y nadie más.
+
+    El cambio es a proposito mas restrictivo que el flujo de notas: este
+    certificado ahora acredita que no hay deuda Y cobra un arancel, o sea
+    que es una decision economica. Kevin fue explicito con quienes la toman
+    ("Coordinador financiero + superadmin"), asi que el encargado de curso y
+    el admin quedan afuera aunque puedan aprobar certificados de notas.
+
+    `tipo` es opcional para no romper a los llamadores viejos: sin tipo se
+    asume el flujo de notas, que es el que existia antes.
     """
     if not isinstance(user, User):
         return False
+
+    if tipo == "no_deudor":
+        if user.rol == UserRole.SUPERADMIN:
+            return True
+        return es_coordinador_financiero(user)
+
     if user.rol in (UserRole.ADMIN, UserRole.SUPERADMIN):
         return True
     if user.rol == UserRole.ENCARGADO_CURSO:
@@ -101,9 +138,61 @@ def _filtro_cursos_cola_cert(user: User) -> Optional[dict]:
 # HELPERS
 # ========================================================================
 
+def es_descargable(req: CertificateRequest) -> bool:
+    """
+    Si el estudiante ya puede bajarse el PDF.
+
+    Notas: alcanza con que este aprobada y tenga certificado emitido.
+    No deudor: ademas hace falta la confirmacion de la firma fisica
+    (F-CERT-NO-DEUDOR-COBRO). Kevin: "el coordinador hace firmar la copia
+    fisica y debe habilitar o aprobar al estudiante para que lo tenga".
+    """
+    if req.estado != EstadoTramite.APROBADA or not req.certificate_id:
+        return False
+    if req.tipo == TipoCertificado.NO_DEUDOR:
+        return bool(req.firma_fisica_confirmada)
+    return True
+
+
+async def motivo_bloqueo_descarga(cert: Certificate) -> Optional[str]:
+    """
+    Devuelve el motivo por el que un ESTUDIANTE todavía no puede descargar
+    este certificado, o None si puede.
+
+    F-CERT-NO-DEUDOR-COBRO (2026-08-17): el Certificado de No Deudor se emite
+    al aprobar, pero el estudiante no lo ve hasta que el coordinador confirma
+    que la copia física está firmada. Sin este chequeo el segundo paso sería
+    decorativo: el PDF ya existe y el estudiante podría bajárselo igual.
+
+    Los certificados emitidos a mano por el staff (`POST /certificates/emit`)
+    no tienen solicitud asociada y no se bloquean: ahí el staff ya decidió.
+    """
+    if cert.tipo != TipoCertificado.NO_DEUDOR:
+        return None
+
+    req = await CertificateRequest.find_one({"certificate_id": cert.id})
+    if not req:
+        return None
+    if req.firma_fisica_confirmada:
+        return None
+    return (
+        "Tu certificado ya fue aprobado, pero todavía no está habilitado para "
+        "descarga: el coordinador tiene que hacer firmar la copia física primero. "
+        "Te avisamos apenas esté lista."
+    )
+
+
 def _serializar_solicitud(req: CertificateRequest) -> dict:
     """Convierte un CertificateRequest (Beanie doc) a dict para CertificateRequestOut."""
     return {
+        "monto": req.monto,
+        "comprobante_url": req.comprobante_url,
+        "tratamiento": req.tratamiento,
+        "firma_fisica_confirmada": bool(req.firma_fisica_confirmada),
+        "fecha_firma_fisica": req.fecha_firma_fisica,
+        "confirmada_por": req.confirmada_por,
+        "observacion_firma": req.observacion_firma,
+        "descargable": es_descargable(req),
         "id": str(req.id),
         "tipo": req.tipo,
         "estado": req.estado,
@@ -204,6 +293,35 @@ async def crear_solicitud(
         )
 
     # 5. Crear la solicitud
+    #
+    # F-CERT-NO-DEUDOR-COBRO (2026-08-17): el arancel se guarda como SNAPSHOT
+    # en la solicitud, no se lee de config al momento de cobrar. Si Kevin
+    # cambia el monto (hoy Bs 150, provisorio), las solicitudes ya creadas
+    # conservan el que se le informó al estudiante cuando la hizo.
+    monto = settings.MONTO_CERTIFICADO_NO_DEUDOR if data.tipo == TipoCertificado.NO_DEUDOR else None
+
+    # F-CERT-COMPROBANTE-OBLIGATORIO (2026-08-18, Kevin): sin comprobante no
+    # se envia la solicitud. Textual: "hay que solicitar obviamente el
+    # comprobante al estudiante. Una vez sube el comprobante, recien se pueda
+    # dejar enviar la solicitud".
+    #
+    # Se bloquea el ENVIO y no la aprobacion a proposito. Bloquear la
+    # aprobacion dejaba sin camino al cobro en ventanilla: el estudiante paga
+    # en caja, no tiene comprobante digital, y el coordinador no podia aprobar
+    # aunque le constara el pago. Exigirlo al enviar no tiene ese problema:
+    # el alumno le saca una foto a su recibo de caja igual.
+    #
+    # Solo aplica a 'no_deudor', el unico tipo con arancel.
+    if data.tipo == TipoCertificado.NO_DEUDOR and not (data.comprobante_url or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Para solicitar el Certificado de No Deudor tenes que adjuntar "
+                f"el comprobante del pago del arancel (Bs {monto:g}). Si pagaste "
+                f"en caja, sirve una foto del recibo."
+            ),
+        )
+
     req = CertificateRequest(
         tipo=data.tipo,
         estudiante_id=current_user.id,
@@ -215,6 +333,8 @@ async def crear_solicitud(
         programa_codigo=course.codigo or "",
         motivo=data.motivo,
         estado=EstadoTramite.PENDIENTE,
+        monto=monto,
+        comprobante_url=(data.comprobante_url or "").strip() or None,
     )
     await req.save()
     logger.info(
@@ -336,7 +456,7 @@ async def marcar_en_revision(
     if not req:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada.")
 
-    if not puede_aprobar_solicitud_cert(current_user, req.course_id):
+    if not puede_aprobar_solicitud_cert(current_user, req.course_id, req.tipo):
         raise HTTPException(
             status_code=403,
             detail="No tienes permiso para revisar solicitudes de este programa.",
@@ -358,10 +478,19 @@ async def marcar_en_revision(
 async def aprobar_solicitud(
     request_id: str,
     current_user: User,
+    tratamiento: Optional[str] = None,
 ) -> CertificateRequest:
     """
-    Encargado del programa (o admin/superadmin) aprueba la solicitud.
-    Al aprobar, se emite el Certificate real con su folio y PDF.
+    Aprueba la solicitud y emite el Certificate real con su folio y PDF.
+
+    Certificado de NOTAS: lo aprueba el encargado del programa, admin o
+    superadmin, y con eso el estudiante ya puede descargarlo.
+
+    Certificado de NO DEUDOR (F-CERT-NO-DEUDOR-COBRO, 2026-08-17): lo aprueba
+    el coordinador financiero o el superadmin, y aprobar NO alcanza para que
+    el estudiante lo descargue — falta que se confirme la firma física
+    (`confirmar_firma_fisica`). El `tratamiento` que se pase acá es el que se
+    imprime antes del nombre en el PDF.
     """
     try:
         rid = PydanticObjectId(request_id)
@@ -372,12 +501,21 @@ async def aprobar_solicitud(
     if not req:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada.")
 
-    if not puede_aprobar_solicitud_cert(current_user, req.course_id):
+    if not puede_aprobar_solicitud_cert(current_user, req.course_id, req.tipo):
+        if req.tipo == TipoCertificado.NO_DEUDOR:
+            raise HTTPException(
+                status_code=403,
+                detail="El Certificado de No Deudor solo lo aprueban el coordinador "
+                       "financiero o el superadmin.",
+            )
         raise HTTPException(
             status_code=403,
             detail="No tienes permiso para aprobar solicitudes de este programa. "
                    "Solo el encargado del programa, admin o superadmin pueden aprobar.",
         )
+
+    if tratamiento is not None:
+        req.tratamiento = tratamiento
 
     if req.estado not in (EstadoTramite.PENDIENTE, EstadoTramite.EN_REVISION):
         raise HTTPException(
@@ -414,6 +552,7 @@ async def aprobar_solicitud(
                 enrollment_id=str(req.enrollment_id),
                 hasta_modulo_n=req.hasta_modulo_n,
                 current_user=current_user,
+                tratamiento=req.tratamiento,
             )
     except ValueError as e:
         # Error de validación de requisitos (no cumple para emitir)
@@ -442,6 +581,108 @@ async def aprobar_solicitud(
     return req
 
 
+async def adjuntar_comprobante(
+    request_id: str,
+    comprobante_url: str,
+    current_user: Student,
+) -> CertificateRequest:
+    """
+    El estudiante adjunta el comprobante de pago del arancel a su solicitud.
+
+    F-CERT-NO-DEUDOR-COBRO (2026-08-17). Se permite reemplazarlo mientras la
+    solicitud siga abierta: si subió el archivo equivocado tiene que poder
+    corregirlo sin cancelar y volver a empezar.
+    """
+    try:
+        rid = PydanticObjectId(request_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="request_id inválido.")
+
+    req = await CertificateRequest.get(rid)
+    if not req:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada.")
+
+    if not isinstance(current_user, Student) or req.estudiante_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Esta solicitud no te pertenece.")
+
+    if req.estado not in (EstadoTramite.PENDIENTE, EstadoTramite.EN_REVISION):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Solo se puede adjuntar el comprobante mientras la solicitud está "
+                   f"pendiente o en revisión. Esta está '{req.estado}'.",
+        )
+
+    req.comprobante_url = comprobante_url
+    await req.save()
+    logger.info(f"[CERT-REQ] Comprobante adjuntado: request={req.id}")
+    return req
+
+
+async def confirmar_firma_fisica(
+    request_id: str,
+    current_user: User,
+    observacion: Optional[str] = None,
+) -> CertificateRequest:
+    """
+    Segundo paso de la aprobación del Certificado de No Deudor.
+
+    F-CERT-NO-DEUDOR-COBRO (2026-08-17). Kevin: "cuando llega al coordinador,
+    el coordinador hace firmar la copia física y debe habilitar o aprobar al
+    estudiante para que lo tenga".
+
+    Aprobar ya emitió el PDF, pero el estudiante no lo ve hasta acá. La
+    razón es que el documento que vale es el firmado en papel: si el
+    estudiante pudiera bajarse el digital antes, tendría en la mano un
+    certificado que todavía nadie firmó.
+    """
+    try:
+        rid = PydanticObjectId(request_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="request_id inválido.")
+
+    req = await CertificateRequest.get(rid)
+    if not req:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada.")
+
+    if req.tipo != TipoCertificado.NO_DEUDOR:
+        raise HTTPException(
+            status_code=409,
+            detail="La confirmación de firma física solo aplica al Certificado de No Deudor. "
+                   "El de Notas queda disponible apenas se aprueba.",
+        )
+
+    if not puede_aprobar_solicitud_cert(current_user, req.course_id, req.tipo):
+        raise HTTPException(
+            status_code=403,
+            detail="Solo el coordinador financiero o el superadmin pueden confirmar "
+                   "la firma física.",
+        )
+
+    if req.estado != EstadoTramite.APROBADA:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Primero hay que aprobar la solicitud. Esta está '{req.estado}'.",
+        )
+
+    if req.firma_fisica_confirmada:
+        raise HTTPException(
+            status_code=409,
+            detail="La firma física de esta solicitud ya estaba confirmada.",
+        )
+
+    req.firma_fisica_confirmada = True
+    req.fecha_firma_fisica = datetime.now(timezone.utc)
+    req.confirmada_por = current_user.username
+    if observacion and observacion.strip():
+        req.observacion_firma = observacion.strip()
+    await req.save()
+    logger.info(
+        f"[CERT-REQ] Firma física confirmada: request={req.id} "
+        f"por={current_user.username}"
+    )
+    return req
+
+
 async def rechazar_solicitud(
     request_id: str,
     data: CertificateRequestRechazar,
@@ -457,7 +698,7 @@ async def rechazar_solicitud(
     if not req:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada.")
 
-    if not puede_aprobar_solicitud_cert(current_user, req.course_id):
+    if not puede_aprobar_solicitud_cert(current_user, req.course_id, req.tipo):
         raise HTTPException(
             status_code=403,
             detail="No tienes permiso para rechazar solicitudes de este programa.",

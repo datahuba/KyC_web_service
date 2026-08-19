@@ -117,6 +117,24 @@ def _enrollment_excluido(e: Enrollment) -> bool:
     return e.estado in ESTADOS_EXCLUIDOS_CXC
 
 
+def _nombre_estudiante(s) -> str:
+    """Nombre mostrable de un estudiante, tolerante a datos incompletos.
+
+    Devuelve SIEMPRE un string porque el schema de salida lo exige. Orden de
+    preferencia: nombre real -> registro (util para que cobranzas igual pueda
+    identificar la fila) -> guion. Ver F-FIX-CXC-NOMBRE-NULO.
+    """
+    if s is None:
+        return "—"
+    nombre = getattr(s, "nombre", None)
+    if nombre:
+        return str(nombre)
+    registro = getattr(s, "registro", None)
+    if registro:
+        return "(sin nombre) Reg. %s" % registro
+    return "—"
+
+
 async def generar_resumen_cxc(
     current_user: User,
     curso_id: Optional[str] = None,
@@ -194,6 +212,27 @@ async def generar_resumen_cxc(
     total_modulos_iniciados = 0
     total_modulos_no_iniciados = 0
 
+    # F-FIX-CXC-N1 (2026-08-16): antes se consultaba `Payment.find(...)` DENTRO
+    # del bucle de enrollments — una query por inscripcion. Con 296
+    # inscripciones activas eso son 296 round-trips a Atlas (~115ms cada uno),
+    # y el reporte tardaba ~36s: el frontend lo abortaba por timeout y la
+    # pagina de Cuentas por Cobrar quedaba inutilizable.
+    # Medido en el contenedor de produccion: las 3 queries batch tardan 2.55s
+    # en total, o sea que los ~34s restantes eran exclusivamente este N+1.
+    # Ahora se traen TODOS los pagos aprobados de una sola vez y se agrupan
+    # en memoria, mismo patron que ya usaban courses y students mas arriba
+    # (y que F-076 aplico al informe de habilitados: 600 queries -> 5).
+    pagos_por_inscripcion: dict = {}
+    if enrollments:
+        todos_los_pagos = await Payment.find(
+            {
+                "inscripcion_id": {"$in": [e.id for e in enrollments]},
+                "estado_pago": EstadoPago.APROBADO.value,
+            }
+        ).to_list()
+        for p in todos_los_pagos:
+            pagos_por_inscripcion.setdefault(p.inscripcion_id, []).append(p)
+
     # Acumuladores por curso
     curso_acc: dict = {}
 
@@ -211,10 +250,9 @@ async def generar_resumen_cxc(
         # de la tabla payments (estado_pago=APROBADO) para corregir
         # automáticamente cualquier desincronización del campo
         # enrollment.total_pagado.
-        pagos_aprobados = await Payment.find(
-            Payment.inscripcion_id == e.id,
-            Payment.estado_pago == EstadoPago.APROBADO,
-        ).to_list()
+        # F-FIX-CXC-N1 (2026-08-16): ya vienen precargados arriba en una sola
+        # query; antes esto era un `await Payment.find(...)` por inscripcion.
+        pagos_aprobados = pagos_por_inscripcion.get(e.id, [])
         total_pagado_real = sum(p.cantidad_pago for p in pagos_aprobados)
         saldo_a_la_fecha = max(0.0, e.total_a_pagar - total_pagado_real)
 
@@ -256,7 +294,16 @@ async def generar_resumen_cxc(
         detalle.append(CxCResumenEnrollment(
             enrollment_id=str(e.id),
             estudiante_id=str(e.estudiante_id),
-            estudiante_nombre=s.nombre if s else "—",
+            # F-FIX-CXC-NOMBRE-NULO (2026-08-16): antes era `s.nombre if s else "—"`.
+            # Esa guarda cubre que el estudiante NO EXISTA, pero no que exista
+            # con `nombre = None` — y `Student.nombre` es opcional en el modelo.
+            # Con 2 estudiantes asi en produccion (registros 99001 y 99100), el
+            # schema de salida `EnrollmentCxCOut.estudiante_nombre: str` tiraba
+            # ValidationError y el reporte COMPLETO respondia 500. Un nombre
+            # faltante en una fila no puede tumbar el reporte financiero entero.
+            # El bug estaba tapado por el timeout: antes del fix del N+1 la
+            # request nunca llegaba a serializar.
+            estudiante_nombre=_nombre_estudiante(s),
             estudiante_registro=s.registro if s else None,
             curso_id=str(e.curso_id),
             curso_nombre=curso_nombre,

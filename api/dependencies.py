@@ -311,6 +311,39 @@ def require_encargado_curso(
     return current_user
 
 
+def require_gestion_academica(
+    current_user: User = Depends(require_encargado_curso),
+) -> User:
+    """
+    F-FIX-COORD-FINANCIERO-NO-ACADEMICO (2026-08-19, Kevin): "financiero no
+    deberia crear programas ni editar, tampoco estudiantes". Su alcance es
+    economico (ve todo, aprueba No Deudor), no gestion de contenido
+    academico.
+
+    Igual que require_encargado_curso, pero excluye especificamente al
+    COORDINADOR con subtipo FINANCIERO. Se usa SOLO en las acciones que
+    Kevin nombro: crear/editar programas, cargar estudiantes (individual,
+    lote o Excel) y cargar notas de modulos ejecutados. El resto de lo que
+    permite require_encargado_curso (ver estudiantes, enviar comunicados,
+    formularios de pre-inscripcion) sigue igual para el financiero — no se
+    toco la dependencia compartida para no afectar esos otros endpoints sin
+    que Kevin lo haya pedido.
+    """
+    if (
+        current_user.rol == UserRole.COORDINADOR
+        and current_user.subtipo_coordinador == SubtipoCoordinador.FINANCIERO
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "El coordinador financiero no gestiona el contenido académico "
+                "de los programas (crear/editar programas, cargar estudiantes "
+                "o notas). Su alcance es económico."
+            ),
+        )
+    return current_user
+
+
 def require_coordinador(
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> User:
@@ -376,7 +409,27 @@ def filtro_cursos_por_rol(current_user: User) -> Optional[dict]:
     extender el filtro a COORDINADOR tambien (supervisa EC de su area, debe
     ver solo datos de los cursos que supervisa, que son los mismos cursos
     asignados). Esto unifica el comportamiento EC + COORDINADOR + COBRANZA.
+
+    F-FIX-COORD-FINANCIERO-VE-TODO (2026-08-19, Kevin): la regla de arriba
+    resultaba INCORRECTA para el subtipo FINANCIERO. Kevin: "el coordinador
+    deberia poder ver todo lo economico (...) los coordinadores ven los
+    resumenes de todo dependientes de su area, en este caso hablamos de
+    finanzas". El area de un financiero es lo economico en si, transversal
+    a TODOS los programas — no un subconjunto de cursos_asignados.
+    Sin esta excepcion, un coordinador financiero recien creado (sin
+    cursos_asignados cargados) veia TODO en blanco en pagos e inscripciones
+    ($in: [] no matchea nada) — el mismo sintoma que el bug del encargado
+    arreglado el dia anterior (F-FIX-PAGOS-EC-EN-BLANCO).
+    Kevin confirmo explicitamente: financiero SIEMPRE ve todo (sin
+    excepcion, a diferencia de Cobranza que solo ve todo si tiene
+    cursos_asignados vacio); academico e investigacion SIGUEN acotados a
+    sus cursos_asignados, porque supervisan encargados de curso puntuales.
     """
+    if (
+        current_user.rol == UserRole.COORDINADOR
+        and current_user.subtipo_coordinador == SubtipoCoordinador.FINANCIERO
+    ):
+        return None
     if current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
         return {"curso_id": {"$in": current_user.cursos_asignados}}
     if current_user.rol == UserRole.COBRANZA and current_user.cursos_asignados:

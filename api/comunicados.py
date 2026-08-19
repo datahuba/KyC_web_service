@@ -34,6 +34,7 @@ from beanie.operators import In, Or, And
 
 from core.timezone_utils import utcnow_naive
 from core.email_utils import build_comunicado_email, send_email
+from services import email_service
 from core.config import settings
 
 from models.comunicado import Comunicado, ComunicadoVisto
@@ -508,7 +509,15 @@ async def _enviar_email_comunicado(com: Comunicado) -> None:
                 programa=programa,
                 portal_link=portal_link,
             )
-            ok = await send_email(est.email, com.titulo, html)
+            _log = await email_service.enviar(
+                destinatario=est.email,
+                asunto=com.titulo,
+                html=html,
+                tipo=email_service.TipoEmail.COMUNICADO,
+                destinatario_id=getattr(est, "id", None),
+                destinatario_nombre=getattr(est, "nombre", None),
+            )
+            ok = _log.estado == "enviado"
             if ok:
                 enviados += 1
 

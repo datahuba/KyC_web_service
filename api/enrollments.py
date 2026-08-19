@@ -43,7 +43,7 @@ from beanie import PydanticObjectId
 from beanie.operators import In
 
 # Nuevas dependencias de seguridad del ISSUE L
-from api.dependencies import require_superadmin, require_cpd, require_staff, require_docente, get_current_user, filtro_cursos_por_rol, require_encargado_curso, require_mae
+from api.dependencies import require_superadmin, require_cpd, require_staff, require_docente, get_current_user, filtro_cursos_por_rol, require_encargado_curso, require_gestion_academica, require_mae
 
 router = APIRouter()
 
@@ -118,11 +118,17 @@ class EditarNotaRequest(BaseModel):
 async def create_enrollment(
     *,
     enrollment_in: EnrollmentCreate,
-    current_user: User = Depends(require_encargado_curso) # <-- CPD, ENCARGADO_CURSO, COORDINADOR o superior (ISSUE-R-ROLES)
+    # CPD, ENCARGADO_CURSO, COORDINADOR o superior (ISSUE-R-ROLES), salvo el
+    # coordinador FINANCIERO (F-FIX-COORD-FINANCIERO-NO-ACADEMICO, 2026-08-19).
+    current_user: User = Depends(require_gestion_academica)
 ) -> Any:
     """Crear nueva inscripción de estudiante a un curso"""
     # ISSUE-R-ROLES: un Encargado de Curso solo puede inscribir en sus cursos asignados
-    if current_user.rol == UserRole.ENCARGADO_CURSO and enrollment_in.curso_id not in current_user.cursos_asignados:
+    # F-CARGA-COORD-SEGMENTA (2026-08-18, Kevin): el COORDINADOR tambien.
+    if (
+        current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR)
+        and enrollment_in.curso_id not in (current_user.cursos_asignados or [])
+    ):
         raise HTTPException(status_code=403, detail="No tienes asignado este curso")
 
     try:
@@ -145,7 +151,9 @@ async def create_enrollment(
 async def create_enrollments_bulk(
     *,
     bulk_in: BulkEnrollmentRequest,
-    current_user: User = Depends(require_encargado_curso),  # CPD, ENCARGADO_CURSO, COORDINADOR o superior
+    # CPD, ENCARGADO_CURSO, COORDINADOR o superior, salvo el coordinador
+    # FINANCIERO (F-FIX-COORD-FINANCIERO-NO-ACADEMICO, 2026-08-19).
+    current_user: User = Depends(require_gestion_academica),
 ) -> Any:
     """
     F-INSCRIPCION-LOTE (2026-07-31): inscribe varios estudiantes al
@@ -167,16 +175,20 @@ async def create_enrollments_bulk(
     Permisos:
     - superadmin / admin / cpd: cualquier curso.
     - encargado_curso: solo cursos en cursos_asignados.
-    - coordinador: cualquier curso.
+    - coordinador: solo cursos en cursos_asignados (F-CARGA-COORD-SEGMENTA).
     """
-    # 1. Verificar que el usuario puede inscribir en este curso
+    # 1. Verificar que el usuario puede inscribir en este curso.
+    # F-CARGA-COORD-SEGMENTA (2026-08-18, Kevin): el COORDINADOR queda
+    # restringido a sus cursos_asignados igual que el ENCARGADO_CURSO. Antes
+    # podia inscribir en cualquier curso pese a que filtro_cursos_por_rol
+    # (dependencies.py) ya lo segmentaba para LECTURA.
     if (
-        current_user.rol == UserRole.ENCARGADO_CURSO
+        current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR)
         and bulk_in.curso_id not in (current_user.cursos_asignados or [])
     ):
         raise HTTPException(
             status_code=403,
-            detail="No tienes asignado este curso (encargado_curso).",
+            detail="No tienes asignado este curso.",
         )
 
     # 2. Cargar el curso UNA vez (reutilizado para todos los estudiantes)
@@ -841,7 +853,17 @@ async def update_enrollment(
                 admin_username=current_user.nombre_visible  # ISSUE-R-PERFIL-GENERICO
             )
         
-        if enrollment_in.descuento_personalizado is None and enrollment_in.descuento_id is None and enrollment_in.estado is None:
+        # F-FIX-EXCLUIR-POR-COBRAR (2026-08-16): este endpoint procesa los
+        # campos UNO POR UNO (no hace un setattr generico), asi que sin este
+        # bloque el flag se ignoraba aunque el schema lo aceptara.
+        if enrollment_in.excluir_por_cobrar is not None:
+            enrollment = await enrollment_service.get_enrollment(id)
+            if not enrollment:
+                raise HTTPException(status_code=404, detail="Inscripcion no encontrada")
+            enrollment.excluir_por_cobrar = enrollment_in.excluir_por_cobrar
+            await enrollment.save()
+
+        if enrollment_in.descuento_personalizado is None and enrollment_in.descuento_id is None and enrollment_in.estado is None and enrollment_in.excluir_por_cobrar is None:
             enrollment = await enrollment_service.get_enrollment(id)
             if not enrollment:
                 raise HTTPException(status_code=404, detail="Inscripción no encontrada")

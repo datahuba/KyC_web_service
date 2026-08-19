@@ -1,4 +1,4 @@
-from typing import List, Any, Union, Optional, Dict
+from typing import List, Any, Union, Optional, Dict, Literal
 import asyncio
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
@@ -9,14 +9,14 @@ from models.user import User
 from models.student import Student
 from models.enrollment import Enrollment
 from models.estado_programa import EstadoPrograma
-from models.enums import UserRole, EstadoInscripcion
+from models.enums import UserRole, EstadoInscripcion, SubtipoCoordinador
 from schemas.course import CourseCreate, CourseResponse, CourseUpdate, CourseEnrolledStudent
 from schemas.enrollment import EnrollmentCreate
 from services import course_service
 from beanie import PydanticObjectId
 
 # Nuevas dependencias de seguridad del ISSUE L
-from api.dependencies import require_superadmin, require_cpd, require_staff, get_current_user, require_encargado_curso
+from api.dependencies import require_superadmin, require_cpd, require_staff, get_current_user, require_encargado_curso, require_gestion_academica
 
 
 # F-US-006-3TIPOS-3A (2026-08-04): dependencia que permite a CPD, admin,
@@ -36,6 +36,21 @@ def require_cpd_or_encargado_curso_or_coordinador(current_user: User = Depends(g
         raise HTTPException(
             status_code=403,
             detail="Solo CPD, admin, superadmin, encargado de curso o coordinador pueden realizar esta accion.",
+        )
+    # F-FIX-COORD-FINANCIERO-NO-ACADEMICO (2026-08-19, Kevin): "financiero
+    # no deberia crear programas ni editar, tampoco estudiantes". Esta
+    # dependencia solo la usan carga inicial de estudiantes y carga de
+    # notas de modulos ejecutados — las dos acciones que Kevin nombro.
+    if (
+        current_user.rol == UserRole.COORDINADOR
+        and current_user.subtipo_coordinador == SubtipoCoordinador.FINANCIERO
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "El coordinador financiero no carga estudiantes ni notas. "
+                "Su alcance es económico."
+            ),
         )
     return current_user
 
@@ -112,7 +127,16 @@ async def enviar_comunicado_programa(
                         programa=nombre_programa,
                         portal_link=portal_link
                     )
-                    ok = await send_email(st.email, f"{asunto} · {nombre_programa}", html)
+                    from services import email_service
+                    _log = await email_service.enviar(
+                        destinatario=st.email,
+                        asunto=f"{asunto} · {nombre_programa}",
+                        html=html,
+                        tipo=email_service.TipoEmail.COMUNICADO,
+                        destinatario_id=getattr(st, "id", None),
+                        destinatario_nombre=getattr(st, "nombre", None),
+                    )
+                    ok = _log.estado == "enviado"
                     if ok:
                         correos_enviados += 1
                 except Exception as e:
@@ -340,6 +364,13 @@ class InitialEnrollmentResultado(BaseModel):
     success: bool
     message: str
     enrollment_id: Optional[str] = None
+    # F-CARGA-CONTEO-ESTRUCTURADO (2026-08-18): antes los totales de la
+    # respuesta se calculaban buscando substrings dentro de `message`
+    # ("actualizaron pagos", "ya esta inscrito"). Cualquier cambio de
+    # redaccion rompia el conteo en silencio, sin fallar ningun test.
+    # Ahora la accion se declara de forma explicita y `message` queda
+    # como texto libre para mostrarle al usuario.
+    accion: Literal["creado", "actualizado", "ya_inscrito", "error"] = "error"
 
 
 class InitialEnrollmentResponse(BaseModel):
@@ -380,14 +411,20 @@ async def post_initial_enrollments(
     """
     from services import enrollment_service
 
-    # 1. Verificar permisos del encargado_curso
+    # 1. Verificar permisos por curso asignado.
+    # F-CARGA-COORD-SEGMENTA (2026-08-18, Kevin): el COORDINADOR tambien queda
+    # restringido a sus cursos_asignados. Antes solo se restringia al
+    # ENCARGADO_CURSO, asi que un coordinador podia hacer carga inicial en
+    # CUALQUIER curso aunque en los listados solo viera los suyos
+    # (filtro_cursos_por_rol en dependencies.py ya lo segmentaba para LECTURA
+    # sin excepcion). Esa asimetria lectura/escritura no era intencional.
     if (
-        current_user.rol == UserRole.ENCARGADO_CURSO
+        current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR)
         and id not in (current_user.cursos_asignados or [])
     ):
         raise HTTPException(
             status_code=403,
-            detail="No tienes asignado este curso (encargado_curso).",
+            detail="No tienes asignado este curso.",
         )
 
     # 2. Cargar el curso
@@ -423,6 +460,14 @@ async def post_initial_enrollments(
     ya_inscritos_count = 0
     fallidos = 0
     resultados: List[InitialEnrollmentResultado] = []
+
+    # F-CARGA-RACE-INSCRITOS (2026-08-18): acumuladores de referencias cruzadas.
+    # Las tareas concurrentes NO escriben sobre `course` ni sobre cada
+    # `student`; solo anotan aca bajo lock, y al final se persiste todo en
+    # dos escrituras (un course.save() y un update_many de estudiantes).
+    links_lock = asyncio.Lock()
+    inscritos_a_agregar: set = set()
+    estudiantes_a_vincular: set = set()
 
     # F-HISTORICO-EXCEL-PARALLEL (2026-08-04): procesar items en paralelo
     # con asyncio.gather y un semaforo para no saturar la BD. El loop
@@ -552,6 +597,7 @@ async def post_initial_enrollments(
                     success=True,
                     message="Ya estaba inscrito; se actualizaron pagos" if actualizado else "Ya esta inscrito en este curso",
                     enrollment_id=str(existing.id),
+                    accion="actualizado" if actualizado else "ya_inscrito",
                 )
 
             # Crear la inscripcion (carga inicial, bypasea validaciones de
@@ -684,31 +730,44 @@ async def post_initial_enrollments(
                 enrollment.estado = EstadoInscripcion.ACTIVO.value
             await enrollment.save()
 
-            # Batch update de referencias cruzadas
-            if course.id not in student.lista_cursos_ids:
-                student.lista_cursos_ids.append(course.id)
-                await student.save()
-            if student.id not in course.inscritos:
-                course.inscritos.append(student.id)
-                await course.save()
+            # F-CARGA-RACE-INSCRITOS (2026-08-18): NO tocar course/student aca.
+            # Este bloque corre bajo asyncio.gather, y `course` es UN SOLO
+            # objeto compartido por todas las tareas. Hacer
+            # `course.inscritos.append(...)` + `await course.save()` en
+            # paralelo produce perdida de escrituras: dos tareas guardan
+            # snapshots distintos del mismo documento y la ultima pisa a la
+            # anterior, dejando `course.inscritos` con MENOS estudiantes que
+            # los Enrollment realmente creados. Ni Course ni Student declaran
+            # `use_revision`, asi que Beanie no detecta el conflicto.
+            # El docstring de enrollment_service.create_enrollment ya advertia
+            # de esto para `skip_link_updates=True`, y student_service lo
+            # resuelve batcheando. Aca se hace igual: se acumula bajo lock y
+            # se persiste una sola vez despues del gather.
+            async with links_lock:
+                inscritos_a_agregar.add(student.id)
+                if course.id not in (student.lista_cursos_ids or []):
+                    estudiantes_a_vincular.add(student.id)
 
             return InitialEnrollmentResultado(
                 estudiante_id=est_id_str,
                 success=True,
                 message="Inscripcion creada como carga inicial",
                 enrollment_id=str(enrollment.id),
+                accion="creado",
             )
         except ValueError as e:
             return InitialEnrollmentResultado(
                 estudiante_id=est_id_str,
                 success=False,
                 message=str(e),
+                accion="error",
             )
         except Exception as e:
             return InitialEnrollmentResultado(
                 estudiante_id=est_id_str,
                 success=False,
                 message=f"Error inesperado: {str(e)}",
+                accion="error",
             )
 
     # Procesar items con semaforo para no saturar la BD
@@ -723,6 +782,29 @@ async def post_initial_enrollments(
     tasks = [procesar_con_semaforo(item) for item in payload.estudiantes]
     results_raw = await asyncio.gather(*tasks, return_exceptions=True)
 
+    # F-CARGA-RACE-INSCRITOS (2026-08-18): persistir las referencias cruzadas
+    # acumuladas, ya fuera del contexto concurrente. Dos escrituras en total
+    # en vez de dos por estudiante, y sin riesgo de pisarse entre si.
+    if inscritos_a_agregar:
+        # Releer el curso para no guardar un snapshot viejo: entre que se
+        # cargo `course` y ahora, create_enrollment y otros procesos pudieron
+        # haberlo modificado. Se re-lee, se agrega lo que falte y se guarda.
+        course_fresco = await Course.get(course.id)
+        if course_fresco is not None:
+            existentes = set(course_fresco.inscritos or [])
+            faltantes = inscritos_a_agregar - existentes
+            if faltantes:
+                course_fresco.inscritos = list(existentes | faltantes)
+                await course_fresco.save()
+
+    if estudiantes_a_vincular:
+        # AddToSet agrega sin duplicar y sin reescribir el resto de la lista,
+        # asi no se pisan otros cursos que el estudiante ya tuviera.
+        from beanie.operators import AddToSet
+        await Student.find(In(Student.id, list(estudiantes_a_vincular))).update(
+            AddToSet({"lista_cursos_ids": course.id})
+        )
+
     for r in results_raw:
         if isinstance(r, Exception):
             fallidos += 1
@@ -730,16 +812,17 @@ async def post_initial_enrollments(
                 estudiante_id="?",
                 success=False,
                 message=f"Error inesperado: {str(r)}",
+                accion="error",
             ))
             continue
         resultados.append(r)
-        if r.success:
-            if "actualizaron pagos" in (r.message or ""):
-                exitosos += 1
-            elif "ya esta inscrito" in (r.message or "").lower() or "ya estaba inscrito" in (r.message or "").lower():
-                ya_inscritos_count += 1
-            else:
-                exitosos += 1
+        # F-CARGA-CONTEO-ESTRUCTURADO (2026-08-18): contar por el campo
+        # `accion`, no por substrings del mensaje. "actualizado" sigue
+        # contando como exitoso (hubo escritura real), igual que antes.
+        if r.accion in ("creado", "actualizado"):
+            exitosos += 1
+        elif r.accion == "ya_inscrito":
+            ya_inscritos_count += 1
         else:
             fallidos += 1
 
@@ -750,6 +833,68 @@ async def post_initial_enrollments(
         fallidos=fallidos,
         resultados=resultados,
     )
+
+
+# ============================================================================
+# F-NOTAS-MODULOS-EJECUTADOS (2026-08-18, decisión de Kevin)
+# ============================================================================
+# Un programa que arranca a mitad de camino (ej. entra en el modulo 5) tiene
+# los modulos anteriores ya dictados, con nota. La carga inicial trae pagos
+# por modulo pero nunca trajo notas. Kevin eligio resolverlo con "un Excel
+# aparte, solo de notas", para estudiantes que YA EXISTEN en el sistema (a
+# diferencia de la carga inicial, que tambien puede crear estudiantes).
+class CargarNotasExcelResponse(BaseModel):
+    actualizados: int
+    fallidos: List[dict]
+
+
+@router.post(
+    "/{id}/notas-modulos-excel",
+    response_model=CargarNotasExcelResponse,
+    summary="F-NOTAS-MODULOS-EJECUTADOS: cargar notas de modulos ya ejecutados desde Excel",
+)
+async def post_notas_modulos_excel(
+    id: PydanticObjectId,
+    file: UploadFile = File(..., description="Excel con columnas CI + 'Nota Modulo N'"),
+    current_user: User = Depends(require_cpd_or_encargado_curso_or_coordinador),
+) -> Any:
+    """
+    Carga notas de modulos ya ejecutados para estudiantes que YA ESTAN
+    inscritos en este curso. NO crea estudiantes ni inscripciones nuevas —
+    para eso esta la carga inicial. Si un CI del Excel no tiene inscripcion
+    en este curso, esa fila se reporta como fallida y se sigue con las demas.
+
+    Mismo control de permisos que la carga inicial: EC/COORD solo sobre sus
+    cursos_asignados.
+    """
+    if (
+        current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR)
+        and id not in (current_user.cursos_asignados or [])
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="No tienes asignado este curso.",
+        )
+
+    if not file.filename.lower().endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Sube un archivo .xlsx o .xls")
+
+    course = await Course.get(id)
+    if not course:
+        raise HTTPException(status_code=404, detail="Curso no encontrado")
+
+    contents = await file.read()
+    try:
+        from services.enrollment_service import cargar_notas_modulos_excel
+        resultado = await cargar_notas_modulos_excel(
+            file_content=contents,
+            curso_id=id,
+            evaluador_username=current_user.nombre_visible,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return CargarNotasExcelResponse(**resultado)
 
 
 class EstadoOverrideRequest(BaseModel):
@@ -791,15 +936,35 @@ async def patch_estado_override(
 async def put_resolucion(
     id: PydanticObjectId,
     file: UploadFile = File(..., description="PDF de la resolución"),
-    current_user: User = Depends(require_cpd)
+    current_user: User = Depends(require_encargado_curso)
 ) -> Any:
     """
     Sube el PDF de la resolución que respalda el programa y guarda la URL.
     Acepta cualquier hosting (Cloudinary, S3, local). Aquí lo subimos a
     Cloudinary igual que los otros documentos del sistema.
+
+    F-EC-RESOLUCION-REEMPLAZAR (2026-08-18, Kevin en capacitacion): antes
+    este endpoint exigia `require_cpd`, lo que dejaba al encargado sin poder
+    REEMPLAZAR la resolucion de su propio programa, aunque SI puede subirla
+    al crearlo (`POST /courses/upload-resolucion-temp` ya usa
+    `require_encargado_curso`) y aunque puede editar el resto del programa
+    (`update_course`, FIX-ISSUE-258). Era el mismo documento y la misma
+    persona, con dos criterios distintos segun el momento. Se unifica con el
+    criterio de update_course: EC/COORD solo sobre sus cursos_asignados.
     """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Solo se aceptan archivos PDF")
+
+    # Mismo control que update_course: el EC/COORD solo toca lo suyo.
+    if current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
+        if id not in (current_user.cursos_asignados or []):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "No tienes asignado este programa. Solo puedes subir la "
+                    "resolucion de programas en tu lista de cursos asignados."
+                ),
+            )
 
     # Subir a Cloudinary (mismo patrón que el resto del sistema)
     try:
@@ -832,7 +997,11 @@ async def put_resolucion(
 async def create_course(
     *,
     course_in: CourseCreate,
-    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-AUTOSERVICIO: cualquier EC/COORD/CPD/ADMIN/SUPERADMIN pueden intentar. Validaciones inline abajo.
+    # F-2026-08-11-EC-AUTOSERVICIO: cualquier EC/COORD/CPD/ADMIN/SUPERADMIN
+    # pueden intentar (validaciones inline abajo). F-FIX-COORD-FINANCIERO-
+    # NO-ACADEMICO (2026-08-19): salvo el coordinador FINANCIERO, que no
+    # gestiona contenido academico.
+    current_user: User = Depends(require_gestion_academica)
 ) -> Any:
     """Crear nuevo curso.
 
@@ -878,30 +1047,37 @@ async def create_course(
             ),
         )
 
-    # F-2026-08-12-EC-HISTORICO-CREAR (Kevin 2026-08-12 post-reunion):
-    # cualquier EC puede crear cualquier tipo, pero:
-    # - Si es historico (es_historico=True), NO exigimos fecha_fin
-    #   (programas del pasado lejano pueden no tener fecha exacta).
-    # - Si NO es historico y trae fecha_fin, validamos que sea pasada
-    #   (es coherente con que es un programa "historico/cerrado").
+    # F-FIX-FECHA-FIN-INVERTIDA (2026-08-18, Kevin): esta validacion estaba
+    # AL REVES y se contradecia a si misma.
     #
-    # FIX-ISSUE-251 (2026-08-14): el mensaje era confuso. Ahora claro.
-    if not es_historico_flag:
+    # Decia: si el programa NO es historico y la fecha_fin es futura -> error.
+    # O sea, le exigia a un programa EN EJECUCION haber terminado en el
+    # pasado. Y el propio mensaje ofrecia como salida "usa una fecha futura
+    # si es un programa programado o en ejecucion", que era exactamente lo
+    # que disparaba el error.
+    #
+    # Consecuencia real: al crear la maestria MAES-GTAF-2026/1 (que va de
+    # mayo 2026 a diciembre 2027) hubo que poner una fecha_fin FALSA del
+    # pasado para poder guardar. Quedo un dato incorrecto en produccion.
+    #
+    # La regla correcta es la inversa: el que cierra en el pasado es el
+    # HISTORICO. Un programa en ejecucion o programado termina en el futuro,
+    # que es lo normal y no tiene nada que validar.
+    if es_historico_flag:
         fecha_fin = getattr(course_in, "fecha_fin", None)
         if fecha_fin is not None:
             if isinstance(fecha_fin, _dt):
                 fin_dt = fecha_fin
             else:
                 fin_dt = _dt.combine(fecha_fin, _dt.min.time())
-            now_naive = utcnow_naive()
-            if fin_dt >= now_naive:
+            if fin_dt >= utcnow_naive():
                 raise HTTPException(
                     status_code=400,
                     detail=(
-                        "La fecha_fin debe ser ANTERIOR a hoy cuando el programa "
-                        "NO es historico. Tienes 2 opciones: (1) marca es_historico=true "
-                        "si es un programa del pasado, o (2) deja fecha_fin null "
-                        "o usa una fecha futura si es un programa programado o en ejecucion."
+                        "Un programa historico ya tiene que haber terminado: la "
+                        "fecha de fin debe ser anterior a hoy. Si el programa "
+                        "sigue vigente, elegi 'En ejecucion' o 'Proximo' en vez "
+                        "de 'Historico'."
                     ),
                 )
     try:
@@ -922,6 +1098,28 @@ async def create_course(
         # usamos otro campo dedicado (ej: `archivado`).
         course.creado_por_id = current_user.id
         course.activo = True
+
+        # P-AMBITO-FORMACION (2026-08-18): resolver el ambito y dejar las
+        # matriculas en numeros concretos ANTES de guardar.
+        #
+        # Es lo que impide repetir lo que paso en la capacitacion del
+        # 2026-08-18: se creo un programa profesional con "Matricula = 0"
+        # pero el bloque diferenciado vacio, y como None significa "cobra el
+        # default global", cada estudiante quedaba con 200 o 500 Bs de
+        # matricula fantasma que ademas le impedia pasar a "Activo".
+        from services.matricula_helper import resolver_ambito, normalizar_matriculas
+
+        course.ambito = resolver_ambito(
+            tipo_curso=str(getattr(course.tipo_curso, "value", course.tipo_curso)),
+            ambito_explicito=getattr(course_in, "ambito", None),
+            ambito_del_creador=(
+                str(current_user.ambito.value)
+                if getattr(current_user, "ambito", None)
+                else None
+            ),
+        )
+        normalizar_matriculas(course)
+
         await course.save()
 
         # F-2026-08-12-EC-AUTOASIGNAR-CURSO (Kevin 2026-08-12 post-reunion):
@@ -1015,8 +1213,9 @@ async def update_course(
     course_in: CourseUpdate,
     # FIX-ISSUE-258 (2026-08-14): EC/COORD pueden editar cursos en sus
     # cursos_asignados. CPD/ADMIN/SUPERADMIN editan cualquiera. Validacion
-    # inline mas abajo.
-    current_user: User = Depends(require_encargado_curso)
+    # inline mas abajo. F-FIX-COORD-FINANCIERO-NO-ACADEMICO (2026-08-19):
+    # el coordinador FINANCIERO no edita contenido academico.
+    current_user: User = Depends(require_gestion_academica)
 ) -> Any:
     """Actualizar curso existente.
 
@@ -1039,6 +1238,29 @@ async def update_course(
 
     try:
         course = await course_service.update_course(course=course, course_in=course_in)
+
+        # P-AMBITO-FORMACION (2026-08-18): re-resolver y normalizar tambien al
+        # editar. Sin esto, un programa creado antes del campo seguiria con
+        # ambito None y matriculas en None para siempre: editarlo es
+        # justamente la oportunidad de sanearlo. Ademas evita que un cambio de
+        # tipo_curso (a maestria, por ejemplo) deje un ambito incoherente.
+        from services.matricula_helper import resolver_ambito, normalizar_matriculas
+
+        course.ambito = resolver_ambito(
+            tipo_curso=str(getattr(course.tipo_curso, "value", course.tipo_curso)),
+            ambito_explicito=(
+                getattr(course_in, "ambito", None)
+                or (str(course.ambito.value) if course.ambito else None)
+            ),
+            ambito_del_creador=(
+                str(current_user.ambito.value)
+                if getattr(current_user, "ambito", None)
+                else None
+            ),
+        )
+        normalizar_matriculas(course)
+        await course.save()
+
         # F-CREAR-PROGRAMA-EN-EJECUCION (2026-08-05, Kevin): popular
         # estado_calculado para que el frontend muestre el badge correcto.
         course.estado_calculado = course.get_estado_actual()
@@ -1157,3 +1379,129 @@ async def get_modules_by_teacher(
                 })
                 
     return assigned_modules
+
+
+# ============================================================================
+# F-COORD-ACADEMICO-SUPERVISION (2026-08-19, Kevin)
+# ============================================================================
+# Kevin, aprobando la propuesta: "me parece bien lo de que deberia hacer
+# hazlo" -- sobre la fila "Falta: pantalla de 'mis Encargados de Curso
+# supervisados' + estado academico consolidado de sus programas (notas
+# cargadas, modulos ejecutados, etc.)".
+#
+# Hasta ahora un coordinador ACADEMICO era, en la practica, un encargado de
+# curso mas: veia la lista de Programas igual que cualquiera, sin ninguna
+# vista que consolidara el estado de TODOS los programas que supervisa de
+# un vistazo. Esta es esa vista.
+#
+# La "cobertura de notas" que calcula acá es deliberada: es exactamente el
+# numero que habria detectado en el momento el problema real de esta misma
+# sesion (38 de 54 inscripciones de DIPL-IA-2026 sin nota del modulo 1,
+# encontrado recien cuando Kevin reviso a mano).
+class SupervisionEncargado(BaseModel):
+    id: str
+    nombre: str
+
+
+class SupervisionPrograma(BaseModel):
+    curso_id: str
+    codigo: str
+    nombre_programa: str
+    estado: str
+    encargados: List[SupervisionEncargado]
+    inscritos: int
+    modulos_total: int
+    modulos_ejecutados: int
+    inscripciones_con_alguna_nota: int
+    cobertura_notas_pct: float
+
+
+@router.get(
+    "/supervision-academica",
+    response_model=List[SupervisionPrograma],
+    summary="F-COORD-ACADEMICO-SUPERVISION: resumen consolidado de los programas que superviso",
+)
+async def get_supervision_academica(
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    Para un coordinador (tipicamente academico o investigacion): de un
+    vistazo, todos los programas que supervisa, quien los administra, y si
+    el estado academico (modulos ejecutados, notas cargadas) esta al dia.
+
+    Segmentado con el mismo filtro que el resto del sistema
+    (filtro_cursos_por_rol): coordinador financiero ve TODO (no tiene
+    restriccion de curso), academico/investigacion solo sus
+    cursos_asignados, y CPD/ADMIN/SUPERADMIN/MAE ven todo tambien (utilidad
+    de supervision general, no exclusivo del coordinador).
+    """
+    from api.dependencies import filtro_cursos_por_rol
+
+    filtro = filtro_cursos_por_rol(current_user)
+    query: dict = {}
+    if filtro:
+        cursos_ids = filtro.get("curso_id", {}).get("$in") or []
+        if not cursos_ids:
+            return []
+        query["_id"] = {"$in": cursos_ids}
+
+    cursos = await Course.find(query).to_list()
+    if not cursos:
+        return []
+
+    curso_ids = [c.id for c in cursos]
+
+    # Un solo query de encargados/coordinadores que administran ESTOS cursos,
+    # en vez de una consulta por programa.
+    posibles_encargados = await User.find(
+        In(User.rol, [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR])
+    ).to_list()
+    encargados_por_curso: dict = {}
+    for u in posibles_encargados:
+        for cid in (u.cursos_asignados or []):
+            encargados_por_curso.setdefault(cid, []).append(u)
+
+    # Un solo query de inscripciones de todos estos cursos a la vez.
+    enrollments = await Enrollment.find(In(Enrollment.curso_id, curso_ids)).to_list()
+    enrollments_por_curso: dict = {}
+    for e in enrollments:
+        enrollments_por_curso.setdefault(e.curso_id, []).append(e)
+
+    resultado: List[SupervisionPrograma] = []
+    for curso in cursos:
+        modulos = curso.modulos or []
+        modulos_total = len(modulos)
+        modulos_ejecutados = sum(
+            1 for m in modulos if getattr(m, "estado_operacional", None) == "Ejecutado"
+        )
+
+        insc = enrollments_por_curso.get(curso.id, [])
+        inscritos = len(insc)
+        con_nota = sum(
+            1 for e in insc
+            if any((m.nota is not None) for m in (e.modulos or []))
+        )
+        cobertura = round((con_nota / inscritos * 100), 1) if inscritos > 0 else 0.0
+
+        encargados = [
+            SupervisionEncargado(id=str(u.id), nombre=u.nombre_visible)
+            for u in encargados_por_curso.get(curso.id, [])
+        ]
+
+        resultado.append(SupervisionPrograma(
+            curso_id=str(curso.id),
+            codigo=curso.codigo,
+            nombre_programa=curso.nombre_programa,
+            estado=curso.get_estado_actual(),
+            encargados=encargados,
+            inscritos=inscritos,
+            modulos_total=modulos_total,
+            modulos_ejecutados=modulos_ejecutados,
+            inscripciones_con_alguna_nota=con_nota,
+            cobertura_notas_pct=cobertura,
+        ))
+
+    # Los programas con menos cobertura de notas primero: son los que
+    # necesitan atencion, no los que ya estan al dia.
+    resultado.sort(key=lambda r: r.cobertura_notas_pct)
+    return resultado

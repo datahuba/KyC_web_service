@@ -9,6 +9,14 @@ educacion continua pueda:
 2. Crear programas HISTORICOS (fecha_fin ya paso). NO puede crear
    programas nuevos ni en ejecucion (esos siguen siendo CPD/SUPERADMIN).
 
+   ACTUALIZACION F-2026-08-12-EC-RESOLUCION-OBLIGATORIA (Kevin, post-reunion
+   2026-08-12): esta restriccion se REVIRTIO al dia siguiente. Ahora
+   EC/COORD/CPD/ADMIN/SUPERADMIN pueden crear los 3 tipos de programa
+   (historico, programado, en ejecucion) sin distincion de rol. El unico
+   gate que queda es documental: un programa en_ejecucion exige
+   resolucion_pdf_url (400 si falta), pareja para todos los roles. Ver
+   api/courses.py:create_course y los tests mas abajo.
+
 Estos tests NO importan la app entera (no init_beanie, no FastAPI).
 Usan lectura estatica del codigo (mismo patron que test_f082, test_f083,
 test_limite_10, test_campos_ec, test_modulos_ec, test_asistencia).
@@ -32,8 +40,10 @@ def _read(path: Path) -> str:
 # ============================================================
 
 def test_courses_create_usa_require_encargado_curso():
-    """api/courses.py:create_course debe usar require_encargado_curso
-    (permite a los 5 roles: EC, coord, CPD, ADMIN, SUPERADMIN)."""
+    """api/courses.py:create_course debe usar require_gestion_academica
+    (permite a los 5 roles: EC, coord, CPD, ADMIN, SUPERADMIN — salvo el
+    coordinador financiero, ver F-FIX-COORD-FINANCIERO-NO-ACADEMICO,
+    2026-08-19, que envuelve a require_encargado_curso)."""
     text = _read(COURSES_API)
     match = re.search(
         r"async def create_course\b.*?(?=^async def |\n@router\.|\Z)",
@@ -42,19 +52,22 @@ def test_courses_create_usa_require_encargado_curso():
     )
     assert match is not None, "No encontre create_course en api/courses.py"
     body = match.group(0)
-    assert "require_encargado_curso" in body, (
-        "create_course debe usar require_encargado_curso para permitir a "
-        "EC/coord intentar crear. F-2026-08-11-EC-AUTOSERVICIO no aplicado."
+    assert "require_gestion_academica" in body, (
+        "create_course debe usar require_gestion_academica (que envuelve a "
+        "require_encargado_curso) para permitir a EC/coord intentar crear, "
+        "salvo el coordinador financiero. F-2026-08-11-EC-AUTOSERVICIO / "
+        "F-FIX-COORD-FINANCIERO-NO-ACADEMICO no aplicado."
     )
     assert "F-2026-08-11-EC-AUTOSERVICIO" in body, (
         "Falta el comentario F-2026-08-11-EC-AUTOSERVICIO en create_course"
     )
 
 
-def test_courses_create_bloquea_nuevo_o_en_ejecucion_a_ec():
-    """create_course debe validar: si NO es CPD/ADMIN/SUPERADMIN, el
-    curso debe ser HISTORICO (fecha_fin ya paso). Si intenta crear
-    uno nuevo/en ejecucion, se rechaza con 403."""
+def test_courses_create_no_bloquea_nuevo_o_en_ejecucion_a_ec():
+    """F-2026-08-12-EC-RESOLUCION-OBLIGATORIA revirtio la restriccion de
+    F-2026-08-11-EC-AUTOSERVICIO: EC/coord YA NO estan limitados a crear
+    solo programas historicos. create_course no debe tener ningun gate de
+    403 basado en rol para el tipo de programa."""
     text = _read(COURSES_API)
     match = re.search(
         r"async def create_course\b.*?(?=^async def |\n@router\.|\Z)",
@@ -63,43 +76,44 @@ def test_courses_create_bloquea_nuevo_o_en_ejecucion_a_ec():
     )
     assert match is not None, "No encontre create_course"
     body = match.group(0)
-    # Debe chequear fecha_fin < now
-    assert "fecha_fin" in body, (
-        "create_course debe validar fecha_fin para EC/coord. "
-        "F-2026-08-11-EC-AUTOSERVICIO no aplicado."
+    assert "F-2026-08-12-EC-RESOLUCION-OBLIGATORIA" in body, (
+        "Falta el comentario F-2026-08-12-EC-RESOLUCION-OBLIGATORIA en "
+        "create_course (la reversion de la restriccion por rol)."
     )
-    # Debe lanzar 403 si la fecha fin es futura
-    assert re.search(
-        r'status_code\s*=\s*403',
-        body,
-    ), (
-        "create_course debe lanzar 403 si EC/coord intenta crear curso "
-        "no historico. F-2026-08-11-EC-AUTOSERVICIO no aplicado."
-    )
-    # El mensaje debe mencionar 'historico'
-    assert re.search(
-        r"historico|hist\u00f3rico",
-        body,
-        re.IGNORECASE,
-    ), (
-        "El mensaje de error 403 debe mencionar 'historico' para que el "
-        "usuario entienda la regla. F-2026-08-11-EC-AUTOSERVICIO incompleto."
+    # No debe existir un 403 condicionado al tipo de programa (fecha_fin /
+    # es_historico). El unico 403 legitimo en el archivo es de otros
+    # endpoints (ej. RBAC de edicion), no de este bloque de validacion.
+    assert not re.search(r'status_code\s*=\s*403', body), (
+        "create_course NO debe lanzar 403 por tipo de programa: desde "
+        "F-2026-08-12-EC-RESOLUCION-OBLIGATORIA cualquier rol autorizado "
+        "puede crear historico/programado/en_ejecucion."
     )
 
 
-def test_courses_create_permite_cualquier_tipo_a_cpd_admin_super():
-    """create_course NO debe restringir a CPD/ADMIN/SUPERADMIN
-    (deben poder crear cualquier tipo: nuevo, en ejecucion, historico)."""
+def test_courses_create_exige_resolucion_para_en_ejecucion():
+    """F-2026-08-12-EC-RESOLUCION-OBLIGATORIA: el unico gate para crear un
+    programa EN EJECUCION es la resolucion PDF (400 si falta), parejo para
+    todos los roles habilitados por require_encargado_curso."""
     text = _read(COURSES_API)
     match = re.search(
         r"async def create_course\b.*?(?=^async def |\n@router\.|\Z)",
         text,
         re.DOTALL | re.MULTILINE,
     )
+    assert match is not None, "No encontre create_course"
     body = match.group(0)
-    assert "UserRole.CPD" in body and "UserRole.SUPERADMIN" in body, (
-        "create_course debe permitir a CPD/ADMIN/SUPERADMIN sin "
-        "restriccion de tipo."
+    assert "resolucion_pdf_url" in body, (
+        "create_course debe validar resolucion_pdf_url para programas en_ejecucion."
+    )
+    assert re.search(r'status_code\s*=\s*400', body), (
+        "La falta de resolucion en un programa en_ejecucion debe rechazarse con 400."
+    )
+    # No hay branching por UserRole para decidir si se permite el tipo de
+    # programa: el mismo codigo corre para EC, coord, CPD, admin y superadmin.
+    assert "UserRole.CPD" not in body and "UserRole.SUPERADMIN" not in body, (
+        "create_course no debe distinguir CPD/ADMIN/SUPERADMIN del resto: "
+        "la validacion de tipo de programa es la misma para todos los "
+        "roles que pasan require_encargado_curso."
     )
 
 

@@ -160,7 +160,15 @@ async def approve_account_request(request_id: PydanticObjectId, admin_username: 
             token = create_email_verification_token(str(student.id), "student", student.email)
             verify_link = f"{settings.FRONTEND_URL.rstrip('/')}/auth/verify-email?token={token}"
             html = build_email_verification_email(student.nombre or "estudiante", verify_link, settings.EMAIL_VERIFICATION_EXPIRE_MINUTES // 60)
-            await send_email(student.email, "Confirma tu correo - Posgrado UAGRM", html)
+            from services import email_service
+            await email_service.enviar(
+                destinatario=student.email,
+                asunto="Confirma tu correo - Posgrado UAGRM",
+                html=html,
+                tipo=email_service.TipoEmail.VERIFICACION_EMAIL,
+                destinatario_id=getattr(student, "id", None),
+                destinatario_nombre=getattr(student, "nombre", None),
+            )
         except Exception as e:
             print(f"Error enviando verificación de correo al aprobar cuenta: {str(e)}")
 

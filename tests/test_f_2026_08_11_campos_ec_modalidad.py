@@ -242,13 +242,16 @@ def test_api_pre_registrations_endpoints_lectura_usan_encargado_curso():
     seguir usando require_cpd."""
     api_py = (REPO_BACKEND / "api" / "pre_registrations.py").read_text(encoding="utf-8")
 
-    # Contar require_cpd: deben quedar SOLO 2 (approve + reject)
+    # F-FIX-PRE-REGISTROS-EC-APPROVE (2026-08-12, Kevin): approve/reject
+    # tambien pasaron de require_cpd a require_encargado_curso (el EC debe
+    # poder aprobar/rechazar pre-inscripciones de SUS cursos asignados; el
+    # chequeo de pertenencia quedo en el cuerpo de la funcion, no en el
+    # decorador). Ya no queda ningun require_cpd en este archivo.
     cpd_count = api_py.count("Depends(require_cpd)")
-    assert cpd_count == 2, (
-        f"Debe haber exactamente 2 dependencias de require_cpd (approve + reject). "
-        f"Encontre {cpd_count}. Los endpoints de LECTURA (list_forms, get_form, "
-        f"list_submissions, counters) deben usar require_encargado_curso para "
-        f"que EC/coord puedan acceder al panel sin 403."
+    assert cpd_count == 0, (
+        f"Ya no debe quedar ningun endpoint con require_cpd en pre_registrations.py "
+        f"(approve/reject pasaron a require_encargado_curso con chequeo de "
+        f"cursos_asignados en el cuerpo). Encontre {cpd_count}."
     )
 
     # Verificar que los 4 endpoints de lectura usan require_encargado_curso

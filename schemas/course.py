@@ -36,6 +36,27 @@ class ModuloCreate(BaseModel):
             return None
         return v
 
+    # F-FIX-ESTADO-OPERACIONAL (2026-08-16): sin este campo aca, Pydantic
+    # descartaba lo que mandaba el <select> del CourseForm y el cronograma
+    # del programa cargado en ejecucion quedaba vacio. Ver models/course.py.
+    estado_operacional: Optional[str] = Field(
+        None,
+        description="Estado en el cronograma: 'Pendiente' | 'En Ejecucion' | 'Ejecutado'"
+    )
+
+    @field_validator('estado_operacional', mode='before')
+    @classmethod
+    def _validar_estado_operacional(cls, v):
+        """Acepta vacio como None y valida contra los 3 valores del selector."""
+        if v is None or v == '' or v == 'null' or v == 'undefined':
+            return None
+        permitidos = {'Pendiente', 'En Ejecucion', 'Ejecutado'}
+        if v not in permitidos:
+            raise ValueError(
+                f"estado_operacional invalido: {v!r}. Valores permitidos: {sorted(permitidos)}"
+            )
+        return v
+
 
 class CargoAdicionalItemCreate(BaseModel):
     """ISSUE-P-CARGO-MULTIITEM: un ítem individual de cargo adicional (nombre + costo)."""
@@ -63,6 +84,29 @@ class CourseCreate(BaseModel):
     # para programas en ejecucion sean > 0.
     costo_total_interno: float = Field(default=0, ge=0, description="Costo total (colegiatura) del programa. Obligatorio > 0 si NO es historico.")
     matricula_interno: float = Field(default=0, ge=0, description="Matrícula institucional del programa. Obligatorio si NO es historico.")
+    # P-AMBITO-FORMACION (2026-08-18): educacion_continua | profesional.
+    # Opcional: si no viene, el backend lo resuelve con resolver_ambito()
+    # a partir del tipo_curso y del ambito del encargado que crea.
+    ambito: Optional[str] = Field(
+        None,
+        description="P-AMBITO-FORMACION: 'educacion_continua' o 'profesional'. Si no se manda, se deduce.",
+    )
+
+
+    # F-FIX-MATRICULA-DIFERENCIADA (2026-08-16): estos dos overrides existen
+    # en `models/course.py` desde F-2026-08-12-DESCUENTO-BECA y los consume
+    # `services/matricula_helper.py`, pero NINGUN schema los declaraba. Como
+    # Pydantic v2 descarta los campos extra, lo que el admin cargaba en el
+    # formulario se perdia y TODOS los estudiantes terminaban pagando el
+    # default global. Es un bug de dinero, no cosmetico.
+    matricula_primer_carrera: Optional[float] = Field(
+        None, ge=0,
+        description="Override de matricula para estudiantes de PRIMERA CARRERA. Si None, usa MATRICULA_PRIMER_CARRERA_DEFAULT."
+    )
+    matricula_profesional: Optional[float] = Field(
+        None, ge=0,
+        description="Override de matricula para estudiantes CON TITULO PROFESIONAL. Si None, usa MATRICULA_PROFESIONAL_DEFAULT."
+    )
 
     # ISSUE-P-CARGO-MULTIITEM: lista de ítems de cargo adicional/complementario
     # al programa (ej. varios talleres, cada uno con su propio costo).
@@ -163,6 +207,12 @@ class CourseResponse(BaseModel):
     
     costo_total_interno: float
     matricula_interno: float
+    ambito: Optional[str] = None
+    # F-FIX-MATRICULA-DIFERENCIADA (2026-08-16): sin esto el frontend no
+    # podia leer de vuelta lo guardado y el formulario de edicion los
+    # mostraba siempre vacios.
+    matricula_primer_carrera: Optional[float] = None
+    matricula_profesional: Optional[float] = None
 
     cargo_adicional_items: List[CargoAdicionalItemCreate] = Field(default_factory=list)
     
@@ -250,6 +300,17 @@ class CourseUpdate(BaseModel):
     
     costo_total_interno: Optional[float] = Field(None, ge=0)
     matricula_interno: Optional[float] = Field(None, ge=0)
+    # P-AMBITO-FORMACION (2026-08-18): educacion_continua | profesional.
+    # Opcional: si no viene, el backend lo resuelve con resolver_ambito()
+    # a partir del tipo_curso y del ambito del encargado que crea.
+    ambito: Optional[str] = Field(
+        None,
+        description="P-AMBITO-FORMACION: 'educacion_continua' o 'profesional'. Si no se manda, se deduce.",
+    )
+
+    # F-FIX-MATRICULA-DIFERENCIADA (2026-08-16): ver nota en CourseCreate.
+    matricula_primer_carrera: Optional[float] = Field(None, ge=0)
+    matricula_profesional: Optional[float] = Field(None, ge=0)
 
     cargo_adicional_items: Optional[List[CargoAdicionalItemCreate]] = None
 

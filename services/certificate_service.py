@@ -17,6 +17,8 @@ Patrones respetados del proyecto:
 """
 
 import io
+import logging
+import os
 import re
 import uuid
 from datetime import datetime, timezone
@@ -33,24 +35,56 @@ from models.enrollment import Enrollment
 from models.enums import TipoCertificado
 from models.student import Student
 
+logger = logging.getLogger(__name__)
+
 
 # ========================================================================
 # CONSTANTES INSTITUCIONALES (UAGRM / Postgrado Contaduría)
 # ========================================================================
 
 UAGRM_NOMBRE = "UNIDAD DE POSTGRADO"
-UAGRM_FACULTAD = "FACULTAD DE AUDITORIA FINANCIERA O CONTADURIA PUBLICA"
-UAGRM_UNIVERSIDAD = 'UNIVERSIDAD AUTONOMA "GABRIEL RENE MORENO"'
+# CORREGIDO (Kevin 2026-08-17): el nombre que estaba, "FACULTAD DE AUDITORIA
+# FINANCIERA O CONTADURIA PUBLICA", no es el de la facultad. El correcto es el
+# que figura en la hoja membretada y en el cargo del director.
+UAGRM_FACULTAD = (
+    "FACULTAD DE CIENCIAS CONTABLES, AUDITORÍA, "
+    "SISTEMAS DE CONTROL DE GESTIÓN Y FINANZAS"
+)
+UAGRM_UNIVERSIDAD = 'UNIVERSIDAD AUTÓNOMA "GABRIEL RENÉ MORENO"'
 UAGRM_DIRECCION = "Av. Centenario entre primer y segundo anillo"
 UAGRM_EMAIL = "postgradocontaduria@uagrm.edu.bo"
 UAGRM_TELEFONO = "Telf. Fax: 337-0569"
 UAGRM_CIUDAD = "Santa Cruz"
 
-# Firmantes (PLACEHOLDERS — se reemplazan con PNG transparente en follow-up)
-FIRMANTE_COORD_NOMBRE = "Lic. Claudio R. Cuéllar Paz"
-FIRMANTE_COORD_CARGO = "COORDINADORA ADMINISTRATIVA Y FINANCIERA\nPOSTGRADO DE AUDITORIA FINANCIERA\nO CONTADURIA PUBLICA"
-FIRMANTE_DIRECTORA_NOMBRE = "M.Sc. Ortega Blanca Muñoz"
-FIRMANTE_DIRECTORA_CARGO = "DIRECTORA\nPOSTGRADO DE AUDITORIA FINANCIERA\nO CONTADURIA PUBLICA"
+# ========================================================================
+# Firmantes de los certificados
+# ========================================================================
+# Datos confirmados por Kevin el 2026-08-17 tras revisar el certificado
+# N° 007/2026 ya emitido. Los valores anteriores tenian DOS errores en un
+# documento oficial que la unidad entrega firmado:
+#
+#   1. El nombre decia "Claudio" (masculino) en vez de "Claudia", en una
+#      firma cuyo cargo dice "COORDINADORA".
+#   2. La segunda firma era otra persona: figuraba "M.Sc. Ortega Blanca
+#      Muñoz / DIRECTORA", cuando quien dirige Postgrado es el Ph.D. Fausto
+#      Mendoza Iriarte.
+#
+# Estos datos los usan los DOS tipos de certificado (Notas y No Deudor).
+FIRMANTE_COORD_NOMBRE = "Lic. Claudia R. Cuéllar Paz"
+# El cargo ya no repite el nombre de la facultad: la hoja membretada lo trae
+# impreso arriba y el cuerpo del certificado lo dice una vez. Repetirlo en el
+# pie de firma era la cuarta aparición en la misma carilla.
+FIRMANTE_COORD_CARGO = (
+    "COORDINADORA ADMINISTRATIVA Y FINANCIERA\n"
+    "UNIDAD DE POSTGRADO"
+)
+FIRMANTE_DIRECTORA_NOMBRE = "Ph.D. Fausto Mendoza Iriarte"
+FIRMANTE_DIRECTORA_CARGO = (
+    "DIRECTOR DE POSTGRADO\n"
+    "FACULTAD DE CIENCIAS CONTABLES, AUDITORÍA,\n"
+    "SISTEMAS DE CONTROL DE GESTIÓN Y FINANZAS\n"
+    "U.A.G.R.M."
+)
 
 # Roles staff (los únicos que pueden ver/descargar certificados de cualquier estudiante)
 # BUG FIX (2026-07-30): los valores del enum UserRole están en MINÚSCULAS
@@ -356,8 +390,18 @@ def _make_pdf_styles():
     return styles
 
 
-def _header_table(folio: str, styles: dict):
-    """Tabla de encabezado: titulos UAGRM centrados + folio a la derecha."""
+def _header_table(folio: str, styles: dict, ancho_total: float = 200.0):
+    """
+    Tabla de encabezado: titulos UAGRM centrados + folio a la derecha.
+
+    `ancho_total` se agrego el 2026-08-17 al corregir el nombre de la
+    facultad: el nuevo ("FACULTAD DE CIENCIAS CONTABLES, AUDITORÍA, SISTEMAS
+    DE CONTROL DE GESTIÓN Y FINANZAS") es mucho mas largo que el anterior y
+    con las 150pt fijas que tenia la columna se partia en cuatro renglones,
+    el folio salia cortado ("N° 010/" y "2026" en lineas distintas) y el
+    certificado de Notas se iba a DOS paginas. La tabla ahora usa el ancho
+    util real del marco.
+    """
     from reportlab.platypus import Table, TableStyle, Paragraph
     from reportlab.lib import colors
 
@@ -368,9 +412,11 @@ def _header_table(folio: str, styles: dict):
     titulos = [p_top, p_fac, p_uni]
     folio_p = Paragraph(folio, styles["folio"])
 
+    # El folio necesita ancho fijo para no cortarse; el resto va a los titulos.
+    ancho_folio = 70.0
     t = Table(
         [[titulos, folio_p]],
-        colWidths=[150, 50],
+        colWidths=[max(ancho_total - ancho_folio, 130.0), ancho_folio],
     )
     t.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -382,19 +428,32 @@ def _header_table(folio: str, styles: dict):
     return t
 
 
-def _linea_horizontal():
-    """Línea horizontal separadora (decorativa, color institucional)."""
+def _linea_horizontal(ancho: float = 200.0):
+    """
+    Línea horizontal separadora (decorativa, color institucional).
+
+    Toma el ancho para acompañar al encabezado: con las 200pt fijas quedaba
+    una rayita corta debajo de un bloque que ocupa todo el marco.
+    """
     from reportlab.platypus import Table, TableStyle
     from reportlab.lib import colors
-    t = Table([[""]], colWidths=[200], rowHeights=[1])
+    t = Table([[""]], colWidths=[ancho], rowHeights=[1])
     t.setStyle(TableStyle([
         ("LINEABOVE", (0, 0), (-1, 0), 1, colors.HexColor("#023273")),
     ]))
     return t
 
 
-def _seccion_firmas(styles: dict):
-    """Tabla con las dos firmas (Coord. Administrativa + Directora)."""
+def _seccion_firmas(styles: dict, ancho_columna: float = 100.0):
+    """
+    Tabla con las dos firmas (Coord. Administrativa + Directora).
+
+    `ancho_columna` existe porque la hoja membretada es bastante más ancha
+    que el marco de los PDF originales: con las 100pt de siempre, los cargos
+    se partían en una columna finita de ocho renglones y quedaba ilegible.
+    Los renders viejos siguen usando el default para no cambiarles el
+    aspecto.
+    """
     from reportlab.platypus import Table, TableStyle, Paragraph
     from reportlab.lib import colors
 
@@ -417,7 +476,7 @@ def _seccion_firmas(styles: dict):
 
     t = Table(
         [[celda_izq, celda_der]],
-        colWidths=[100, 100],
+        colWidths=[ancho_columna, ancho_columna],
     )
     t.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -435,6 +494,115 @@ def _footer(styles: dict):
         styles["footer"],
     )
     return p
+
+
+# ========================================================================
+# F-CERT-NO-DEUDOR-COBRO (2026-08-17): render sobre hoja membretada
+# ========================================================================
+# Kevin: "el modelo final que le llega al estudiante debe ser con la hoja
+# membretada y el texto que ya tienes registrado en el sistema".
+#
+# Los membretes que pasó (assets/membretes/) son PDF SOLO GRÁFICOS: tienen
+# 0 caracteres extraíbles. O sea que no se pueden "rellenar" como si fueran
+# una plantilla con campos — hay que generar el texto aparte y superponerlo
+# sobre la hoja. Eso es lo que hace `_componer_sobre_membrete`.
+
+MEMBRETES_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "membretes"
+)
+
+# Zona segura de cada formato, MEDIDA sobre el PDF real (no estimada): se
+# renderizó cada hoja y se buscó hasta dónde llega la banda verde de arriba y
+# desde dónde arranca la de abajo. A eso se le sumó un colchón para que el
+# texto no quede pegado al gráfico.
+#
+#   CARTA  (612x792 pt): banda superior hasta 35.3mm, inferior desde 41.6mm
+#   OFICIO (612x1008 pt): banda superior hasta 36.7mm, inferior desde 64.9mm
+#
+# El pie del OFICIO es mucho más alto que el de CARTA, así que NO sirve usar
+# los mismos márgenes para los dos: el texto se metería debajo del gráfico.
+MEMBRETE_LAYOUT = {
+    "CARTA": {"ancho_pt": 612.0, "alto_pt": 792.0, "top_mm": 42.0, "bottom_mm": 48.0},
+    "OFICIO": {"ancho_pt": 612.0, "alto_pt": 1008.0, "top_mm": 44.0, "bottom_mm": 72.0},
+}
+MEMBRETE_MARGEN_LATERAL_MM = 25.0
+
+# Formato por defecto. CARTA es el tamaño de hoja habitual de la oficina;
+# OFICIO queda disponible para certificados con mucho texto.
+MEMBRETE_FORMATO_DEFAULT = "CARTA"
+
+
+def _ruta_membrete(formato: str) -> str:
+    """Ruta al PDF del membrete. Lanza ValueError si el formato no existe."""
+    formato = (formato or MEMBRETE_FORMATO_DEFAULT).upper()
+    if formato not in MEMBRETE_LAYOUT:
+        raise ValueError(
+            f"Formato de membrete desconocido: {formato}. "
+            f"Válidos: {', '.join(sorted(MEMBRETE_LAYOUT))}."
+        )
+    return os.path.join(MEMBRETES_DIR, f"{formato}.pdf")
+
+
+def hay_membrete(formato: str = MEMBRETE_FORMATO_DEFAULT) -> bool:
+    """
+    True si el archivo del membrete está presente y es legible.
+
+    Se chequea antes de emitir para poder caer al formato sin membrete en
+    vez de reventar: un despliegue al que le falte `assets/` no debería
+    dejar a la unidad sin poder emitir certificados.
+    """
+    try:
+        return os.path.isfile(_ruta_membrete(formato))
+    except ValueError:
+        return False
+
+
+def _componer_sobre_membrete(
+    contenido_pdf: bytes, formato: str = MEMBRETE_FORMATO_DEFAULT
+) -> bytes:
+    """
+    Superpone el PDF de contenido sobre la hoja membretada.
+
+    El membrete queda ABAJO y el texto ARRIBA, así el texto nunca queda
+    tapado por el escudo de agua del fondo.
+
+    Si el contenido ocupa más de una página, cada página recibe su propia
+    copia del membrete: una hoja 2 sin membrete se vería como si fuera de
+    otro documento.
+    """
+    from pypdf import PdfReader, PdfWriter
+
+    ruta = _ruta_membrete(formato)
+    contenido = PdfReader(io.BytesIO(contenido_pdf))
+    writer = PdfWriter()
+
+    for pagina_contenido in contenido.pages:
+        # Se relee el membrete en cada vuelta a propósito: pypdf muta la
+        # página al hacer merge, así que reusar el mismo objeto acumularía
+        # el texto de las páginas anteriores.
+        base = PdfReader(ruta).pages[0]
+        base.merge_page(pagina_contenido)
+        writer.add_page(base)
+
+    salida = io.BytesIO()
+    writer.write(salida)
+    return salida.getvalue()
+
+
+def _nombre_con_tratamiento(nombre: str, tratamiento: Optional[str]) -> str:
+    """
+    Antepone el tratamiento profesional al nombre, si corresponde.
+
+    Kevin: "a los profesionales debe decir lic. o ing. o lo que sea respecto
+    a su carrera y su nombre, tipo lic. kevin soto o ing. kevin soto". Los de
+    diplomado continuo no llevan tratamiento, y por eso `tratamiento` puede
+    venir en None y el nombre sale tal cual.
+    """
+    nombre = (nombre or "").strip().upper()
+    tratamiento = (tratamiento or "").strip()
+    if not tratamiento:
+        return nombre
+    return f"{tratamiento.upper()} {nombre}"
 
 
 # ========================================================================
@@ -473,8 +641,9 @@ def render_pdf_notas(
 
     elements = []
     # Encabezado
-    elements.append(_header_table(folio, styles))
-    elements.append(_linea_horizontal())
+    ancho_util_a4 = 170 * mm
+    elements.append(_header_table(folio, styles, ancho_total=ancho_util_a4))
+    elements.append(_linea_horizontal(ancho_util_a4))
     elements.append(Spacer(1, 6 * mm))
 
     # Título
@@ -630,8 +799,9 @@ def render_pdf_no_deudor(
     )
 
     elements = []
-    elements.append(_header_table(folio, styles))
-    elements.append(_linea_horizontal())
+    ancho_util_a4 = 170 * mm
+    elements.append(_header_table(folio, styles, ancho_total=ancho_util_a4))
+    elements.append(_linea_horizontal(ancho_util_a4))
     elements.append(Spacer(1, 6 * mm))
 
     elements.append(Paragraph("CERTIFICADO DE NO DEUDOR", styles["titulo_doc"]))
@@ -675,12 +845,18 @@ def render_pdf_no_deudor(
             'del mencionado programa de acuerdo al compromiso de pago firmado con la Unidad de Postgrado.'
         )
     else:
+        # Mismo BUG-FIX que en la versión membretada (2026-08-17): sin fechas
+        # cargadas el rango sale "—" y quedaba un "(—)" suelto en el
+        # documento oficial.
+        rango = _format_rango_modulo(
+            getattr(enrollment.modulos[hasta_modulo_n - 1], "fecha_inicio", None),
+            getattr(enrollment.modulos[hasta_modulo_n - 1], "fecha_fin", None),
+        )
+        detalle_rango = f" ({rango})" if rango and rango != "—" else ""
         texto_no_deuda = (
-            f'<b>"NO TIENE DEUDA ECONOMICA PENDIENTE"</b> hasta el <b>Módulo {hasta_modulo_n}</b> '
-            f'({_format_rango_modulo(
-                getattr(enrollment.modulos[hasta_modulo_n - 1], "fecha_inicio", None),
-                getattr(enrollment.modulos[hasta_modulo_n - 1], "fecha_fin", None),
-            )}) del mencionado programa, de acuerdo al compromiso de pago firmado con la Unidad de Postgrado.'
+            f'<b>"NO TIENE DEUDA ECONOMICA PENDIENTE"</b> hasta el <b>Módulo {hasta_modulo_n}</b>'
+            f'{detalle_rango} del mencionado programa, de acuerdo al compromiso de pago '
+            f'firmado con la Unidad de Postgrado.'
         )
     elements.append(Paragraph(texto_no_deuda, styles["no_deudor_enfasis"]))
 
@@ -696,6 +872,138 @@ def render_pdf_no_deudor(
 
     doc.build(elements)
     return buf.getvalue()
+
+
+def render_pdf_no_deudor_membretado(
+    *,
+    student: Student,
+    course: Course,
+    enrollment: Enrollment,
+    hasta_modulo_n: int,
+    folio: str,
+    emitido_en: datetime,
+    tratamiento: Optional[str] = None,
+    formato: str = MEMBRETE_FORMATO_DEFAULT,
+) -> bytes:
+    """
+    Certificado de No Deudor sobre la hoja membretada de la Unidad.
+
+    F-CERT-NO-DEUDOR-COBRO (Kevin 2026-08-17): "el modelo final que le llega
+    al estudiante debe ser con la hoja membretada".
+
+    Diferencias con `render_pdf_no_deudor` (la versión sin membrete):
+      - No se dibuja el encabezado institucional ni el pie de dirección: ya
+        vienen impresos en la hoja. Repetirlos se vería como un documento
+        mal armado.
+      - Los márgenes salen de `MEMBRETE_LAYOUT`, medidos sobre el archivo
+        real, para que el texto no se meta bajo las bandas verdes.
+      - El nombre puede llevar tratamiento profesional (Lic./Ing./...).
+
+    El texto del cuerpo es el mismo que ya estaba en el sistema, que es lo
+    que Kevin pidió conservar.
+    """
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+
+    layout = MEMBRETE_LAYOUT[(formato or MEMBRETE_FORMATO_DEFAULT).upper()]
+    styles = _make_pdf_styles()
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=(layout["ancho_pt"], layout["alto_pt"]),
+        leftMargin=MEMBRETE_MARGEN_LATERAL_MM * mm,
+        rightMargin=MEMBRETE_MARGEN_LATERAL_MM * mm,
+        topMargin=layout["top_mm"] * mm,
+        bottomMargin=layout["bottom_mm"] * mm,
+        title=f"Certificado de No Deudor - {student.nombre or ''}",
+    )
+
+    elements = []
+
+    # Folio arriba a la derecha. Es lo único del encabezado viejo que se
+    # conserva: el membrete no lo trae y sin folio el documento no es
+    # rastreable.
+    elements.append(Paragraph(folio, styles["folio"]))
+    elements.append(Spacer(1, 4 * mm))
+
+    elements.append(Paragraph("CERTIFICADO DE NO DEUDOR", styles["titulo_doc"]))
+
+    # F-CERT-REDACCION (Kevin 2026-08-17): "que no repita lo mismo".
+    #
+    # La versión anterior nombraba a la facultad TRES veces en media carilla:
+    # en la línea de presentación, otra vez dentro del "Que, revisando los
+    # registros...", y una tercera en el pie de cada firma. Encima la hoja
+    # membretada ya la trae impresa arriba, así que eran cuatro.
+    #
+    # Ahora se nombra UNA sola vez, en la presentación, y el cuerpo va
+    # directo al grano con la redacción que dictó Kevin.
+    elements.append(Paragraph(
+        f"La Unidad de Postgrado de la {UAGRM_FACULTAD} de la {UAGRM_UNIVERSIDAD}.",
+        styles["cuerpo"],
+    ))
+
+    elements.append(Paragraph("CERTIFICA:", styles["certifica_label"]))
+
+    ci_full = _format_ci_full(student.carnet, student.extension, student.complemento_carnet)
+
+    # Se conserva la ESTRUCTURA del formato original (nombre centrado en su
+    # propia línea, programa destacado en su recuadro, y la frase de no deuda
+    # resaltada): Kevin lo pidió explícitamente, "lo quiero así pero con el
+    # texto cambiado". Lo que cambia es la redacción.
+    #
+    # De paso desaparece la segunda mención a la facultad, que antes venía en
+    # el "Que, revisando los registros de pagos existentes en la Unidad de
+    # Postgrado de la FACULTAD...".
+    elements.append(Paragraph("Que el o la postgraduante:", styles["cuerpo"]))
+    elements.append(Paragraph(
+        f"<b>{_nombre_con_tratamiento(student.nombre or '', tratamiento)}</b><br/>"
+        f"CI. {ci_full}.",
+        styles["cuerpo_centrado"],
+    ))
+
+    # Se mantiene en mayúsculas como en el formato original. Solo se
+    # normalizan los espacios de más, que vienen en los datos ("APLICADA A
+    # LA  EDUCACIÓN,  LA INVESTIGACIÓN") y ensuciaban el renglón.
+    nombre_programa = re.sub(r"\s+", " ", (course.nombre_programa or "").strip()).upper()
+    partes_programa = [nombre_programa]
+    if course.codigo:
+        partes_programa.append(f"CÓDIGO {course.codigo}")
+    elements.append(Paragraph("Del programa:", styles["cuerpo"]))
+    elements.append(Paragraph(" ".join(partes_programa), styles["caja_programa"]))
+    elements.append(Spacer(1, 4 * mm))
+
+    # F-CERT-SIN-ALCANCE (Kevin 2026-08-17): "que el texto 'hasta el modulo 1'
+    # se elimine y quede lo demas pero que sea coherente lo que queda".
+    #
+    # El documento ya no acota hasta que modulo llega la constancia: dice
+    # simplemente que no hay deuda del programa mencionado. Kevin decidio esto
+    # despues de que se le señalara que un certificado emitido con alcance
+    # parcial (modulo 1 de 5) queda afirmando que no debe nada del programa
+    # completo. Queda registrado que es una decision suya, no un descuido.
+    #
+    # `hasta_modulo_n` se sigue usando internamente (define que modulos entran
+    # en el snapshot y evita duplicados), solo dejo de imprimirse.
+    elements.append(Paragraph(
+        "<b>NO TIENE DEUDA ECONÓMICA PENDIENTE</b> del programa mencionado, "
+        "de acuerdo al compromiso de pago firmado con la Unidad de Postgrado.",
+        styles["no_deudor_enfasis"],
+    ))
+
+    elements.append(Paragraph(
+        f"{UAGRM_CIUDAD}, {_format_fecha_larga_es(emitido_en)}.",
+        styles["cuerpo"],
+    ))
+
+    elements.append(Spacer(1, 10 * mm))
+    # Las firmas ocupan el ancho útil completo de la hoja: con el ancho
+    # chico heredado del PDF A4, los cargos se partían en dos columnas
+    # finitas de ocho renglones.
+    ancho_util = layout["ancho_pt"] - 2 * MEMBRETE_MARGEN_LATERAL_MM * mm
+    elements.append(_seccion_firmas(styles, ancho_columna=ancho_util / 2))
+
+    doc.build(elements)
+    return _componer_sobre_membrete(buf.getvalue(), formato=formato)
 
 
 # ========================================================================
@@ -997,11 +1305,21 @@ async def emitir_certificado_notas(
 
 
 async def emitir_certificado_no_deudor(
-    enrollment_id: str, hasta_modulo_n: int, current_user
+    enrollment_id: str,
+    hasta_modulo_n: int,
+    current_user,
+    tratamiento: Optional[str] = None,
+    formato_membrete: str = MEMBRETE_FORMATO_DEFAULT,
 ) -> Certificate:
     """
     Emite un Certificado de No Deudor hasta el módulo N. Valida requisitos,
     genera PDF, sube a Cloudinary y persiste el Certificate.
+
+    F-CERT-NO-DEUDOR-COBRO (2026-08-17): el PDF sale sobre la hoja membretada
+    y con el tratamiento profesional adelante del nombre, si corresponde.
+    Si el archivo del membrete no está disponible se emite igual con el
+    formato anterior: dejar a la unidad sin poder emitir certificados por un
+    asset faltante sería peor que emitirlos sin membrete.
     """
     student, course, enrollment = await _obtener_curso_estudiante_enrollment(
         enrollment_id, current_user
@@ -1028,15 +1346,32 @@ async def emitir_certificado_no_deudor(
             fecha_fin=getattr(m, "fecha_fin", None),
         ))
 
-    # Generar PDF
-    pdf_bytes = render_pdf_no_deudor(
-        student=student,
-        course=course,
-        enrollment=enrollment,
-        hasta_modulo_n=hasta_modulo_n,
-        folio=folio,
-        emitido_en=emitido_en,
-    )
+    # Generar PDF (sobre membrete si el asset está disponible)
+    usar_membrete = hay_membrete(formato_membrete)
+    if usar_membrete:
+        pdf_bytes = render_pdf_no_deudor_membretado(
+            student=student,
+            course=course,
+            enrollment=enrollment,
+            hasta_modulo_n=hasta_modulo_n,
+            folio=folio,
+            emitido_en=emitido_en,
+            tratamiento=tratamiento,
+            formato=formato_membrete,
+        )
+    else:
+        logger.warning(
+            "[CERT] Membrete '%s' no encontrado en %s. Se emite con el formato "
+            "anterior, sin hoja membretada.", formato_membrete, MEMBRETES_DIR
+        )
+        pdf_bytes = render_pdf_no_deudor(
+            student=student,
+            course=course,
+            enrollment=enrollment,
+            hasta_modulo_n=hasta_modulo_n,
+            folio=folio,
+            emitido_en=emitido_en,
+        )
 
     slug = _slug_nombre(student.nombre or student.registro or "estudiante")
     public_id = f"cert_nodeudor_{numero:03d}_{anio}_{slug}"
@@ -1066,6 +1401,8 @@ async def emitir_certificado_no_deudor(
         emitido_en=emitido_en,
         emitido_por=str(getattr(current_user, "registro", "") or getattr(current_user, "username", "")),
         verificacion_code=verificacion_code,
+        tratamiento=tratamiento,
+        membrete=(formato_membrete.upper() if usar_membrete else None),
         pdf_url=pdf_url,
         pdf_filename=pdf_filename,
     )
@@ -1122,6 +1459,21 @@ async def descargar_pdf_bytes(cert: Certificate) -> bytes:
                 emitido_en=emitido_en,
             )
         elif cert.tipo == TipoCertificado.NO_DEUDOR:
+            # Se respeta cómo se emitió: un certificado viejo (membrete=None)
+            # se re-renderiza con el formato viejo. Si no, un documento de
+            # julio volvería con el diseño de agosto y no coincidiría con la
+            # copia que el estudiante ya tiene.
+            if cert.membrete and hay_membrete(cert.membrete):
+                return render_pdf_no_deudor_membretado(
+                    student=student,
+                    course=course,
+                    enrollment=enrollment,
+                    hasta_modulo_n=cert.hasta_modulo_n or 1,
+                    folio=folio,
+                    emitido_en=emitido_en,
+                    tratamiento=cert.tratamiento,
+                    formato=cert.membrete,
+                )
             return render_pdf_no_deudor(
                 student=student,
                 course=course,
