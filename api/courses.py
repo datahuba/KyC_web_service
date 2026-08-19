@@ -820,6 +820,68 @@ async def post_initial_enrollments(
     )
 
 
+# ============================================================================
+# F-NOTAS-MODULOS-EJECUTADOS (2026-08-18, decisión de Kevin)
+# ============================================================================
+# Un programa que arranca a mitad de camino (ej. entra en el modulo 5) tiene
+# los modulos anteriores ya dictados, con nota. La carga inicial trae pagos
+# por modulo pero nunca trajo notas. Kevin eligio resolverlo con "un Excel
+# aparte, solo de notas", para estudiantes que YA EXISTEN en el sistema (a
+# diferencia de la carga inicial, que tambien puede crear estudiantes).
+class CargarNotasExcelResponse(BaseModel):
+    actualizados: int
+    fallidos: List[dict]
+
+
+@router.post(
+    "/{id}/notas-modulos-excel",
+    response_model=CargarNotasExcelResponse,
+    summary="F-NOTAS-MODULOS-EJECUTADOS: cargar notas de modulos ya ejecutados desde Excel",
+)
+async def post_notas_modulos_excel(
+    id: PydanticObjectId,
+    file: UploadFile = File(..., description="Excel con columnas CI + 'Nota Modulo N'"),
+    current_user: User = Depends(require_cpd_or_encargado_curso_or_coordinador),
+) -> Any:
+    """
+    Carga notas de modulos ya ejecutados para estudiantes que YA ESTAN
+    inscritos en este curso. NO crea estudiantes ni inscripciones nuevas —
+    para eso esta la carga inicial. Si un CI del Excel no tiene inscripcion
+    en este curso, esa fila se reporta como fallida y se sigue con las demas.
+
+    Mismo control de permisos que la carga inicial: EC/COORD solo sobre sus
+    cursos_asignados.
+    """
+    if (
+        current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR)
+        and id not in (current_user.cursos_asignados or [])
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="No tienes asignado este curso.",
+        )
+
+    if not file.filename.lower().endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Sube un archivo .xlsx o .xls")
+
+    course = await Course.get(id)
+    if not course:
+        raise HTTPException(status_code=404, detail="Curso no encontrado")
+
+    contents = await file.read()
+    try:
+        from services.enrollment_service import cargar_notas_modulos_excel
+        resultado = await cargar_notas_modulos_excel(
+            file_content=contents,
+            curso_id=id,
+            evaluador_username=current_user.nombre_visible,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return CargarNotasExcelResponse(**resultado)
+
+
 class EstadoOverrideRequest(BaseModel):
     estado_override: Optional[str] = Field(
         None,

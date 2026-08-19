@@ -1160,6 +1160,157 @@ async def actualizar_nota_modulo(
 
 
 # ========================================================================
+# F-NOTAS-MODULOS-EJECUTADOS (2026-08-18, decisión de Kevin)
+# ========================================================================
+# Un programa que arranca a mitad de camino (ej. entra en el módulo 5) tiene
+# los módulos anteriores ya dictados, con nota. La carga inicial trae pagos
+# por módulo pero NUNCA trajo notas — eso dejaba a esos estudiantes con el
+# historial académico en blanco hasta que alguien las cargara a mano, módulo
+# por módulo, desde la libreta.
+#
+# Kevin eligió: "un Excel aparte, solo de notas", para estudiantes que YA
+# EXISTEN en el sistema (a diferencia de la carga inicial, que tambien crea
+# estudiantes nuevos). Columnas: CI + "Nota Modulo N" por cada modulo con
+# nota conocida.
+import re as _re
+
+
+def _detectar_columnas_notas(header_row: list) -> tuple:
+    """
+    Busca la columna de CI/carnet y las columnas "Nota Modulo N".
+
+    Devuelve (col_carnet, [(col_idx, modulo_index_0based), ...]).
+    col_carnet es 0 si no se encontro.
+    """
+    col_carnet = 0
+    columnas_notas = []
+    for idx, header in enumerate(header_row, start=1):
+        if not header:
+            continue
+        if col_carnet == 0 and (
+            header == "ci" or "carnet" in header or "cedula" in header or "identidad" in header
+        ):
+            col_carnet = idx
+            continue
+        # "nota modulo 1", "notamodulo1", "nota m1": exige la palabra "nota"
+        # Y un numero, para no confundir con la columna "Modulo" que trae el
+        # numero de modulo del estudiante (el mismo bug que hubo en el pago
+        # fantasma de 1 Bs del Excel de carga inicial).
+        if "nota" in header:
+            m = _re.search(r"(\d+)", header)
+            if m:
+                columnas_notas.append((idx, int(m.group(1)) - 1))
+    return col_carnet, columnas_notas
+
+
+async def cargar_notas_modulos_excel(
+    file_content: bytes,
+    curso_id: PydanticObjectId,
+    evaluador_username: str,
+) -> dict:
+    """
+    Carga notas de modulos YA EJECUTADOS para estudiantes que ya estan
+    inscritos en `curso_id`, desde un Excel de CI + "Nota Modulo N".
+
+    A diferencia de la carga inicial, NO crea estudiantes ni inscripciones:
+    si el CI no tiene inscripcion en este curso, esa fila se reporta como
+    fallida y se sigue con las demas.
+
+    Reutiliza `actualizar_nota_modulo` por cada (estudiante, modulo) en vez
+    de escribir el campo directo, para no perderse el recalculo de perdida
+    de beca por nota ni la actualizacion del promedio — la misma logica que
+    ya usa el flujo manual desde la libreta.
+    """
+    import openpyxl
+    from io import BytesIO
+    from services.student_service import _normalize_header
+
+    try:
+        wb = openpyxl.load_workbook(BytesIO(file_content), data_only=True)
+        sheet = wb.active
+    except Exception as e:
+        raise ValueError(f"No se pudo parsear el archivo: {e}")
+
+    if not sheet or sheet.max_row < 2:
+        raise ValueError("El archivo no contiene datos.")
+
+    header_row = [
+        _normalize_header(sheet.cell(row=1, column=c).value)
+        for c in range(1, sheet.max_column + 1)
+    ]
+    col_carnet, columnas_notas = _detectar_columnas_notas(header_row)
+
+    if col_carnet == 0:
+        raise ValueError("No se encontro la columna de CI/Carnet en el Excel.")
+    if not columnas_notas:
+        raise ValueError(
+            "No se encontraron columnas de notas. Deben llamarse 'Nota Modulo 1', "
+            "'Nota Modulo 2', etc."
+        )
+
+    # Cargar TODOS los enrollments de este curso de una vez, indexados por
+    # estudiante, para no hacer una query por fila.
+    enrollments = await Enrollment.find(Enrollment.curso_id == curso_id).to_list()
+    if not enrollments:
+        raise ValueError("Este curso no tiene ningun estudiante inscrito todavia.")
+
+    estudiante_ids = list({e.estudiante_id for e in enrollments})
+    students = await Student.find(In(Student.id, estudiante_ids)).to_list()
+    carnet_a_estudiante_id = {s.carnet: s.id for s in students if s.carnet}
+    estudiante_id_a_enrollment = {e.estudiante_id: e for e in enrollments}
+
+    actualizados = 0
+    fallidos: List[dict] = []
+
+    for row_idx in range(2, sheet.max_row + 1):
+        carnet_raw = sheet.cell(row=row_idx, column=col_carnet).value
+        carnet = str(carnet_raw).strip() if carnet_raw is not None else ""
+        if not carnet:
+            continue  # fila vacia, no es un error
+
+        estudiante_id = carnet_a_estudiante_id.get(carnet)
+        enrollment = estudiante_id_a_enrollment.get(estudiante_id) if estudiante_id else None
+        if not enrollment:
+            fallidos.append({
+                "fila": row_idx,
+                "carnet": carnet,
+                "motivo": "No tiene inscripcion en este curso (¿esta el CI bien escrito?)",
+            })
+            continue
+
+        for col_idx, modulo_idx in columnas_notas:
+            valor = sheet.cell(row=row_idx, column=col_idx).value
+            if valor is None or str(valor).strip() == "":
+                continue
+            try:
+                nota = float(valor)
+            except (TypeError, ValueError):
+                fallidos.append({
+                    "fila": row_idx, "carnet": carnet,
+                    "motivo": f"Nota invalida en modulo {modulo_idx + 1}: '{valor}'",
+                })
+                continue
+            if modulo_idx < 0 or modulo_idx >= len(enrollment.modulos):
+                fallidos.append({
+                    "fila": row_idx, "carnet": carnet,
+                    "motivo": f"El curso no tiene modulo {modulo_idx + 1}",
+                })
+                continue
+            try:
+                enrollment = await actualizar_nota_modulo(
+                    enrollment.id, modulo_idx, nota, evaluador_username
+                )
+                actualizados += 1
+            except Exception as e:
+                fallidos.append({
+                    "fila": row_idx, "carnet": carnet,
+                    "motivo": f"Modulo {modulo_idx + 1}: {str(e)}",
+                })
+
+    return {"actualizados": actualizados, "fallidos": fallidos}
+
+
+# ========================================================================
 # F-FIX-DESCUENTO-ITEM (2026-08-05, Kevin): helper para recalcular el
 # total_a_pagar de un enrollment YA EXISTENTE al cual se le acaba de
 # asignar un descuento (individual o del curso). Aplica la logica MAX
