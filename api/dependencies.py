@@ -311,6 +311,39 @@ def require_encargado_curso(
     return current_user
 
 
+def require_gestion_academica(
+    current_user: User = Depends(require_encargado_curso),
+) -> User:
+    """
+    F-FIX-COORD-FINANCIERO-NO-ACADEMICO (2026-08-19, Kevin): "financiero no
+    deberia crear programas ni editar, tampoco estudiantes". Su alcance es
+    economico (ve todo, aprueba No Deudor), no gestion de contenido
+    academico.
+
+    Igual que require_encargado_curso, pero excluye especificamente al
+    COORDINADOR con subtipo FINANCIERO. Se usa SOLO en las acciones que
+    Kevin nombro: crear/editar programas, cargar estudiantes (individual,
+    lote o Excel) y cargar notas de modulos ejecutados. El resto de lo que
+    permite require_encargado_curso (ver estudiantes, enviar comunicados,
+    formularios de pre-inscripcion) sigue igual para el financiero — no se
+    toco la dependencia compartida para no afectar esos otros endpoints sin
+    que Kevin lo haya pedido.
+    """
+    if (
+        current_user.rol == UserRole.COORDINADOR
+        and current_user.subtipo_coordinador == SubtipoCoordinador.FINANCIERO
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "El coordinador financiero no gestiona el contenido académico "
+                "de los programas (crear/editar programas, cargar estudiantes "
+                "o notas). Su alcance es económico."
+            ),
+        )
+    return current_user
+
+
 def require_coordinador(
     current_user: Union[User, Student] = Depends(get_current_user)
 ) -> User:

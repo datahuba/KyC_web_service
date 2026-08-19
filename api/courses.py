@@ -9,14 +9,14 @@ from models.user import User
 from models.student import Student
 from models.enrollment import Enrollment
 from models.estado_programa import EstadoPrograma
-from models.enums import UserRole, EstadoInscripcion
+from models.enums import UserRole, EstadoInscripcion, SubtipoCoordinador
 from schemas.course import CourseCreate, CourseResponse, CourseUpdate, CourseEnrolledStudent
 from schemas.enrollment import EnrollmentCreate
 from services import course_service
 from beanie import PydanticObjectId
 
 # Nuevas dependencias de seguridad del ISSUE L
-from api.dependencies import require_superadmin, require_cpd, require_staff, get_current_user, require_encargado_curso
+from api.dependencies import require_superadmin, require_cpd, require_staff, get_current_user, require_encargado_curso, require_gestion_academica
 
 
 # F-US-006-3TIPOS-3A (2026-08-04): dependencia que permite a CPD, admin,
@@ -36,6 +36,21 @@ def require_cpd_or_encargado_curso_or_coordinador(current_user: User = Depends(g
         raise HTTPException(
             status_code=403,
             detail="Solo CPD, admin, superadmin, encargado de curso o coordinador pueden realizar esta accion.",
+        )
+    # F-FIX-COORD-FINANCIERO-NO-ACADEMICO (2026-08-19, Kevin): "financiero
+    # no deberia crear programas ni editar, tampoco estudiantes". Esta
+    # dependencia solo la usan carga inicial de estudiantes y carga de
+    # notas de modulos ejecutados — las dos acciones que Kevin nombro.
+    if (
+        current_user.rol == UserRole.COORDINADOR
+        and current_user.subtipo_coordinador == SubtipoCoordinador.FINANCIERO
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "El coordinador financiero no carga estudiantes ni notas. "
+                "Su alcance es económico."
+            ),
         )
     return current_user
 
@@ -982,7 +997,11 @@ async def put_resolucion(
 async def create_course(
     *,
     course_in: CourseCreate,
-    current_user: User = Depends(require_encargado_curso) # F-2026-08-11-EC-AUTOSERVICIO: cualquier EC/COORD/CPD/ADMIN/SUPERADMIN pueden intentar. Validaciones inline abajo.
+    # F-2026-08-11-EC-AUTOSERVICIO: cualquier EC/COORD/CPD/ADMIN/SUPERADMIN
+    # pueden intentar (validaciones inline abajo). F-FIX-COORD-FINANCIERO-
+    # NO-ACADEMICO (2026-08-19): salvo el coordinador FINANCIERO, que no
+    # gestiona contenido academico.
+    current_user: User = Depends(require_gestion_academica)
 ) -> Any:
     """Crear nuevo curso.
 
@@ -1194,8 +1213,9 @@ async def update_course(
     course_in: CourseUpdate,
     # FIX-ISSUE-258 (2026-08-14): EC/COORD pueden editar cursos en sus
     # cursos_asignados. CPD/ADMIN/SUPERADMIN editan cualquiera. Validacion
-    # inline mas abajo.
-    current_user: User = Depends(require_encargado_curso)
+    # inline mas abajo. F-FIX-COORD-FINANCIERO-NO-ACADEMICO (2026-08-19):
+    # el coordinador FINANCIERO no edita contenido academico.
+    current_user: User = Depends(require_gestion_academica)
 ) -> Any:
     """Actualizar curso existente.
 

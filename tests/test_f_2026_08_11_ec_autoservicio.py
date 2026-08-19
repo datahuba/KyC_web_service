@@ -40,8 +40,10 @@ def _read(path: Path) -> str:
 # ============================================================
 
 def test_courses_create_usa_require_encargado_curso():
-    """api/courses.py:create_course debe usar require_encargado_curso
-    (permite a los 5 roles: EC, coord, CPD, ADMIN, SUPERADMIN)."""
+    """api/courses.py:create_course debe usar require_gestion_academica
+    (permite a los 5 roles: EC, coord, CPD, ADMIN, SUPERADMIN — salvo el
+    coordinador financiero, ver F-FIX-COORD-FINANCIERO-NO-ACADEMICO,
+    2026-08-19, que envuelve a require_encargado_curso)."""
     text = _read(COURSES_API)
     match = re.search(
         r"async def create_course\b.*?(?=^async def |\n@router\.|\Z)",
@@ -50,9 +52,11 @@ def test_courses_create_usa_require_encargado_curso():
     )
     assert match is not None, "No encontre create_course en api/courses.py"
     body = match.group(0)
-    assert "require_encargado_curso" in body, (
-        "create_course debe usar require_encargado_curso para permitir a "
-        "EC/coord intentar crear. F-2026-08-11-EC-AUTOSERVICIO no aplicado."
+    assert "require_gestion_academica" in body, (
+        "create_course debe usar require_gestion_academica (que envuelve a "
+        "require_encargado_curso) para permitir a EC/coord intentar crear, "
+        "salvo el coordinador financiero. F-2026-08-11-EC-AUTOSERVICIO / "
+        "F-FIX-COORD-FINANCIERO-NO-ACADEMICO no aplicado."
     )
     assert "F-2026-08-11-EC-AUTOSERVICIO" in body, (
         "Falta el comentario F-2026-08-11-EC-AUTOSERVICIO en create_course"

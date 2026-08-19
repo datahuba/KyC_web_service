@@ -43,7 +43,7 @@ from beanie import PydanticObjectId
 from beanie.operators import In
 
 # Nuevas dependencias de seguridad del ISSUE L
-from api.dependencies import require_superadmin, require_cpd, require_staff, require_docente, get_current_user, filtro_cursos_por_rol, require_encargado_curso, require_mae
+from api.dependencies import require_superadmin, require_cpd, require_staff, require_docente, get_current_user, filtro_cursos_por_rol, require_encargado_curso, require_gestion_academica, require_mae
 
 router = APIRouter()
 
@@ -118,7 +118,9 @@ class EditarNotaRequest(BaseModel):
 async def create_enrollment(
     *,
     enrollment_in: EnrollmentCreate,
-    current_user: User = Depends(require_encargado_curso) # <-- CPD, ENCARGADO_CURSO, COORDINADOR o superior (ISSUE-R-ROLES)
+    # CPD, ENCARGADO_CURSO, COORDINADOR o superior (ISSUE-R-ROLES), salvo el
+    # coordinador FINANCIERO (F-FIX-COORD-FINANCIERO-NO-ACADEMICO, 2026-08-19).
+    current_user: User = Depends(require_gestion_academica)
 ) -> Any:
     """Crear nueva inscripción de estudiante a un curso"""
     # ISSUE-R-ROLES: un Encargado de Curso solo puede inscribir en sus cursos asignados
@@ -149,7 +151,9 @@ async def create_enrollment(
 async def create_enrollments_bulk(
     *,
     bulk_in: BulkEnrollmentRequest,
-    current_user: User = Depends(require_encargado_curso),  # CPD, ENCARGADO_CURSO, COORDINADOR o superior
+    # CPD, ENCARGADO_CURSO, COORDINADOR o superior, salvo el coordinador
+    # FINANCIERO (F-FIX-COORD-FINANCIERO-NO-ACADEMICO, 2026-08-19).
+    current_user: User = Depends(require_gestion_academica),
 ) -> Any:
     """
     F-INSCRIPCION-LOTE (2026-07-31): inscribe varios estudiantes al
