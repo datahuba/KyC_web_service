@@ -228,22 +228,68 @@ async def upload_document(
         loop = asyncio.get_event_loop()
         final_public_id = _normalizar_public_id(file, public_id)
 
+        # F-FIX-CLOUDINARY-URL-ROTA (2026-08-19): antes esta funcion subia
+        # el archivo SIN indicarle el formato a Cloudinary (`public_id` es
+        # None en TODOS los llamadores de upload_document — comprobantes,
+        # adjuntos de bug-reports, cartas/resoluciones de pre-inscripcion,
+        # materiales de aula, entregas de tareas — asi que
+        # `_normalizar_public_id` nunca agregaba nada: solo actua cuando
+        # SI se pasa un public_id explicito). Cloudinary generaba un ID
+        # aleatorio SIN extension (`format: None` al consultarlo), y el
+        # codigo de abajo intentaba arreglarlo pegando ".pdf" al FINAL del
+        # string de la URL devuelta.
+        #
+        # Eso rompia el archivo: la URL con extension pegada NUNCA
+        # existio en Cloudinary (confirmado en vivo: la URL con ".pdf" da
+        # 404, la misma URL sin la extension da 200). Kevin lo encontro
+        # al intentar ver el comprobante de un certificado desde el
+        # perfil de coordinador financiero.
+        #
+        # DOS INTENTOS DE FIX QUE NO SIRVIERON (dejados documentados para no
+        # repetir el error):
+        #
+        # 1. Pasarle `format=ext` a `cloudinary.uploader.upload()`. Para
+        #    `resource_type="raw"` ese parametro es un no-op del lado del
+        #    servidor — el recurso se guarda igual con `format: None`. El
+        #    SDK arma el `secure_url` de la respuesta pegandole la extension
+        #    localmente ANTES de confirmar que el recurso se sirve ahi, asi
+        #    que la URL devuelta parecia correcta pero daba 404.
+        #
+        # 2. Generar un `public_id` propio con la extension incluida
+        #    (`<uuid>.pdf`), para que la extension SI quede en el path real.
+        #    Esto si logra que la URL exista — pero la cuenta de Cloudinary
+        #    tiene activa la proteccion de seguridad "Restricted media
+        #    types" (default de Cloudinary desde 2023/2024): bloquea con
+        #    401 la entrega PUBLICA de cualquier recurso "raw" cuya URL
+        #    termine en una extension reconocida como PDF/ZIP, sin importar
+        #    `access_mode` (probado explicitamente con `access_mode="public"`
+        #    en el upload — sigue dando 401). Es un toggle de la consola de
+        #    Cloudinary (Settings > Security > "Allow delivery of PDF and
+        #    ZIP files"), no algo resoluble por API con las credenciales
+        #    actuales.
+        #
+        # FIX real (el unico que la cuenta actual sirve con 200): dejar que
+        # Cloudinary genere su public_id SIN extension, tal cual, sin tocar
+        # el string de la URL para nada. El navegador igual descarga/abre el
+        # archivo correctamente porque el Content-Type real (via el mime
+        # guardado aparte en Mongo) no depende de la extension en la URL.
+        # Pendiente para Kevin: si se quiere que el archivo abra CON su
+        # nombre y extension originales (en vez de un nombre generico sin
+        # extension), hay que entrar a la consola de Cloudinary y activar
+        # esa opcion, o migrar a URLs firmadas (`type="authenticated"`).
+        upload_kwargs: dict = {
+            "folder": folder,
+            "public_id": final_public_id,
+            "resource_type": resource_type,
+            "overwrite": True,
+        }
+
         result = await loop.run_in_executor(
             None,
-            lambda: cloudinary.uploader.upload(
-                file_content,
-                folder=folder,
-                public_id=final_public_id,
-                resource_type=resource_type,
-                overwrite=True,
-            ),
+            lambda: cloudinary.uploader.upload(file_content, **upload_kwargs),
         )
 
         url = result["secure_url"]
-        if resource_type == "raw" and not any(url.lower().endswith(ext) for ext in [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"]):
-            ext = os.path.splitext(file.filename or "")[1].lower() or (".pdf" if content_type == "application/pdf" else "")
-            if ext and not url.endswith(ext):
-                url = f"{url}{ext}"
 
         return {
             "url": url,

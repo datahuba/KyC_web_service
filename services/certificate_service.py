@@ -1136,7 +1136,16 @@ def verificar_acceso_certificado(cert: Certificate, current_user) -> None:
     if user_rol is not None:
         # Normalizar a string (puede ser Enum o str)
         rol_value = getattr(user_rol, "value", user_rol)
-        if rol_value in STAFF_ROLES or rol_value == "COORDINADOR":
+        # F-FIX-COORDINADOR-DESCARGA-PDF (2026-08-19): comparaba contra
+        # "COORDINADOR" en mayuscula, pero UserRole.COORDINADOR.value es
+        # "coordinador" en minuscula (models/enums.py). La comparacion NUNCA
+        # matcheaba, para NINGUN coordinador, desde que se escribio este
+        # check. Quedo sin detectarse porque nadie coordinador habia
+        # necesitado bajar un PDF de certificado hasta el flujo de firma
+        # fisica de hoy (F-CERT-GATE-IMPRESION): el coordinador aprueba el
+        # No Deudor, pero no podia descargar el PDF para imprimirlo y
+        # hacerlo firmar -- justo la mitad del flujo que se acababa de armar.
+        if rol_value in STAFF_ROLES or rol_value == "coordinador":
             return
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
