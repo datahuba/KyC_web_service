@@ -1379,3 +1379,129 @@ async def get_modules_by_teacher(
                 })
                 
     return assigned_modules
+
+
+# ============================================================================
+# F-COORD-ACADEMICO-SUPERVISION (2026-08-19, Kevin)
+# ============================================================================
+# Kevin, aprobando la propuesta: "me parece bien lo de que deberia hacer
+# hazlo" -- sobre la fila "Falta: pantalla de 'mis Encargados de Curso
+# supervisados' + estado academico consolidado de sus programas (notas
+# cargadas, modulos ejecutados, etc.)".
+#
+# Hasta ahora un coordinador ACADEMICO era, en la practica, un encargado de
+# curso mas: veia la lista de Programas igual que cualquiera, sin ninguna
+# vista que consolidara el estado de TODOS los programas que supervisa de
+# un vistazo. Esta es esa vista.
+#
+# La "cobertura de notas" que calcula acá es deliberada: es exactamente el
+# numero que habria detectado en el momento el problema real de esta misma
+# sesion (38 de 54 inscripciones de DIPL-IA-2026 sin nota del modulo 1,
+# encontrado recien cuando Kevin reviso a mano).
+class SupervisionEncargado(BaseModel):
+    id: str
+    nombre: str
+
+
+class SupervisionPrograma(BaseModel):
+    curso_id: str
+    codigo: str
+    nombre_programa: str
+    estado: str
+    encargados: List[SupervisionEncargado]
+    inscritos: int
+    modulos_total: int
+    modulos_ejecutados: int
+    inscripciones_con_alguna_nota: int
+    cobertura_notas_pct: float
+
+
+@router.get(
+    "/supervision-academica",
+    response_model=List[SupervisionPrograma],
+    summary="F-COORD-ACADEMICO-SUPERVISION: resumen consolidado de los programas que superviso",
+)
+async def get_supervision_academica(
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    Para un coordinador (tipicamente academico o investigacion): de un
+    vistazo, todos los programas que supervisa, quien los administra, y si
+    el estado academico (modulos ejecutados, notas cargadas) esta al dia.
+
+    Segmentado con el mismo filtro que el resto del sistema
+    (filtro_cursos_por_rol): coordinador financiero ve TODO (no tiene
+    restriccion de curso), academico/investigacion solo sus
+    cursos_asignados, y CPD/ADMIN/SUPERADMIN/MAE ven todo tambien (utilidad
+    de supervision general, no exclusivo del coordinador).
+    """
+    from api.dependencies import filtro_cursos_por_rol
+
+    filtro = filtro_cursos_por_rol(current_user)
+    query: dict = {}
+    if filtro:
+        cursos_ids = filtro.get("curso_id", {}).get("$in") or []
+        if not cursos_ids:
+            return []
+        query["_id"] = {"$in": cursos_ids}
+
+    cursos = await Course.find(query).to_list()
+    if not cursos:
+        return []
+
+    curso_ids = [c.id for c in cursos]
+
+    # Un solo query de encargados/coordinadores que administran ESTOS cursos,
+    # en vez de una consulta por programa.
+    posibles_encargados = await User.find(
+        In(User.rol, [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR])
+    ).to_list()
+    encargados_por_curso: dict = {}
+    for u in posibles_encargados:
+        for cid in (u.cursos_asignados or []):
+            encargados_por_curso.setdefault(cid, []).append(u)
+
+    # Un solo query de inscripciones de todos estos cursos a la vez.
+    enrollments = await Enrollment.find(In(Enrollment.curso_id, curso_ids)).to_list()
+    enrollments_por_curso: dict = {}
+    for e in enrollments:
+        enrollments_por_curso.setdefault(e.curso_id, []).append(e)
+
+    resultado: List[SupervisionPrograma] = []
+    for curso in cursos:
+        modulos = curso.modulos or []
+        modulos_total = len(modulos)
+        modulos_ejecutados = sum(
+            1 for m in modulos if getattr(m, "estado_operacional", None) == "Ejecutado"
+        )
+
+        insc = enrollments_por_curso.get(curso.id, [])
+        inscritos = len(insc)
+        con_nota = sum(
+            1 for e in insc
+            if any((m.nota is not None) for m in (e.modulos or []))
+        )
+        cobertura = round((con_nota / inscritos * 100), 1) if inscritos > 0 else 0.0
+
+        encargados = [
+            SupervisionEncargado(id=str(u.id), nombre=u.nombre_visible)
+            for u in encargados_por_curso.get(curso.id, [])
+        ]
+
+        resultado.append(SupervisionPrograma(
+            curso_id=str(curso.id),
+            codigo=curso.codigo,
+            nombre_programa=curso.nombre_programa,
+            estado=curso.get_estado_actual(),
+            encargados=encargados,
+            inscritos=inscritos,
+            modulos_total=modulos_total,
+            modulos_ejecutados=modulos_ejecutados,
+            inscripciones_con_alguna_nota=con_nota,
+            cobertura_notas_pct=cobertura,
+        ))
+
+    # Los programas con menos cobertura de notas primero: son los que
+    # necesitan atencion, no los que ya estan al dia.
+    resultado.sort(key=lambda r: r.cobertura_notas_pct)
+    return resultado
