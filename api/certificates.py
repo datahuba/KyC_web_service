@@ -725,6 +725,40 @@ async def subir_comprobante_cert(
     return CertificateRequestOut(**cert_request_service._serializar_solicitud(req))
 
 
+@router.post(
+    "/requests/upload-comprobante-temp",
+    summary="[Estudiante] Subir el comprobante ANTES de crear la solicitud de No Deudor",
+    description=(
+        "F-CERT-COMPROBANTE-OBLIGATORIO (2026-08-18, Kevin): 'una vez sube el "
+        "comprobante, recien se pueda dejar enviar la solicitud'. El endpoint "
+        "de arriba (/requests/{request_id}/comprobante) exige una solicitud ya "
+        "creada, pero ahora el comprobante tiene que existir ANTES de poder "
+        "enviarla. Mismo patron que POST /courses/upload-resolucion-temp: sube "
+        "el archivo sin asociarlo a nada, devuelve la URL, y el frontend la "
+        "manda en `comprobante_url` al crear la solicitud."
+    ),
+)
+async def upload_comprobante_temp(
+    archivo: UploadFile = File(..., description="Imagen o PDF del comprobante"),
+    current_user: Union[Student, User] = Depends(get_current_user),
+) -> dict:
+    if not isinstance(current_user, Student):
+        raise HTTPException(
+            status_code=403,
+            detail="Solo el estudiante puede subir su comprobante.",
+        )
+    try:
+        url = await upload_document(file=archivo, folder="certificados-comprobantes/temp")
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"No se pudo subir el comprobante: {e}",
+        )
+    if not url:
+        raise HTTPException(status_code=502, detail="No se pudo subir el comprobante.")
+    return {"url": url}
+
+
 @router.patch(
     "/requests/{request_id}/reject",
     response_model=CertificateRequestOut,
