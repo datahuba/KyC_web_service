@@ -9,7 +9,7 @@ from services import student_service
 from beanie import PydanticObjectId
 
 # IMPORTAMOS NUESTRAS LLAVES DE SEGURIDAD GRANULARES DE LA UAGRM
-from api.dependencies import require_superadmin, require_cpd, require_staff, require_cobranza, get_current_user, require_encargado_curso, filtro_cursos_por_rol
+from api.dependencies import require_superadmin, require_cpd, require_staff, require_cobranza, get_current_user, require_encargado_curso, require_gestion_academica, filtro_cursos_por_rol
 
 router = APIRouter()
 
@@ -135,7 +135,10 @@ async def batch_lookup_students(
 async def create_student(
     *,
     student_in: StudentCreate,
-    current_user: User = Depends(require_encargado_curso) # <-- CPD, ADMIN, ENCARGADO, COORDINADOR PUEDEN CREAR ALUMNOS
+    # CPD, ADMIN, ENCARGADO, COORDINADOR pueden crear alumnos, salvo el
+    # coordinador FINANCIERO (F-FIX-COORD-FINANCIERO-NO-ACADEMICO, 2026-08-19:
+    # "financiero no deberia (...) tampoco estudiantes").
+    current_user: User = Depends(require_gestion_academica)
 ) -> Any:
     """Crear nuevo estudiante"""
     try:
@@ -749,9 +752,11 @@ async def import_students(
     curso_id: Optional[PydanticObjectId] = Form(None), # Curso opcional para auto-inscribir a los estudiantes importados
     # FIX-ISSUE-253 (2026-08-14): permitir a EC/COORD/CPD/ADMIN/SUPERADMIN
     # usar Excel upload. Antes SOLO CPD, lo que contradice la feature
-    # F-HISTORICO-AUTOSERVICIO-EXCEL. require_encargado_curso ya
-    # incluye los 5 roles validos.
-    current_user: User = Depends(require_encargado_curso)
+    # F-HISTORICO-AUTOSERVICIO-EXCEL. require_gestion_academica ya
+    # incluye los 5 roles validos, salvo el coordinador FINANCIERO
+    # (F-FIX-COORD-FINANCIERO-NO-ACADEMICO, 2026-08-19: "financiero no
+    # deberia (...) tampoco estudiantes").
+    current_user: User = Depends(require_gestion_academica)
 ) -> Any:
     if not file.filename.lower().endswith(('.xlsx', '.xls', '.csv')):
         raise HTTPException(400, "Formato no permitido. Sube un archivo .xlsx, .xls o .csv")
