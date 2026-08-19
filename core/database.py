@@ -49,6 +49,10 @@ from models.comunicado import Comunicado, ComunicadoVisto
 # F-2026-08-11-ASISTENCIA: registro de asistencia por sesion/clase
 # (educacion continua, regla del 80% asistencia).
 from models.asistencia import Sesion, AsistenciaRegistro
+# F-FIX-SSE-TICKET-MULTIWORKER (2026-08-19): tickets de un solo uso para el
+# handshake del stream SSE, ahora en Mongo (compartido por los 4 workers)
+# en vez de un dict en memoria por-proceso.
+from models.sse_ticket import SSETicket
 
 
 async def _sanitize_legacy_database(db):
@@ -233,6 +237,8 @@ async def init_db():
             # por sesion/clase (educacion continua, regla del 80%).
             Sesion,
             AsistenciaRegistro,
+            # F-FIX-SSE-TICKET-MULTIWORKER (2026-08-19)
+            SSETicket,
         ]
     )
     print(f"[OK] Conectado a MongoDB ({settings.DATABASE_NAME}) y Beanie inicializado con Connection Pool optimizado.")
