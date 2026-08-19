@@ -232,4 +232,35 @@ class BulkEnrollmentResponse(BaseModel):
     fallidos: int
     enrollments_creados: List[EnrollmentResponse] = Field(default_factory=list)
     errores: List[BulkEnrollmentErrorItem] = Field(default_factory=list)
+
+
+# ========================================================================
+# Bulk Grades Upload (Docente -> CPD Borrador)
+# ========================================================================
+class BulkNotaDocenteItem(BaseModel):
+    enrollment_id: PyObjectId
+    modulo_index: int = Field(..., ge=0)
+    nota: float = Field(..., ge=0, le=100)
+
+
+class BulkNotasDocenteRequest(BaseModel):
+    items: List[BulkNotaDocenteItem] = Field(..., min_length=1, max_length=500)
+    curso_id: Optional[PyObjectId] = None
+    modulo_nombre: Optional[str] = None
+
+
+class BulkNotasDocenteResultado(BaseModel):
+    enrollment_id: str
+    modulo_index: int
+    exito: bool
+    error: Optional[str] = None
+    nota_guardada: Optional[float] = None
+
+
+class BulkNotasDocenteResponse(BaseModel):
+    total_solicitados: int
+    exitosos: int
+    fallidos: int
+    resultados: List[BulkNotasDocenteResultado] = Field(default_factory=list)
+
     

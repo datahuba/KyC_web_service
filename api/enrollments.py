@@ -37,6 +37,10 @@ from schemas.enrollment import (
     BulkEnrollmentRequest,
     BulkEnrollmentResponse,
     BulkEnrollmentErrorItem,
+    BulkNotaDocenteItem,
+    BulkNotasDocenteRequest,
+    BulkNotasDocenteResultado,
+    BulkNotasDocenteResponse,
 )
 from services import enrollment_service, payment_service
 from beanie import PydanticObjectId
@@ -1143,6 +1147,66 @@ async def get_next_payment_info(
 # ========================================================================
 # ENDPOINTS ACADÉMICOS (ISSUE P - NOTAS POR MÓDULO)
 # ========================================================================
+@router.post(
+    "/modulos/bulk-notas-docente",
+    response_model=BulkNotasDocenteResponse,
+    summary="Subir notas borrador en lote (Docente)"
+)
+async def bulk_subir_notas_docente(
+    *,
+    payload: BulkNotasDocenteRequest,
+    current_user: User = Depends(require_docente)
+) -> Any:
+    """
+    Guarda calificaciones en borrador para múltiples estudiantes en 1 sola llamada eficiente.
+    Envía una única notificación consolidada a CPD/Admin/Superadmin.
+    """
+    exitosos, fallidos, resultados = await enrollment_service.subir_notas_borrador_bulk(payload.items)
+    
+    # Notificación única y consolidada a los revisores
+    if exitosos > 0:
+        try:
+            from services.notification_service import create_notification
+            from beanie.operators import Or as _Or
+
+            docente_nombre = (
+                current_user.nombre_visible
+                if hasattr(current_user, 'nombre_visible') and current_user.nombre_visible
+                else current_user.username
+            )
+            info_modulo = payload.modulo_nombre or f"Módulo {payload.items[0].modulo_index + 1}"
+
+            revisores = await User.find(
+                User.activo == True,
+                _Or(
+                    User.rol == UserRole.CPD,
+                    User.rol == UserRole.ADMIN,
+                    User.rol == UserRole.SUPERADMIN
+                )
+            ).to_list()
+
+            for revisor in revisores:
+                await create_notification(
+                    destinatario_id=revisor.id,
+                    tipo_destinatario="user",
+                    titulo="Notas de Docente Pendientes",
+                    mensaje=f"El docente {docente_nombre} cargó {exitosos} notas de '{info_modulo}' pendientes de validación.",
+                    tipo_alerta="info",
+                    ruta="/app/admin/grade-validation",
+                    referencia_tipo="course",
+                    referencia_id=payload.curso_id
+                )
+        except Exception as e:
+            print(f"Advertencia al enviar notificación de notas bulk: {e}")
+
+    return {
+        "total_solicitados": len(payload.items),
+        "exitosos": exitosos,
+        "fallidos": fallidos,
+        "resultados": resultados
+    }
+
+
 @router.patch("/{id}/modulos/{index}/nota", response_model=EnrollmentResponse, summary="Calificar Módulo")
 async def update_modulo_nota(
     *, 

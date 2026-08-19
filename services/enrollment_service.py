@@ -1,4 +1,4 @@
-﻿"""
+"""
 Servicio de Inscripciones (Enrollments)
 =======================================
 
@@ -11,7 +11,7 @@ Permisos:
 - VER inscripciones: ADMIN (todas), STUDENT (solo las suyas)
 """
 
-from typing import List, Optional
+from typing import List, Optional, Any
 from datetime import datetime
 
 
@@ -1408,6 +1408,85 @@ async def subir_nota_borrador(
     enrollment.updated_at = utcnow_naive()
     await enrollment.save()
     return enrollment
+
+
+async def subir_notas_borrador_bulk(
+    items: List[Any],
+) -> tuple[int, int, List[dict]]:
+    """
+    Guarda notas borrador para múltiples inscripciones en una sola operación eficiente.
+    Reutiliza una sola query MongoDB en lote y guarda concurrentemente.
+    Retorna (exitosos, fallidos, resultados).
+    """
+    import asyncio
+    from bson import ObjectId
+    
+    # Extraer IDs únicos para batch query
+    def _to_obj_id(raw_id: Any) -> ObjectId:
+        if isinstance(raw_id, ObjectId):
+            return raw_id
+        return ObjectId(str(raw_id))
+
+    enrollment_ids = list(set(_to_obj_id(item.enrollment_id if hasattr(item, 'enrollment_id') else item['enrollment_id']) for item in items))
+    
+    enrollments_list = await Enrollment.find({"_id": {"$in": enrollment_ids}}).to_list()
+    enrollments_dict = {e.id: e for e in enrollments_list}
+    
+    exitosos = 0
+    fallidos = 0
+    resultados = []
+    to_save = []
+    
+    now = utcnow_naive()
+    
+    for item in items:
+        raw_eid = item.enrollment_id if hasattr(item, 'enrollment_id') else item['enrollment_id']
+        m_idx = item.modulo_index if hasattr(item, 'modulo_index') else item['modulo_index']
+        nota = item.nota if hasattr(item, 'nota') else item['nota']
+        
+        eid = _to_obj_id(raw_eid)
+        enrollment = enrollments_dict.get(eid)
+        
+        if not enrollment:
+            fallidos += 1
+            resultados.append({
+                "enrollment_id": str(eid),
+                "modulo_index": m_idx,
+                "exito": False,
+                "error": "Inscripción no encontrada"
+            })
+            continue
+            
+        if not enrollment.modulos or m_idx < 0 or m_idx >= len(enrollment.modulos):
+            fallidos += 1
+            resultados.append({
+                "enrollment_id": str(eid),
+                "modulo_index": m_idx,
+                "exito": False,
+                "error": f"Índice de módulo {m_idx} fuera de rango"
+            })
+            continue
+            
+        modulo = enrollment.modulos[m_idx]
+        modulo.nota_borrador = round(float(nota), 2)
+        modulo.estado_validacion_nota = "pendiente_validacion"
+        enrollment.updated_at = now
+        to_save.append(enrollment)
+        
+        exitosos += 1
+        resultados.append({
+            "enrollment_id": str(eid),
+            "modulo_index": m_idx,
+            "exito": True,
+            "nota_guardada": round(float(nota), 2)
+        })
+        
+    if to_save:
+        unique_to_save = list({e.id: e for e in to_save}.values())
+        await asyncio.gather(*(e.save() for e in unique_to_save))
+        
+    return exitosos, fallidos, resultados
+
 
 
 async def validar_nota_borrador(
