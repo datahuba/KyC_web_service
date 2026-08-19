@@ -116,7 +116,13 @@ def _verificar_es_estudiante_o_staff(
     if isinstance(current_user, Student):
         return
     if isinstance(current_user, User):
-        staff_roles = {"SUPERADMIN", "ADMIN", "CPD", "COBRANZA", "MAE", "COORDINADOR", "ENCARGADO_CURSO"}
+        # F-FIX-COORDINADOR-DESCARGA-PDF (2026-08-19): estaba en MAYUSCULA,
+        # pero UserRole.*.value son todos minuscula (models/enums.py). Nunca
+        # matcheaba para NINGUN rol de staff. Esta funcion en particular no
+        # tiene llamadores hoy (queda corregida para no ser una trampa
+        # latente si alguien la usa despues) — ver el mismo bug activo en
+        # list_by_enrollment(), mas abajo en este archivo.
+        staff_roles = {"superadmin", "admin", "cpd", "cobranza", "mae", "coordinador", "encargado_curso"}
         if current_user.rol.value in staff_roles:
             return
     raise HTTPException(
@@ -317,7 +323,14 @@ async def list_by_enrollment(
     elif certs and isinstance(current_user, User):
         # F-2026-08-22-EC-CERTIFICADOS-READONLY (Kevin 2026-08-22): encargado_curso
         # tambien puede ver certificados de las inscripciones de SUS cursos.
-        staff_roles = {"SUPERADMIN", "ADMIN", "CPD", "COBRANZA", "MAE", "COORDINADOR", "ENCARGADO_CURSO"}
+        #
+        # F-FIX-COORDINADOR-DESCARGA-PDF (2026-08-19): estaba en MAYUSCULA,
+        # pero UserRole.*.value son todos minuscula. `not in` daba SIEMPRE
+        # True, asi que CUALQUIER staff (no solo coordinador) recibia 403 al
+        # consultar los certificados de una inscripcion que YA tenia alguno
+        # emitido. Bug activo, a diferencia del de _verificar_es_estudiante_o_staff
+        # (que no tiene llamadores).
+        staff_roles = {"superadmin", "admin", "cpd", "cobranza", "mae", "coordinador", "encargado_curso"}
         if current_user.rol.value not in staff_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
