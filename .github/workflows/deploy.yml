@@ -27,47 +27,8 @@ jobs:
           # El host de la key es el de deploy_user; el de 'root' no acepta key-based.
           command_timeout: 20m
           script: |
-            # F-ACTIONS-FIX (2026-07-21): todo el script se ejecuta con sudo.
-            # El user 'deploy' tiene sudo NOPASSWD pero no puede acceder
-            # directamente a /root/ (permisos del filesystem).
-            #
-            # F-ACTIONS-DEPLOY-UNIFIED (2026-07-30): antes este workflow tenia
-            # su propio script inline con flock, que entraba en conflicto con
-            # deploys manuales SSH (lock file compartido). Ahora ambos flujos
-            # usan /usr/local/bin/kyc-deploy (mismo lock, mismo marker, mismo log,
-            # health check al final). El script unificado detecta el marker stale
-            # y se autocura; nunca se queda colgado mas de 15 min.
             sudo -n bash -c '
               set -e
-              # Instalar el script si no existe (idempotente, copy desde el repo)
-              if [[ ! -f /usr/local/bin/kyc-deploy ]]; then
-                install -m 0755 /root/postgrado/backend/scripts/kyc-deploy.sh /usr/local/bin/kyc-deploy
-                echo "kyc-deploy instalado en /usr/local/bin/"
-              fi
-
-              # F-NGINX-GZIP (2026-08-08, Kevin): patch de gzip idempotente.
-              # Se ejecuta SIEMPRE antes de cada deploy para garantizar que
-              # gzip este habilitado. El script detecta si ya esta aplicado
-              # y sale en 0 sin hacer nada. Backup automatico + reload de
-              # nginx + verificacion final. Ver scripts/patch-nginx-gzip.sh
-              # para la logica completa.
-              echo "=== Verificando gzip en nginx ===" >> /tmp/deploy-backend.log
-              if [[ -f /root/postgrado/backend/scripts/patch-nginx-gzip.sh ]]; then
-                bash /root/postgrado/backend/scripts/patch-nginx-gzip.sh >> /tmp/deploy-backend.log 2>&1 || {
-                  echo "WARN: patch-nginx-gzip fallo, continuando con el deploy" >> /tmp/deploy-backend.log
-                }
-              else
-                echo "WARN: patch-nginx-gzip.sh no encontrado en el repo" >> /tmp/deploy-backend.log
-              fi
-
-              # Log de quien disparo el deploy (util para auditoria)
-              echo "=== DEPLOY disparado por GitHub Actions ===" >> /tmp/deploy-backend.log
-              echo "    triggered_by=github-actions sha=$(git -C /root/postgrado/backend rev-parse origin/develop_kevin 2>/dev/null || echo unknown)" >> /tmp/deploy-backend.log
-
-              # Ejecutar el deploy unificado. El script maneja:
-              # - lock con flock + timeout 15 min
-              # - marker file /tmp/deploy-in-progress (con timestamp)
-              # - cleanup automatico con trap (incluso si Ctrl+C o error)
-              # - health check post-deploy
-              /usr/local/bin/kyc-deploy
+              echo "=== DEPLOY disparado por GitHub Actions ($(date -u)) ===" >> /tmp/deploy-backend.log
+              bash /root/postgrado/deploy.sh backend
             '
