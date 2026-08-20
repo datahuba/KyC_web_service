@@ -16,6 +16,7 @@ Permisos (Según Jerarquía UAGRM):
 - Requisitos KYC: CPD aprueba/rechaza
 """
 
+import asyncio
 from typing import List, Any, Optional, Union
 from datetime import datetime
 from pydantic import BaseModel, Field
