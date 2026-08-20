@@ -47,6 +47,8 @@ async def get_students(
     # a estudiantes que estan en al menos uno de esos cursos. Si la lista
     # está vacía, retorna lista vacía (no se muestran todos los estudiantes).
     cursos_asignados: Optional[list] = None,
+    # P-AMBITO-FORMACION (2026-08-20): filtro por perfil pregrado vs posgrado
+    tipo_estudiante: Optional[str] = None,
 ) -> tuple[List[Student], int]:
     """
     Obtener lista de estudiantes con filtros avanzados y paginación
@@ -89,6 +91,24 @@ async def get_students(
             )
         else:
             query = query.find(Student.titulo.estado == estado_titulo)
+
+    if tipo_estudiante and tipo_estudiante != "all":
+        if tipo_estudiante == "pregrado":
+            query = query.find(
+                Or(
+                    Student.tipo_estudiante == "pregrado",
+                    {"$and": [{"tipo_estudiante": {"$in": [None, ""]}}, {"es_primer_carrera": True}]},
+                    {"registro_universitario": {"$exists": True, "$ne": None, "$ne": ""}}
+                )
+            )
+        elif tipo_estudiante == "posgrado":
+            query = query.find(
+                Or(
+                    Student.tipo_estudiante == "posgrado",
+                    {"$and": [{"tipo_estudiante": {"$in": [None, ""]}}, {"es_primer_carrera": False}]},
+                    {"titulo.numero_titulo": {"$exists": True, "$ne": None, "$ne": ""}}
+                )
+            )
 
     # F-2026-08-12-EC-CURSOS-FILTRO: si llega curso_id especifico Y
     # cursos_asignados, intersectamos (AND logico). El EC puede pedir un

@@ -15,7 +15,7 @@ Schemas incluidos:
 from datetime import datetime
 from typing import Optional, List
 import re
-from pydantic import BaseModel, Field, EmailStr, field_validator, AliasChoices
+from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator, AliasChoices
 from models.enums import Sexo, EstadoCivil, TipoSangre
 from models.base import PyObjectId
 
@@ -119,6 +119,7 @@ class StudentCreate(BaseModel):
 
     # F-2026-08-11-CAMPOS-EC: campos específicos del Diplomado Gestión
     # Tributaria y demás programas de educación continua (planilla de Lisa).
+    tipo_estudiante: Optional[str] = Field(None, description="Tipo de estudiante ('pregrado' | 'posgrado')")
     registro_universitario: Optional[str] = Field(None, max_length=30)
     avance_academico_codigo: Optional[int] = Field(None, ge=0)
     formulario_descuento_numero: Optional[int] = Field(None, ge=0)
@@ -281,6 +282,7 @@ class StudentResponse(BaseModel):
     titulo: Optional[dict] = None
 
     # F-2026-08-11-CAMPOS-EC: campos específicos educación continua
+    tipo_estudiante: Optional[str] = None
     registro_universitario: Optional[str] = None
     avance_academico_codigo: Optional[int] = None
     formulario_descuento_numero: Optional[int] = None
@@ -318,6 +320,20 @@ class StudentResponse(BaseModel):
     # ISSUE-Q-PRE: Términos y Condiciones
     terminos_aceptados: bool = False
     fecha_aceptacion_terminos: Optional[datetime] = None
+
+    @model_validator(mode='after')
+    def _calcular_tipo_estudiante(self):
+        if self.tipo_estudiante in ('pregrado', 'posgrado'):
+            return self
+        if self.registro_universitario or self.avance_academico_codigo or self.carrera_codigo or self.formulario_descuento_numero:
+            self.tipo_estudiante = 'pregrado'
+        elif self.titulo and isinstance(self.titulo, dict) and (self.titulo.get('numero_titulo') or self.titulo.get('estado') == 'verificado'):
+            self.tipo_estudiante = 'posgrado'
+        elif self.es_primer_carrera is False:
+            self.tipo_estudiante = 'posgrado'
+        else:
+            self.tipo_estudiante = 'pregrado'
+        return self
     
     model_config = {
         "populate_by_name": True,
@@ -336,6 +352,7 @@ class StudentResponse(BaseModel):
                 "fecha_nacimiento": "2002-03-20T00:00:00",
                 "foto_url": "https://storage.example.com/photos/brandon.jpg",
                 "activo": True,
+                "tipo_estudiante": "pregrado",
                 "lista_cursos_ids": [],
                 "created_at": "2024-03-20T10:00:00",
                 "updated_at": "2024-03-20T10:00:00"
@@ -427,6 +444,7 @@ class StudentUpdateAdmin(BaseModel):
     titulo_bachiller: Optional[str] = None
 
     # F-2026-08-11-CAMPOS-EC
+    tipo_estudiante: Optional[str] = Field(None, description="Tipo de estudiante ('pregrado' | 'posgrado')")
     registro_universitario: Optional[str] = Field(None, max_length=30)
     avance_academico_codigo: Optional[int] = Field(None, ge=0)
     formulario_descuento_numero: Optional[int] = Field(None, ge=0)

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Modelo de Estudiante
 ====================
 
@@ -144,6 +144,16 @@ class Student(MongoBaseModel):
     titulo: Optional[dict] = Field(
         default=None,
         description="Información completa del título profesional: {titulo, numero_titulo, año_expedicion, universidad, estado, url, motivo_rechazo}"
+    )
+
+    # ========================================================================
+    # P-AMBITO-FORMACION (2026-08-20): Tipo de perfil académico del estudiante.
+    # 'pregrado' = Educación Continua / Diplomado Continuo (modalidad de graduación, sin título profesional).
+    # 'posgrado' = Profesional (Maestrías, Doctorados, Diplomados Profesionales, con título profesional).
+    # ========================================================================
+    tipo_estudiante: Optional[str] = Field(
+        default=None,
+        description="Perfil académico: 'pregrado' (educación continua / diplomado continuo) o 'posgrado' (profesional)."
     )
 
     # ========================================================================

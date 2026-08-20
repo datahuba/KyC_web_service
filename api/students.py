@@ -37,6 +37,7 @@ async def read_students(
     activo: Optional[bool] = Query(None, description="Filtrar por estado activo/inactivo"),
     estado_titulo: Optional[str] = Query(None, description="Filtrar por estado del título"),
     curso_id: Optional[PydanticObjectId] = Query(None, description="Filtrar por curso inscrito"),
+    tipo_estudiante: Optional[str] = Query(None, description="Filtrar por tipo de estudiante ('pregrado', 'posgrado', 'all')"),
     current_user: User = Depends(require_staff) # <-- TODOS LOS ADMINISTRATIVOS (MAE, COBRANZA, CPD) PUEDEN LEER LA TABLA
 ) -> Any:
     """Listar estudiantes con paginación y filtros avanzados"""
@@ -55,6 +56,7 @@ async def read_students(
         page=page, per_page=per_page, q=query_term, activo=activo,
         estado_titulo=estado_titulo, curso_id=curso_id,
         cursos_asignados=cursos_asignados_list,
+        tipo_estudiante=tipo_estudiante,
     )
 
     total_pages = math.ceil(total_count / per_page) if total_count > 0 else 0
