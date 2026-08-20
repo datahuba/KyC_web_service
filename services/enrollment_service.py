@@ -1234,11 +1234,36 @@ async def cargar_notas_modulos_excel(
     if not sheet or sheet.max_row < 2:
         raise ValueError("El archivo no contiene datos.")
 
-    header_row = [
-        _normalize_header(sheet.cell(row=1, column=c).value)
-        for c in range(1, sheet.max_column + 1)
-    ]
-    col_carnet, columnas_notas = _detectar_columnas_notas(header_row)
+    # Escaneo dinámico de cabeceras (hasta 20 filas)
+    col_carnet = 0
+    columnas_notas = []
+    start_row = 2
+
+    for r in range(1, min(20, sheet.max_row + 1)):
+        row_headers = [
+            _normalize_header(sheet.cell(row=r, column=c).value)
+            for c in range(1, sheet.max_column + 1)
+        ]
+        next_headers = []
+        if r + 1 <= sheet.max_row:
+            next_headers = [
+                _normalize_header(sheet.cell(row=r + 1, column=c).value)
+                for c in range(1, sheet.max_column + 1)
+            ]
+        comb_headers = [
+            f"{row_headers[i]} {next_headers[i] if i < len(next_headers) else ''}".strip()
+            for i in range(len(row_headers))
+        ]
+
+        for is_comb, h_list in [(False, row_headers), (True, comb_headers)]:
+            c_carnet, c_notas = _detectar_columnas_notas(h_list)
+            if c_carnet > 0 and c_notas:
+                col_carnet = c_carnet
+                columnas_notas = c_notas
+                start_row = (r + 2) if is_comb else (r + 1)
+                break
+        if col_carnet > 0 and columnas_notas:
+            break
 
     if col_carnet == 0:
         raise ValueError("No se encontro la columna de CI/Carnet en el Excel.")
@@ -1262,7 +1287,7 @@ async def cargar_notas_modulos_excel(
     actualizados = 0
     fallidos: List[dict] = []
 
-    for row_idx in range(2, sheet.max_row + 1):
+    for row_idx in range(start_row, sheet.max_row + 1):
         carnet_raw = sheet.cell(row=row_idx, column=col_carnet).value
         carnet = str(carnet_raw).strip() if carnet_raw is not None else ""
         if not carnet:

@@ -10,7 +10,7 @@ import re
 import unicodedata
 import openpyxl
 from io import BytesIO, StringIO
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Any, Tuple
 from models.student import Student
 from models.enums import EstadoTitulo
 from schemas.student import StudentCreate, StudentUpdateSelf, StudentUpdateAdmin
@@ -326,20 +326,23 @@ def _normalize_header(value) -> str:
         return ""
     s = str(value).strip().lower()
     s = ''.join(c for c in unicodedata.normalize('NFKD', s) if not unicodedata.combining(c))
-    return s.strip()
+    # Normalizar errores tipográficos y variantes comunes en planillas UAGRM
+    s = s.replace('indentidad', 'identidad').replace('aistencia', 'asistencia')
+    return re.sub(r'[^a-z0-9]', ' ', s).strip()
 
 
 def _clean_text(value) -> Optional[str]:
     """
     Convierte una celda a texto limpio. Quita el sufijo '.0' de números que Excel/Forms
-    leyó como float (ej. carnet 2969698.0 -> '2969698'). Devuelve None si queda vacío.
+    leyó como float (ej. carnet 2969698.0 -> '2969698') y filtra cadenas de error de fórmulas (#REF!, #N/A).
+    Devuelve None si queda vacío o es un error.
     """
     if value is None:
         return None
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     s = str(value).strip()
-    if not s:
+    if not s or s.upper() in ("#REF!", "#N/A", "#VALUE!", "#DIV/0!", "#NAME?", "NULL", "NONE", "NAN"):
         return None
     if s.endswith(".0") and s[:-2].isdigit():
         s = s[:-2]
@@ -352,20 +355,17 @@ def _split_carnet(value) -> tuple[Optional[str], Optional[str]]:
 
     Ej: '2726683 - 1J' -> ('2726683', '1J'), '1313665-1D' -> ('1313665', '1D'),
     '2969698' -> ('2969698', None).
-
-    El complemento (ej. '1D'/'1J'/'1O') es un dato oficial DISTINTO de
-    `extension` (que es el lugar de expedición del carnet, ej. 'SC'/'LPZ') --
-    se guarda aparte en `Student.complemento_carnet` en vez de descartarse,
-    y el número limpio (sin complemento) es el que se usa para las
-    validaciones de unicidad/duplicados entre archivos y con la BD.
     """
     cleaned = _clean_text(value)
     if not cleaned:
         return None, None
-    partes = re.split(r"\s*-\s*", cleaned, maxsplit=1)
-    numero = partes[0].strip() if partes and partes[0].strip() else None
-    complemento = partes[1].strip() if len(partes) > 1 and partes[1].strip() else None
-    return numero, complemento
+    m = re.match(r"^(\d+)\s*[-_/\s]\s*([a-zA-Z0-9]+)$", cleaned)
+    if m:
+        num, comp = m.group(1), m.group(2).upper()
+        if comp.isdigit() and len(comp) <= 2:
+            return f"{num}-{comp}", None
+        return num, comp
+    return cleaned, None
 
 
 def _clean_carnet(value) -> Optional[str]:
@@ -510,13 +510,158 @@ def _parse_amount(value) -> float:
         return 0.0
 
 
+def _find_headers_smart(sheet, max_scan: int = 25) -> tuple[Optional[int], int, dict, list]:
+    """
+    Escanea dinámicamente las primeras filas de la hoja buscando la fila de cabecera.
+    Soporta cabeceras en filas intermedias (ej. fila 4, 6 o 7) y cabeceras multinivel
+    (ej. APELLIDOS Y NOMBRES en fila N y CI / REGISTRO en fila N+1).
+    
+    Retorna:
+      (header_row_idx, start_data_row_idx, col_mapping, columnas_modulos)
+    """
+    best_row = None
+    best_score = 0
+    best_mapping = {
+        "col_nombre": 0, "col_apellido": 0, "col_registro": 0, "col_carnet": 0,
+        "col_extension": 0, "col_email": 0, "col_celular": 0, "col_domicilio": 0,
+        "col_fecha_nacimiento": 0, "col_tipo_sangre": 0, "col_matricula": 0,
+        "col_matricula_comprobante": 0, "col_descuento": 0, "col_descuento_doc": 0,
+        "col_carrera": 0, "col_profesion": 0, "col_universidad": 0
+    }
+    best_modulos = []
+    best_start_data_row = 2
+
+    for r in range(1, min(max_scan, sheet.max_row + 1)):
+        row_headers = [_normalize_header(sheet.cell(row=r, column=c).value) for c in range(1, sheet.max_column + 1)]
+        
+        # Siguiente fila para cabeceras multinivel / combinadas
+        next_headers = []
+        if r + 1 <= sheet.max_row:
+            next_headers = [_normalize_header(sheet.cell(row=r+1, column=c).value) for c in range(1, sheet.max_column + 1)]
+            
+        combined_headers = []
+        for idx in range(len(row_headers)):
+            h1 = row_headers[idx]
+            h2 = next_headers[idx] if idx < len(next_headers) else ""
+            comb = f"{h1} {h2}".strip()
+            combined_headers.append(comb)
+            
+        for is_comb, headers_list in [(False, row_headers), (True, combined_headers)]:
+            col_map = {
+                "col_nombre": 0, "col_apellido": 0, "col_registro": 0, "col_carnet": 0,
+                "col_extension": 0, "col_email": 0, "col_celular": 0, "col_domicilio": 0,
+                "col_fecha_nacimiento": 0, "col_tipo_sangre": 0, "col_matricula": 0,
+                "col_matricula_comprobante": 0, "col_descuento": 0, "col_descuento_doc": 0,
+                "col_carrera": 0, "col_profesion": 0, "col_universidad": 0
+            }
+            columnas_modulos = []
+            score = 0
+            
+            for idx, header in enumerate(headers_list, start=1):
+                if not header:
+                    continue
+                # Detectar link de comprobante de matrícula
+                if "comprobante" in header and "matricula" in header and col_map["col_matricula_comprobante"] == 0:
+                    col_map["col_matricula_comprobante"] = idx
+                    continue
+                if any(tok in header for tok in ("total a cancelar", "saldo", "adjuntar", "comprobante")) or header.startswith("http"):
+                    continue
+                    
+                # Campos clave
+                if any(k in header for k in ("apellido y nombre", "nombres y apellidos", "nombre completo", "postgraduante", "estudiante", "alumno", "participante", "postgraduantes", "nombres")) and col_map["col_nombre"] == 0:
+                    col_map["col_nombre"] = idx
+                    score += 4
+                elif "apellido" in header and col_map["col_apellido"] == 0:
+                    col_map["col_apellido"] = idx
+                    score += 2
+                elif "nombre" in header and col_map["col_nombre"] == 0:
+                    col_map["col_nombre"] = idx
+                    score += 2
+                elif (header == "ci" or "carnet" in header or "identidad" in header or "cedula" in header or "documento" in header or header == "c i") and col_map["col_carnet"] == 0:
+                    col_map["col_carnet"] = idx
+                    score += 4
+                elif ("registro" in header or "matricula academica" in header or header == "reg") and col_map["col_registro"] == 0:
+                    col_map["col_registro"] = idx
+                    score += 3
+                elif ("correo" in header or "email" in header or "mail" in header or "e mail" in header) and col_map["col_email"] == 0:
+                    col_map["col_email"] = idx
+                    score += 1
+                elif ("celular" in header or "telefono" in header or "telf" in header) and col_map["col_celular"] == 0:
+                    col_map["col_celular"] = idx
+                    score += 1
+                elif ("nacimiento" in header or "fecha nac" in header) and col_map["col_fecha_nacimiento"] == 0:
+                    col_map["col_fecha_nacimiento"] = idx
+                    score += 1
+                elif ("extension" in header or "exp" in header or "ext" in header or "procedencia" in header) and col_map["col_extension"] == 0:
+                    col_map["col_extension"] = idx
+                    score += 1
+                elif ("sangre" in header or "sanguineo" in header or "sanguinea" in header) and col_map["col_tipo_sangre"] == 0:
+                    col_map["col_tipo_sangre"] = idx
+                    score += 1
+                elif ("descuento" in header or "dscto" in header or "dcto" in header or "beca" in header) and not "documento" in header and col_map["col_descuento"] == 0:
+                    col_map["col_descuento"] = idx
+                    score += 1
+                elif ("documento para descuento" in header or "resolucion" in header) and col_map["col_descuento_doc"] == 0:
+                    col_map["col_descuento_doc"] = idx
+                    score += 1
+                elif "carrera" in header and col_map["col_carrera"] == 0:
+                    col_map["col_carrera"] = idx
+                elif "profesion" in header and col_map["col_profesion"] == 0:
+                    col_map["col_profesion"] = idx
+                elif "universidad" in header and col_map["col_universidad"] == 0:
+                    col_map["col_universidad"] = idx
+                elif "matricula" in header and col_map["col_matricula"] == 0:
+                    col_map["col_matricula"] = idx
+                    score += 1
+                else:
+                    m = re.match(r"^m\s*(\d+)$", header) or re.match(r"^(?:modulo|cuota)\s*(\d+)$", header)
+                    if m:
+                        columnas_modulos.append((idx, f"Módulo {m.group(1)}"))
+                        
+            effective_score = score + (1 if not is_comb else 0)
+            if effective_score > best_score and col_map["col_nombre"] > 0 and col_map["col_carnet"] > 0:
+                best_score = effective_score
+                best_row = r
+                best_mapping = col_map
+                best_modulos = columnas_modulos
+                best_start_data_row = (r + 2) if is_comb else (r + 1)
+                
+    return best_row, best_start_data_row, best_mapping, best_modulos
+
+
+def _pick_best_sheet_for_students(wb) -> tuple[Any, int, dict, list]:
+    """
+    Selecciona la mejor hoja del libro de trabajo (priorizando hojas de datos personales)
+    y retorna (sheet, start_data_row, col_mapping, columnas_modulos).
+    """
+    candidate_sheets = []
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        h_row, start_data_row, col_map, modulos = _find_headers_smart(ws)
+        if h_row is not None and col_map["col_nombre"] > 0 and col_map["col_carnet"] > 0:
+            name_lower = sheet_name.lower()
+            priority = 1
+            if any(k in name_lower for k in ("datos", "pers", "estudiant", "lista", "inscrit", "participante")):
+                priority = 10
+            candidate_sheets.append((priority, ws, start_data_row, col_map, modulos))
+            
+    if candidate_sheets:
+        candidate_sheets.sort(key=lambda x: x[0], reverse=True)
+        _, ws, start_data_row, col_map, modulos = candidate_sheets[0]
+        return ws, start_data_row, col_map, modulos
+        
+    active_sheet = wb.active
+    h_row, start_data_row, col_map, modulos = _find_headers_smart(active_sheet)
+    return active_sheet, start_data_row, col_map, modulos
+
+
 async def import_students_from_excel(
     file_content: bytes,
     curso_id: Optional[PydanticObjectId] = None,
     filename: Optional[str] = None
 ) -> dict:
     """
-    Importar estudiantes de forma masiva desde un archivo de Excel (.xlsx).
+    Importar estudiantes de forma masiva desde un archivo de Excel (.xlsx) o CSV.
 
     AUTO-INSCRIPCIÓN OPCIONAL:
     Si se proporciona `curso_id`, todos los estudiantes recién creados en esta importación
@@ -529,9 +674,6 @@ async def import_students_from_excel(
     is_csv = bool(filename and filename.lower().strip().endswith('.csv'))
     try:
         if is_csv:
-            # CSV: decodificar respetando el BOM (utf-8-sig) con fallback a latin-1,
-            # autodetectar el delimitador (coma o punto y coma) y volcar las filas
-            # en una hoja de openpyxl para reutilizar la misma lógica de Excel.
             try:
                 text = file_content.decode('utf-8-sig')
             except UnicodeDecodeError:
@@ -543,10 +685,10 @@ async def import_students_from_excel(
             sheet = wb.active
             for row in reader:
                 sheet.append(row)
+            h_row, start_data_row, col_map, columnas_modulos = _find_headers_smart(sheet)
         else:
-            # Cargar libro en memoria de forma optimizada
             wb = openpyxl.load_workbook(BytesIO(file_content), data_only=True)
-            sheet = wb.active
+            sheet, start_data_row, col_map, columnas_modulos = _pick_best_sheet_for_students(wb)
         if not sheet or sheet.max_row < 1:
             raise ValueError("El archivo no contiene datos.")
     except ValueError:
@@ -554,64 +696,28 @@ async def import_students_from_excel(
     except Exception as e:
         raise ValueError(f"No se pudo parsear el archivo: {str(e)}")
         
-    # 1. ESCANEO DINÁMICO DE CABECERAS (FILA 1) — normalizado sin acentos + detección financiera
-    header_row = [_normalize_header(sheet.cell(row=1, column=col_idx).value)
-                  for col_idx in range(1, sheet.max_column + 1)]
-
-    col_nombre = col_apellido = col_registro = col_carnet = 0
-    col_extension = col_email = col_celular = col_domicilio = 0
-    col_matricula = 0
-    col_fecha_nacimiento = 0
-    col_tipo_sangre = 0
-    col_matricula_comprobante = 0  # columna con el LINK del comprobante de pago de matrícula (Google Forms)
-    columnas_modulos = []  # lista de (col_idx, concepto) para pagos de módulos/cuotas
-
-    for idx, header in enumerate(header_row, start=1):
-        if not header:
-            continue
-        # Detectar la columna con el comprobante (link) de pago de matrícula ANTES de excluir adjuntos.
-        # Ej. Google Forms: "Adjuntar Comprobante de Pago de la Matrícula (IMAGEN O PDF) Bs. 300".
-        if "comprobante" in header and "matricula" in header and col_matricula_comprobante == 0:
-            col_matricula_comprobante = idx
-            continue
-        # Ignorar columnas calculadas y de adjuntos/enlaces (no son datos ni montos individuales).
-        # Esto evita que columnas de Google Forms como "Adjuntar ... Carnet de Identidad" (una URL)
-        # se confundan con el carnet.
-        if any(tok in header for tok in ("total", "saldo", "cobrar", "adjuntar", "comprobante")) or header.startswith("http"):
-            continue
-        # --- Campos del estudiante (gana la PRIMERA coincidencia; nombre antes que apellido) ---
-        if "nombre" in header and col_nombre == 0:
-            col_nombre = idx
-        elif "apellido" in header and col_apellido == 0:
-            col_apellido = idx
-        elif ("registro" in header or "matricula academica" in header) and col_registro == 0:
-            col_registro = idx
-        elif (header == "ci" or "carnet" in header or "documento de identidad" in header) and col_carnet == 0:
-            col_carnet = idx
-        elif "extension" in header and col_extension == 0:
-            col_extension = idx
-        elif ("correo" in header or "email" in header or "mail" in header) and col_email == 0:
-            col_email = idx
-        elif ("celular" in header or "telefono" in header or "telf" in header) and col_celular == 0:
-            col_celular = idx
-        elif ("domicilio" in header or "direccion" in header) and col_domicilio == 0:
-            col_domicilio = idx
-        elif ("nacimiento" in header or "fecha de nacimiento" in header) and col_fecha_nacimiento == 0:
-            col_fecha_nacimiento = idx
-        elif ("sangre" in header or "sanguineo" in header or "sanguinea" in header) and col_tipo_sangre == 0:
-            col_tipo_sangre = idx
-        # --- Columnas financieras (para migrar pagos si se selecciona un curso) ---
-        elif "matricula" in header and col_matricula == 0:
-            col_matricula = idx
-        else:
-            m = re.match(r"^m\s*(\d+)$", header) or re.match(r"^(?:modulo|cuota)\s*(\d+)$", header)
-            if m:
-                columnas_modulos.append((idx, f"Módulo {m.group(1)}"))
+    col_nombre = col_map.get("col_nombre", 0)
+    col_apellido = col_map.get("col_apellido", 0)
+    col_registro = col_map.get("col_registro", 0)
+    col_carnet = col_map.get("col_carnet", 0)
+    col_extension = col_map.get("col_extension", 0)
+    col_email = col_map.get("col_email", 0)
+    col_celular = col_map.get("col_celular", 0)
+    col_domicilio = col_map.get("col_domicilio", 0)
+    col_fecha_nacimiento = col_map.get("col_fecha_nacimiento", 0)
+    col_tipo_sangre = col_map.get("col_tipo_sangre", 0)
+    col_matricula = col_map.get("col_matricula", 0)
+    col_matricula_comprobante = col_map.get("col_matricula_comprobante", 0)
+    col_descuento = col_map.get("col_descuento", 0)
+    col_descuento_doc = col_map.get("col_descuento_doc", 0)
+    col_carrera = col_map.get("col_carrera", 0)
+    col_profesion = col_map.get("col_profesion", 0)
+    col_universidad = col_map.get("col_universidad", 0)
 
     if col_nombre == 0:
-        raise ValueError("No se encontró la columna de 'Nombre' en la fila de cabecera del archivo.")
+        raise ValueError("No se encontró la columna de 'Nombre' o 'Apellidos' en la cabecera del archivo.")
     if col_carnet == 0:
-        raise ValueError("No se encontró la columna de 'CI' o 'Carnet' en la fila de cabecera del archivo.")
+        raise ValueError("No se encontró la columna de 'CI' o 'Carnet de Identidad' en la cabecera del archivo.")
 
     # ISSUE-Q-LEYENDA-COLORES: detectar si el archivo trae una leyenda de
     # colores (ej. "amarillo = Descuento Facultad") para reportar qué filas
@@ -628,21 +734,20 @@ async def import_students_from_excel(
     empty_row_streak = 0
     
     # 2. ESCANEAR FILAS Y VALIDAR EN MEMORIA (FILTRANDO VACÍOS Y DUPLICADOS INTERNOS)
-    for row_idx in range(2, sheet.max_row + 1):
+    for row_idx in range(start_data_row, sheet.max_row + 1):
         try:
-            nombres_val = sheet.cell(row=row_idx, column=col_nombre).value if col_nombre > 0 else None
-            apellidos_val = sheet.cell(row=row_idx, column=col_apellido).value if col_apellido > 0 else None
+            nombres_val = _clean_text(sheet.cell(row=row_idx, column=col_nombre).value if col_nombre > 0 else None)
+            apellidos_val = _clean_text(sheet.cell(row=row_idx, column=col_apellido).value if col_apellido > 0 else None)
 
-            nombres_str = str(nombres_val).strip() if nombres_val is not None else ""
-            apellidos_str = str(apellidos_val).strip() if apellidos_val is not None else ""
+            nombres_str = nombres_val or ""
+            apellidos_str = apellidos_val or ""
             # Combinar Nombre(s) + Apellido(s) cuando el archivo los trae separados (ej. Google Forms)
             nombre_str = f"{nombres_str} {apellidos_str}".strip() if (col_apellido > 0 and apellidos_str) else nombres_str
 
-            # Carnet limpio: sin sufijo .0 de floats y con el complemento tras
-            # el guion separado aparte (ej. '2726683 - 1J' -> carnet='2726683',
-            # complemento_carnet='1J'), para que el mismo CI se detecte como
-            # duplicado sin importar si el archivo lo trae con o sin
-            # complemento, sin perder el dato oficial completo.
+            # Filtrar filas de encabezados secundarios o firmas al pie
+            if nombre_str and any(tok in nombre_str.upper() for tok in ("ELABORADO POR", "FIRMA", "RESPONSABLE", "TOTAL", "PROMEDIO")):
+                continue
+
             carnet, complemento_carnet = _split_carnet(
                 sheet.cell(row=row_idx, column=col_carnet).value if col_carnet > 0 else None
             )
