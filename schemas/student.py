@@ -325,14 +325,12 @@ class StudentResponse(BaseModel):
     def _calcular_tipo_estudiante(self):
         if self.tipo_estudiante in ('pregrado', 'posgrado'):
             return self
+        # Pregrado: únicamente si tiene registro universitario, avance, carrera o formulario de descuento
         if self.registro_universitario or self.avance_academico_codigo or self.carrera_codigo or self.formulario_descuento_numero:
             self.tipo_estudiante = 'pregrado'
-        elif self.titulo and isinstance(self.titulo, dict) and (self.titulo.get('numero_titulo') or self.titulo.get('estado') == 'verificado'):
-            self.tipo_estudiante = 'posgrado'
-        elif self.es_primer_carrera is False:
-            self.tipo_estudiante = 'posgrado'
         else:
-            self.tipo_estudiante = 'pregrado'
+            # En la Unidad de Postgrado, el perfil por defecto es Posgraduante / Profesional
+            self.tipo_estudiante = 'posgrado'
         return self
     
     model_config = {

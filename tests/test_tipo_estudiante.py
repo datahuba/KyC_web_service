@@ -60,3 +60,19 @@ def test_student_response_tipo_estudiante_explicito():
     }
     resp = StudentResponse(**data)
     assert resp.tipo_estudiante == "posgrado"
+
+
+def test_student_response_posgrado_default_sin_ru():
+    """Un estudiante de postgrado sin RU ni formulario debe computar como 'posgrado' por defecto."""
+    data = {
+        "_id": "507f1f77bcf86cd799439014",
+        "registro": "5384101",
+        "nombre": "Luis Rafael Valdez Bustillo",
+        "carnet": "5384101",
+        "activo": True,
+        "created_at": "2024-03-20T10:00:00",
+        "updated_at": "2024-03-20T10:00:00",
+    }
+    resp = StudentResponse(**data)
+    assert resp.tipo_estudiante == "posgrado"
+

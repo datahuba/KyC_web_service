@@ -97,16 +97,23 @@ async def get_students(
             query = query.find(
                 Or(
                     Student.tipo_estudiante == "pregrado",
-                    {"$and": [{"tipo_estudiante": {"$in": [None, ""]}}, {"es_primer_carrera": True}]},
-                    {"registro_universitario": {"$exists": True, "$ne": None, "$ne": ""}}
+                    {"registro_universitario": {"$exists": True, "$ne": None, "$ne": ""}},
+                    {"carrera_codigo": {"$exists": True, "$ne": None, "$ne": ""}},
+                    {"formulario_descuento_numero": {"$exists": True, "$ne": None}}
                 )
             )
         elif tipo_estudiante == "posgrado":
             query = query.find(
                 Or(
                     Student.tipo_estudiante == "posgrado",
-                    {"$and": [{"tipo_estudiante": {"$in": [None, ""]}}, {"es_primer_carrera": False}]},
-                    {"titulo.numero_titulo": {"$exists": True, "$ne": None, "$ne": ""}}
+                    {
+                        "$and": [
+                            {"tipo_estudiante": {"$nin": ["pregrado"]}},
+                            {"registro_universitario": {"$in": [None, ""]}},
+                            {"carrera_codigo": {"$in": [None, ""]}},
+                            {"formulario_descuento_numero": {"$in": [None, ""]}}
+                        ]
+                    }
                 )
             )
 
