@@ -413,7 +413,7 @@ async def _enriquecer_nota_pendiente(enrollment: Enrollment, modulo_index: int) 
         estudiante_id=str(student.id),
         estudiante_nombre=student.nombre,
         estudiante_registro=student.registro,
-        estudiante_ci=student.carnet_identidad,
+        estudiante_ci=getattr(student, "carnet", None) or getattr(student, "carnet_identidad", "") or "",
         curso_id=str(enrollment.curso_id),
         curso_codigo=curso_codigo or "?",
         curso_nombre=curso_nombre,
