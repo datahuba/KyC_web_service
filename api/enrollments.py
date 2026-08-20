@@ -379,34 +379,31 @@ async def list_enrollments(
 # rápida de aprobarlas todas. Aquí se listan y se aprueban en bulk.
 # ========================================================================
 
-async def _enriquecer_nota_pendiente(enrollment: Enrollment, modulo_index: int) -> Optional[NotaPendienteItem]:
-    """Helper: toma un enrollment y un índice de módulo y construye el item de respuesta."""
+def _construir_nota_pendiente_item(
+    enrollment: Enrollment,
+    modulo_index: int,
+    student: Optional[Student] = None,
+    course: Optional[Course] = None,
+    docente: Optional[User] = None,
+) -> Optional[NotaPendienteItem]:
+    """Construye un NotaPendienteItem en memoria sin hacer llamadas a BD."""
     if not enrollment or not enrollment.modulos or modulo_index >= len(enrollment.modulos):
         return None
     modulo = enrollment.modulos[modulo_index]
     if modulo.estado_validacion_nota != "pendiente_validacion":
         return None
 
-    # estudiante
-    student = await Student.get(enrollment.estudiante_id)
     if not student:
         return None
 
-    # curso
-    course = await Course.get(enrollment.curso_id)
     curso_codigo = course.codigo if course and hasattr(course, "codigo") else "?"
     curso_nombre = course.nombre if course and hasattr(course, "nombre") else None
 
-    # docente del módulo
     docente_username = None
     docente_nombre = None
-    if course and hasattr(course, "modulos") and modulo_index < len(course.modulos):
-        mod_docente = course.modulos[modulo_index]
-        if hasattr(mod_docente, "docente_id") and mod_docente.docente_id:
-            docente = await User.get(mod_docente.docente_id)
-            if docente:
-                docente_username = docente.username
-                docente_nombre = docente.nombre_funcional or docente.nombre_visible or docente.username
+    if docente:
+        docente_username = docente.username
+        docente_nombre = docente.nombre_funcional or docente.nombre_visible or docente.username
 
     return NotaPendienteItem(
         enrollment_id=str(enrollment.id),
@@ -425,6 +422,20 @@ async def _enriquecer_nota_pendiente(enrollment: Enrollment, modulo_index: int) 
         fecha_subida=enrollment.updated_at,
         estado="pendiente_validacion",
     )
+
+
+async def _enriquecer_nota_pendiente(enrollment: Enrollment, modulo_index: int) -> Optional[NotaPendienteItem]:
+    """Helper individual: toma un enrollment y un índice de módulo y construye el item."""
+    if not enrollment or not enrollment.modulos or modulo_index >= len(enrollment.modulos):
+        return None
+    student = await Student.get(enrollment.estudiante_id)
+    course = await Course.get(enrollment.curso_id)
+    docente = None
+    if course and hasattr(course, "modulos") and modulo_index < len(course.modulos):
+        mod_docente = course.modulos[modulo_index]
+        if hasattr(mod_docente, "docente_id") and mod_docente.docente_id:
+            docente = await User.get(mod_docente.docente_id)
+    return _construir_nota_pendiente_item(enrollment, modulo_index, student, course, docente)
 
 
 @router.get(
@@ -491,15 +502,43 @@ async def listar_notas_pendientes(
     # Buscar enrollments candidatos
     raw = await Enrollment.find(match_dict).to_list()
 
+    # Pre-cargar en batch Students, Courses y Docentes (1 sola query por colección, eliminando N+1)
+    student_ids = list({e.estudiante_id for e in raw if e.estudiante_id})
+    course_ids = list({e.curso_id for e in raw if e.curso_id})
+
+    students = await Student.find({"_id": {"$in": student_ids}}).to_list() if student_ids else []
+    student_map = {str(s.id): s for s in students}
+
+    courses = await Course.find({"_id": {"$in": course_ids}}).to_list() if course_ids else []
+    course_map = {str(c.id): c for c in courses}
+
+    docente_ids = set()
+    for c in courses:
+        for m in (c.modulos or []):
+            if hasattr(m, "docente_id") and m.docente_id:
+                docente_ids.add(m.docente_id)
+    docente_ids_list = list(docente_ids)
+    docentes = await User.find({"_id": {"$in": docente_ids_list}}).to_list() if docente_ids_list else []
+    docente_map = {str(d.id): d for d in docentes}
+
     # Si hay filtro por módulo_index, filtrar en Python
     items: List[NotaPendienteItem] = []
     for e in raw:
+        student = student_map.get(str(e.estudiante_id))
+        course = course_map.get(str(e.curso_id))
         for idx, m in enumerate(e.modulos or []):
             if m.estado_validacion_nota != "pendiente_validacion":
                 continue
             if modulo_index is not None and idx != modulo_index:
                 continue
-            item = await _enriquecer_nota_pendiente(e, idx)
+
+            docente = None
+            if course and hasattr(course, "modulos") and idx < len(course.modulos):
+                mod_doc = course.modulos[idx]
+                if hasattr(mod_doc, "docente_id") and mod_doc.docente_id:
+                    docente = docente_map.get(str(mod_doc.docente_id))
+
+            item = _construir_nota_pendiente_item(e, idx, student, course, docente)
             if not item:
                 continue
             # filtro de búsqueda por texto
