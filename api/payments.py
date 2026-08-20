@@ -1858,7 +1858,8 @@ async def export_payments_excel(
     from core.timezone_utils import format_fecha
 
     if isinstance(current_user, User):
-        if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza"]:
+        # F-2026-08-20-EC-PAGOS-READONLY: encargado_curso y coordinador pueden exportar pagos de sus cursos asignados
+        if current_user.rol not in ["superadmin", "admin", "mae", "cpd", "cobranza", "encargado_curso", "coordinador"]:
             raise HTTPException(status_code=403, detail="No autorizado para exportar pagos")
 
         filtro_rol = filtro_cursos_por_rol(current_user)
