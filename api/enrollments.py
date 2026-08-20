@@ -578,19 +578,16 @@ async def bulk_validar_notas(
     current_user: User = Depends(require_cpd)
 ) -> Any:
     """
-    F-070: aprueba (valida) varias notas pendientes en una sola llamada.
+    F-070: aprueba (valida) varias notas pendientes en una sola llamada concurrente.
     Cada item es (enrollment_id, modulo_index). Devuelve un resumen con
     éxitos/fallos por item para que el frontend pueda mostrar cuáles pasaron
     y cuáles no.
     """
-    resultados: List[BulkValidarResultado] = []
-    exitosos = 0
-    fallidos = 0
+    evaluador = current_user.nombre_funcional or current_user.username
 
-    for item in payload.items:
+    async def _validar_un_item(item: BulkValidarItem) -> BulkValidarResultado:
         try:
             eid = PydanticObjectId(item.enrollment_id)
-            # Validar primero que existe y está pendiente
             e = await Enrollment.get(eid)
             if not e:
                 raise ValueError("Inscripción no encontrada")
@@ -600,27 +597,34 @@ async def bulk_validar_notas(
             if mod.estado_validacion_nota != "pendiente_validacion":
                 raise ValueError(f"El módulo no está en estado 'pendiente_validacion' (actual: {mod.estado_validacion_nota})")
 
-            # Validar (reutiliza la lógica existente)
             updated = await enrollment_service.validar_nota_borrador(
                 enrollment_id=eid,
                 modulo_index=item.modulo_index,
-                evaluador_username=current_user.nombre_funcional or current_user.username,
+                evaluador_username=evaluador,
             )
-            resultados.append(BulkValidarResultado(
+            nota_final = None
+            if updated and updated.modulos and item.modulo_index < len(updated.modulos):
+                nota_final = updated.modulos[item.modulo_index].nota_final
+            return BulkValidarResultado(
                 enrollment_id=item.enrollment_id,
                 modulo_index=item.modulo_index,
                 ok=True,
-                nota_final=updated.nota_final,
-            ))
-            exitosos += 1
+                nota_final=nota_final,
+            )
         except Exception as ex:
-            resultados.append(BulkValidarResultado(
+            return BulkValidarResultado(
                 enrollment_id=item.enrollment_id,
                 modulo_index=item.modulo_index,
                 ok=False,
                 error=str(ex),
-            ))
-            fallidos += 1
+            )
+
+    resultados: List[BulkValidarResultado] = await asyncio.gather(
+        *[_validar_un_item(item) for item in payload.items]
+    )
+
+    exitosos = sum(1 for r in resultados if r.ok)
+    fallidos = sum(1 for r in resultados if not r.ok)
 
     return BulkValidarResponse(
         total=len(payload.items),

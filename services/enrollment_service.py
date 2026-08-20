@@ -1489,6 +1489,61 @@ async def subir_notas_borrador_bulk(
 
 
 
+async def _notificar_nota_validada_bg(
+    estudiante_id: Any,
+    curso_id: Any,
+    nombre_modulo: str,
+    nota_a_oficializar: float,
+    enrollment_id: Any
+) -> None:
+    """Envía notificación in-app y correo electrónico al estudiante en background."""
+    try:
+        from models.student import Student
+        from models.course import Course
+        from core.email_utils import build_nota_validada_email
+        from core.config import settings
+        from services.notification_service import create_notification
+        from services import email_service
+
+        student = await Student.get(estudiante_id)
+        course = await Course.get(curso_id)
+
+        if student:
+            try:
+                await create_notification(
+                    destinatario_id=student.id,
+                    tipo_destinatario="student",
+                    titulo="Calificación Validada",
+                    mensaje=f"Tu nota del módulo '{nombre_modulo}' ya fue validada oficialmente por CPD.",
+                    tipo_alerta="success",
+                    ruta="/app/enrollments",
+                    referencia_tipo="enrollment",
+                    referencia_id=enrollment_id
+                )
+            except Exception as e:
+                print(f"Error notificando validación de nota al estudiante: {str(e)}")
+
+            if student.email and course:
+                portal_link = f"{settings.FRONTEND_URL.rstrip('/')}/app/enrollments"
+                html = build_nota_validada_email(
+                    nombre=student.nombre or student.registro,
+                    curso_nombre=course.nombre_programa,
+                    modulo_nombre=nombre_modulo,
+                    nota=nota_a_oficializar,
+                    portal_link=portal_link
+                )
+                await email_service.enviar(
+                    destinatario=student.email,
+                    asunto=f"Nota validada: {nombre_modulo} · Posgrado UAGRM",
+                    html=html,
+                    tipo=email_service.TipoEmail.NOTA_VALIDADA,
+                    destinatario_id=getattr(student, "id", None),
+                    destinatario_nombre=getattr(student, "nombre", None),
+                )
+    except Exception as e:
+        print(f"Error enviando notificación/correo de nota validada: {str(e)}")
+
+
 async def validar_nota_borrador(
     enrollment_id: PydanticObjectId,
     modulo_index: int,
@@ -1523,54 +1578,15 @@ async def validar_nota_borrador(
     enrollment_actualizado.modulos[modulo_index].nota_borrador = None
     await enrollment_actualizado.save()
 
-    # ISSUE-Q-CORREO-NOTA (2026-07-08, reunión de postgrado contaduría): notificar
-    # al estudiante por correo cuando CPD valida su nota. No bloqueante: si el
-    # estudiante no tiene email o el envío falla, no revierte la validación.
-    try:
-        from models.student import Student
-        from models.course import Course
-        from core.email_utils import send_email, build_nota_validada_email
-        from core.config import settings
-        from services.notification_service import create_notification
-
-        student = await Student.get(enrollment_actualizado.estudiante_id)
-        course = await Course.get(enrollment_actualizado.curso_id)
-
-        if student:
-            try:
-                await create_notification(
-                    destinatario_id=student.id,
-                    tipo_destinatario="student",
-                    titulo="Calificación Validada",
-                    mensaje=f"Tu nota del módulo '{nombre_modulo}' ya fue validada oficialmente por CPD.",
-                    tipo_alerta="success",
-                    ruta="/app/enrollments",
-                    referencia_tipo="enrollment",
-                    referencia_id=enrollment_actualizado.id
-                )
-            except Exception as e:
-                print(f"Error notificando validación de nota al estudiante: {str(e)}")
-
-            if student.email and course:
-                portal_link = f"{settings.FRONTEND_URL.rstrip('/')}/app/enrollments"
-                html = build_nota_validada_email(
-                    nombre=student.nombre or student.registro,
-                    curso_nombre=course.nombre_programa,
-                    modulo_nombre=nombre_modulo,
-                    nota=nota_a_oficializar,
-                    portal_link=portal_link
-                )
-                from services import email_service
-                await email_service.enviar(
-                    destinatario=student.email,
-                    asunto=f"Nota validada: {nombre_modulo} · Posgrado UAGRM",
-                    html=html,
-                    tipo=email_service.TipoEmail.NOTA_VALIDADA,
-                    destinatario_id=getattr(student, "id", None),
-                    destinatario_nombre=getattr(student, "nombre", None),
-                )
-    except Exception as e:
-        print(f"Error enviando correo de nota validada: {str(e)}")
+    # ISSUE-Q-CORREO-NOTA: notificar en background sin bloquear el request HTTP
+    import asyncio
+    asyncio.create_task(_notificar_nota_validada_bg(
+        estudiante_id=enrollment_actualizado.estudiante_id,
+        curso_id=enrollment_actualizado.curso_id,
+        nombre_modulo=nombre_modulo,
+        nota_a_oficializar=nota_a_oficializar,
+        enrollment_id=enrollment_actualizado.id,
+    ))
 
     return enrollment_actualizado
 
