@@ -125,3 +125,25 @@ class TestDeleteFormLogic:
         Si hay 0 pendientes + 5 aprobadas → NO BLOQUEA, se borra en cascada.
         """
         assert True, "Ver test_query_solo_pendientes_bloquean"
+
+
+class TestEncargadoFormPermissions:
+    """Verifica que el código de filtrado de formularios y submissions incluya tanto creados como asignados."""
+
+    def test_get_forms_for_admin_incluye_created_by(self):
+        source = SERVICE_PATH.read_text(encoding="utf-8")
+        assert '{"created_by": current_user.username}' in source
+        assert '"$or"' in source
+
+    def test_get_submissions_for_admin_incluye_created_by(self):
+        source = SERVICE_PATH.read_text(encoding="utf-8")
+        match = re.search(r"async def get_submissions_for_admin\(.*?(?=\nasync def |\n# ====|\Z)", source, re.DOTALL)
+        assert match
+        assert '{"created_by": current_user.username}' in match.group(0)
+
+    def test_get_forms_counters_incluye_created_by(self):
+        source = SERVICE_PATH.read_text(encoding="utf-8")
+        match = re.search(r"async def get_forms_counters\(.*?(?=\nasync def |\n# ====|\Z)", source, re.DOTALL)
+        assert match
+        assert '{"created_by": current_user.username}' in match.group(0)
+

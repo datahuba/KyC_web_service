@@ -126,9 +126,10 @@ async def get_forms_for_admin(
         query = {"programa_id": None}
     elif current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
         cursos_permitidos = current_user.cursos_asignados or []
-        if not cursos_permitidos:
-            return [], 0
-        query = {"programa_id": {"$in": cursos_permitidos}}
+        conditions = [{"created_by": current_user.username}]
+        if cursos_permitidos:
+            conditions.append({"programa_id": {"$in": cursos_permitidos}})
+        query = {"$or": conditions}
     elif current_user.rol not in (UserRole.SUPERADMIN, UserRole.ADMIN):
         return [], 0
 
@@ -378,9 +379,10 @@ async def get_submissions_for_admin(
         form_query = {"programa_id": None}
     elif current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
         cursos = current_user.cursos_asignados or []
-        if not cursos:
-            return [], 0, {}
-        form_query = {"programa_id": {"$in": cursos}}
+        conditions = [{"created_by": current_user.username}]
+        if cursos:
+            conditions.append({"programa_id": {"$in": cursos}})
+        form_query = {"$or": conditions}
     elif current_user.rol not in (UserRole.SUPERADMIN, UserRole.ADMIN):
         return [], 0, {}
 
@@ -398,7 +400,7 @@ async def get_submissions_for_admin(
             return [], 0, {}
         if current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
             cursos = current_user.cursos_asignados or []
-            if form.programa_id not in cursos:
+            if form.programa_id not in cursos and form.created_by != current_user.username:
                 return [], 0, {}
         form_query = {"_id": form_oid}
 
@@ -825,9 +827,10 @@ async def get_forms_counters(current_user: User) -> dict:
         form_query = {"programa_id": None}
     elif current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
         cursos = current_user.cursos_asignados or []
-        if not cursos:
-            return empty
-        form_query = {"programa_id": {"$in": cursos}}
+        conditions = [{"created_by": current_user.username}]
+        if cursos:
+            conditions.append({"programa_id": {"$in": cursos}})
+        form_query = {"$or": conditions}
     elif current_user.rol not in (UserRole.SUPERADMIN, UserRole.ADMIN):
         return empty
 

@@ -288,7 +288,7 @@ async def get_form(
         raise HTTPException(status_code=403, detail="No tienes permiso para ver este formulario.")
     if current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
         cursos = current_user.cursos_asignados or []
-        if form.programa_id not in cursos:
+        if form.programa_id not in cursos and form.created_by != current_user.username:
             raise HTTPException(status_code=403, detail="No tienes permiso para ver este formulario.")
     return await _enrich_form(form)
 
