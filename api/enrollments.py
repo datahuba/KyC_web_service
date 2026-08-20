@@ -605,7 +605,7 @@ async def bulk_validar_notas(
             )
             nota_final = None
             if updated and updated.modulos and item.modulo_index < len(updated.modulos):
-                nota_final = updated.modulos[item.modulo_index].nota_final
+                nota_final = updated.modulos[item.modulo_index].nota
             return BulkValidarResultado(
                 enrollment_id=item.enrollment_id,
                 modulo_index=item.modulo_index,
