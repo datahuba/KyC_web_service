@@ -33,8 +33,8 @@ set -euo pipefail
 LOCK="/tmp/deploy-backend.lock"
 MARKER="/tmp/deploy-in-progress"
 LOG="/tmp/deploy-backend.log"
-HEALTHCHECK_URL="http://127.0.0.1:8000/"
-HEALTHCHECK_TIMEOUT=30   # segundos maximos de espera post-deploy
+HEALTHCHECK_URL="http://127.0.0.1:8000/docs"
+HEALTHCHECK_TIMEOUT=60   # segundos maximos de espera post-deploy
 FLOCK_TIMEOUT="${FLOCK_TIMEOUT:-900}"   # 15 min default
 BACKEND_DIR="/root/postgrado/backend"
 COMPOSE_DIR="/root/postgrado"
