@@ -59,11 +59,9 @@ async def create_payment(
     banco: Optional[str] = Form(None),
     fecha_comprobante: Optional[str] = Form(None),
     cuenta_destino: Optional[str] = Form(None),
-    # F-COBRANZA-026 (2026-07-22): Kevin: "el sistema no debe dejar que se suba
-    # una solicitud de pago sin el comprobante no importa que tipo de pago sea
-    # caja o todo lo demas". El comprobante es OBLIGATORIO para todos los
-    # metodos, incluyendo Caja.
-    file: UploadFile = File(..., description="Comprobante obligatorio (imagen o PDF)"),
+    # F-COBRANZA-026 / F-MIGRACION-PAGOS: Comprobante obligatorio para estudiantes.
+    # Para Staff en Caja o Migración/Histórico es opcional (no se bloquea).
+    file: Optional[UploadFile] = File(None, description="Comprobante (obligatorio para estudiantes, opcional para staff en Caja/Migración)"),
 
     # F-SYNC-PAGOS-MODULOS (2026-08-04, Kevin): sincronizar con la logica
     # del modal CargaInicialModal. Si viene, se aplica directo a los modulos
@@ -81,8 +79,8 @@ async def create_payment(
 ) -> Any:
     """
     Registrar un nuevo pago.
-    Soporta pagos digitales (exige voucher/número) y pagos físicos (Caja).
-    - Si lo sube un Estudiante: entra obligatoriamente como PENDIENTE.
+    Soporta pagos digitales (exige voucher/número) y pagos físicos/históricos (Caja, Migración).
+    - Si lo sube un Estudiante: entra obligatoriamente como PENDIENTE y exige comprobante.
     - Si lo registra un Perfil Autorizado (User/Staff): se AUTO-VALIDA de inmediato.
     """
     from core.cloudinary_utils import upload_image, upload_pdf
@@ -90,21 +88,33 @@ async def create_payment(
 
     is_staff = isinstance(current_user, User)
 
-    # 1. Validaciones rígidas según el Método de Pago
-    if not file:
-        raise HTTPException(status_code=400, detail="El comprobante es obligatorio (imagen o PDF) para todos los métodos de pago.")
-    if metodo_pago != "Caja":
+    # 1. Validaciones según el Método de Pago y Rol
+    if not is_staff and not file:
+        raise HTTPException(
+            status_code=400,
+            detail="El comprobante es obligatorio (imagen o PDF) para estudiantes."
+        )
+
+    metodos_sin_voucher_estricto = ("Caja", "Migración / Saldo Inicial", "Histórico", "Migracion")
+    if metodo_pago not in metodos_sin_voucher_estricto:
         if not numero_transaccion:
             raise HTTPException(status_code=400, detail="El número de transacción es obligatorio para este método de pago.")
         if not banco:
             raise HTTPException(status_code=400, detail="Debe especificar el banco emisor.")
+    else:
+        # Valores por defecto para operaciones de Caja y Migración si vienen vacíos
+        if not numero_transaccion:
+            prefijo = "CAJA" if "caja" in metodo_pago.lower() else "HIST"
+            numero_transaccion = f"{prefijo}-{int(datetime.now().timestamp())}"
+        if not banco:
+            banco = "Caja UAGRM" if "caja" in metodo_pago.lower() else "Registro Histórico UAGRM"
     
     comprobante_url = None
     
     try:
-        # 2. Subida de Archivo a la Nube
+        # 2. Subida de Archivo a la Nube (si se adjuntó)
         student_id_for_folder = current_user.id if not is_staff else "staff_upload"
-        if file:
+        if file and file.filename:
             folder = f"payments/{student_id_for_folder}"
             safe_transaction = (numero_transaccion or "caja_pago").replace(' ', '_').replace('/', '_')
             public_id = f"voucher_{safe_transaction}"

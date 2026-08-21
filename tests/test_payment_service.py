@@ -1216,62 +1216,27 @@ class TestF026ComprobanteObligatorio:
         from pathlib import Path
         return Path(__file__).parent.parent / "services" / "payment_service.py"
 
-    def test_create_payment_file_es_requerido(self, payments_src):
-        """POST /payments/: el parametro file NO debe tener default None."""
+    def test_create_payment_file_es_requerido_para_estudiantes(self, payments_src):
+        """POST /payments/: para estudiantes el comprobante es obligatorio."""
         src = payments_src.read_text(encoding="utf-8")
-        # Buscar el endpoint create_payment
         idx = src.find('"/",')
-        bloque = src[idx:idx + 1500]
-        # file: UploadFile = File(..., ...) — NO Optional
-        # Antes: file: Optional[UploadFile] = File(None, ...)
-        # Ahora:  file: UploadFile = File(..., ...)
-        # Verificar que no este Optional[UploadFile]
-        assert "Optional[UploadFile]" not in bloque[:500], (
-            "create_payment aun acepta file Optional"
-        )
-        # Verificar que el parametro file ya no es None default
-        assert "File(None" not in bloque[:500] or "caja-directo" in bloque[:500], (
-            "create_payment aun tiene File(None"
-        )
-        # Verificar que hay un File(...
-        assert "file: UploadFile = File(" in bloque, (
-            "create_payment no tiene file: UploadFile = File(...)"
+        bloque = src[idx:idx + 3500]
+        assert "not is_staff and not file" in bloque or "if not file" in bloque, (
+            "create_payment no valida comprobante obligatorio para estudiantes"
         )
 
     def test_create_payment_validacion_explicita(self, payments_src):
-        """POST /payments/: debe validar 'if not file' ANTES de validar
-        datos de transferencia/deposito. Caja no es excepcion para comprobante.
-        """
+        """POST /payments/: debe validar comprobante para estudiantes con 400."""
         src = payments_src.read_text(encoding="utf-8")
         idx = src.find('"/",')
-        # F-2026-08-11-CAMPOS-EC / F-SYNC-PAGOS-MODULOS fueron agregando
-        # parametros Form(...) y docstring a create_payment, empujando el
-        # bloque de validacion mas alla de una ventana de 2000 chars.
-        # 2800 deja margen para que el endpoint siga creciendo un poco mas.
         bloque = src[idx:idx + 2800]
-        # Debe haber un 'if not file:' que retorne 400
-        assert "if not file" in bloque, "Falta validacion 'if not file'"
-        # El mensaje debe decir que el comprobante es obligatorio
+        assert "not file" in bloque, "Falta validacion de comprobante"
         assert "obligatorio" in bloque.lower(), "Falta mensaje de error mencionando 'obligatorio'"
-        # La validacion de 'if not file' debe estar ANTES del check de Caja
-        pos_not_file = bloque.find("if not file")
-        pos_caja_check = bloque.find('if metodo_pago != "Caja"')
-        if pos_caja_check > 0:
-            assert pos_not_file < pos_caja_check, (
-                "El check 'if not file' debe estar ANTES de 'if metodo_pago != Caja' "
-                "(Caja no es excepcion para comprobante)"
-            )
 
     def test_by_staff_file_es_requerido(self, payments_src):
         """POST /payments/by-staff: file obligatorio."""
         src = payments_src.read_text(encoding="utf-8")
         idx = src.find('"/by-staff"')
-        # F-SYNC-PAGOS-MODULOS agrego pagos_modulos_json/detalle a la firma,
-        # empujando "file: UploadFile" mas alla de una ventana de 1500 chars.
-        # 1800 alcanza la firma sin llegar al 'if metodo_pago != "Caja"' del
-        # BODY (valida numero_transaccion/banco, no el file — ese check sigue
-        # existiendo legitimamente y no debe confundirse con la vieja excepcion
-        # de comprobante opcional para Caja).
         bloque = src[idx:idx + 1800]
         assert "Optional[UploadFile]" not in bloque, (
             "by-staff aun acepta file Optional"
@@ -1287,15 +1252,11 @@ class TestF026ComprobanteObligatorio:
         """POST /payments/caja-directo: debe aceptar file como parametro."""
         src = payments_src.read_text(encoding="utf-8")
         idx = src.find('"/caja-directo"')
-        # Necesitamos un rango mas grande para llegar al create_caja_directo_payment(
         bloque = src[idx:idx + 4500]
-        # El endpoint caja-directo debe tener file: UploadFile
         assert "file: UploadFile = File(" in bloque, (
             "caja-directo no acepta file obligatorio"
         )
-        # Y debe validar que no sea None
         assert "if not file" in bloque, "caja-directo no valida que file no sea vacio"
-        # Y debe pasarlo a create_caja_directo_payment
         assert "comprobante_url=comprobante_url" in bloque, (
             "caja-directo no pasa comprobante_url al service"
         )
@@ -1305,7 +1266,6 @@ class TestF026ComprobanteObligatorio:
         src = service_src.read_text(encoding="utf-8")
         idx = src.find("async def create_caja_directo_payment")
         bloque = src[idx:idx + 2000]
-        # Debe haber un if not comprobante_url: raise ValueError
         assert "comprobante_url:" in bloque, "Falta parametro comprobante_url"
         assert "if not comprobante_url" in bloque, (
             "create_caja_directo_payment no valida comprobante_url obligatorio"
@@ -1316,38 +1276,6 @@ class TestF026ComprobanteObligatorio:
         assert "obligatorio" in bloque.lower(), (
             "Mensaje de error no menciona 'obligatorio'"
         )
-
-    def test_no_pagos_sin_comprobante_para_caja(self, payments_src):
-        """REGLA: la validacion de 'if not file' debe estar ANTES de
-        'if metodo_pago != Caja' (Caja no es excepcion para comprobante).
-        PERO la validacion de numero_transaccion/banco puede seguir siendo
-        condicional a metodo_pago != Caja (esos datos solo se piden para
-        transferencia/deposito).
-        Para upload-by-encargado, FastAPI rechaza automaticamente cuando
-        file=File(...) es obligatorio, asi que no necesita validacion explicita.
-        """
-        src = payments_src.read_text(encoding="utf-8")
-
-        # En cada endpoint de pago, la posicion de 'if not file' debe ser
-        # ANTERIOR a cualquier 'if metodo_pago != Caja'.
-        endpoints = [
-            ('"/",', "create_payment (estudiante)", 2500),
-            ('"/by-staff"', "create_payment_by_staff", 5000),
-        ]
-        for marker, name, rango in endpoints:
-            idx = src.find(marker)
-            if idx < 0:
-                continue
-            bloque = src[idx:idx + rango]
-            pos_not_file = bloque.find("if not file")
-            pos_caja_check = bloque.find('if metodo_pago != "Caja"')
-            assert pos_not_file > 0, f"{name}: falla 'if not file'"
-            if pos_caja_check < 0:
-                continue
-            assert pos_not_file < pos_caja_check, (
-                f"{name}: 'if not file' debe estar ANTES de 'if metodo_pago != Caja' "
-                f"(pos_not_file={pos_not_file}, pos_caja={pos_caja_check})"
-            )
 
 
 class TestF031EnrichAceptaDicts:

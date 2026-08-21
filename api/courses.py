@@ -723,12 +723,62 @@ async def post_initial_enrollments(
             # F-HISTORICO-EXCEL-ESTADO (2026-08-04): si ya pago todo, sacar
             # del estado PENDIENTE_PAGO. La UI muestra el badge de la
             # matricula con enrollment.estado, no con matricula_pagada.
-            if (
-                enrollment.estado == EstadoInscripcion.PENDIENTE_PAGO.value
-                and enrollment.esta_completamente_pagado()
-            ):
-                enrollment.estado = EstadoInscripcion.ACTIVO.value
             await enrollment.save()
+
+            # F-PAGOS-HISTORICOS: Crear registros de Payment para auditoría y trazabilidad contable
+            from datetime import timezone
+            from models.enums import EstadoPago
+            for idx, mod in enumerate(enrollment.modulos or []):
+                if (mod.monto_pagado or 0) > 0 and (mod.estado == "Pagado" or mod.monto_pagado >= (mod.costo or 0) - 0.01):
+                    existing_pago = await Payment.find_one({
+                        "inscripcion_id": enrollment.id,
+                        "numero_cuota": idx + 1
+                    })
+                    if not existing_pago:
+                        pago_hist = Payment(
+                            inscripcion_id=enrollment.id,
+                            estudiante_id=student.id,
+                            curso_id=course.id,
+                            concepto=f"Pago Histórico Módulo {idx + 1}",
+                            detalle=f"Módulo {idx + 1} ({mod.nombre}) pagado pre-migración",
+                            numero_cuota=idx + 1,
+                            metodo_pago="Migración / Saldo Inicial",
+                            cantidad_pago=float(mod.monto_pagado),
+                            monto_comprobante=float(mod.monto_pagado),
+                            estado_pago=EstadoPago.APROBADO,
+                            verificado_por=current_user.username,
+                            fecha_verificacion=datetime.now(timezone.utc),
+                            fecha_subida=datetime.now(timezone.utc),
+                            banco="Registro Histórico UAGRM",
+                            subido_por="administrador",
+                        )
+                        pago_hist.numero_transaccion = f"HIST-M{idx+1}-{str(enrollment.id)[-6:]}"
+                        await pago_hist.insert()
+
+            if enrollment.matricula_pagada and (enrollment.costo_matricula or 0) > 0:
+                existing_mat_pago = await Payment.find_one({
+                    "inscripcion_id": enrollment.id,
+                    "concepto": "Matrícula"
+                })
+                if not existing_mat_pago:
+                    pago_mat = Payment(
+                        inscripcion_id=enrollment.id,
+                        estudiante_id=student.id,
+                        curso_id=course.id,
+                        concepto="Matrícula",
+                        detalle="Matrícula institucional pagada pre-migración",
+                        metodo_pago="Migración / Saldo Inicial",
+                        cantidad_pago=float(enrollment.costo_matricula),
+                        monto_comprobante=float(enrollment.costo_matricula),
+                        estado_pago=EstadoPago.APROBADO,
+                        verificado_por=current_user.username,
+                        fecha_verificacion=datetime.now(timezone.utc),
+                        fecha_subida=datetime.now(timezone.utc),
+                        banco="Registro Histórico UAGRM",
+                        subido_por="administrador",
+                    )
+                    pago_mat.numero_transaccion = f"HIST-MAT-{str(enrollment.id)[-6:]}"
+                    await pago_mat.insert()
 
             # F-CARGA-RACE-INSCRITOS (2026-08-18): NO tocar course/student aca.
             # Este bloque corre bajo asyncio.gather, y `course` es UN SOLO

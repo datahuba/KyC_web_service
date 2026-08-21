@@ -2225,3 +2225,124 @@ async def deshacer_finalizacion_modulo_endpoint(
     await enrollment.save()
 
     return await enrollment_service.enrich_enrollment_dates(enrollment)
+
+
+# ========================================================================
+# F-SALDO-INICIAL: Registro de Saldo Inicial / Pagos Históricos
+# ========================================================================
+class SaldoInicialRequest(BaseModel):
+    hasta_modulo_index: Optional[int] = Field(
+        None,
+        ge=0,
+        description="Índice 0-based hasta el cual marcar módulos como Pagados (ej: 2 marca módulos 1, 2 y 3)"
+    )
+    matricula_pagada: bool = Field(True, description="Si la matrícula institucional ya fue pagada pre-migración")
+    observacion: Optional[str] = Field("Saldo inicial / migración de programa en ejecución", description="Nota de auditoría")
+
+
+@router.post(
+    "/{id}/saldo-inicial",
+    response_model=EnrollmentResponse,
+    summary="[Staff] Establecer Saldo Inicial / Pagos Históricos en un enrollment",
+)
+async def establecer_saldo_inicial_endpoint(
+    *,
+    id: PydanticObjectId,
+    payload: SaldoInicialRequest,
+    current_user: User = Depends(require_staff),
+) -> Any:
+    """
+    Permite a la administración o cobranza registrar el saldo inicial de un estudiante
+    en un programa en ejecución (ej. módulos 1 a 3 ya cursados y pagados con boleta física).
+    Crea los comprobantes de Payment correspondientes con método 'Migración / Saldo Inicial'
+    y actualiza el saldo pendiente y estado del estudiante de manera inmediata y auditada.
+    """
+    from datetime import timezone
+    from models.payment import Payment
+    from models.enums import EstadoPago
+
+    enrollment = await Enrollment.get(id)
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="Inscripción no encontrada")
+
+    course = await Course.get(enrollment.curso_id)
+    if not course:
+        raise HTTPException(status_code=404, detail="Curso no encontrado")
+
+    # Marcar matrícula si corresponde
+    if payload.matricula_pagada:
+        enrollment.matricula_pagada = True
+        costo_mat = enrollment.costo_matricula or 0.0
+        if costo_mat > 0:
+            existing_mat_pago = await Payment.find_one({
+                "inscripcion_id": enrollment.id,
+                "concepto": "Matrícula"
+            })
+            if not existing_mat_pago:
+                pago_mat = Payment(
+                    inscripcion_id=enrollment.id,
+                    estudiante_id=enrollment.estudiante_id,
+                    curso_id=course.id,
+                    concepto="Matrícula",
+                    detalle="Matrícula institucional pagada pre-migración",
+                    metodo_pago="Migración / Saldo Inicial",
+                    numero_transaccion=f"HIST-MAT-{str(enrollment.id)[-6:]}",
+                    cantidad_pago=float(costo_mat),
+                    monto_comprobante=float(costo_mat),
+                    estado_pago=EstadoPago.APROBADO,
+                    verificado_por=current_user.username,
+                    fecha_verificacion=datetime.now(timezone.utc),
+                    fecha_subida=datetime.now(timezone.utc),
+                    banco="Registro Histórico UAGRM",
+                    subido_por="administrador",
+                )
+                await pago_mat.insert()
+
+    # Marcar módulos pagados
+    if payload.hasta_modulo_index is not None and enrollment.modulos:
+        limite = min(payload.hasta_modulo_index + 1, len(enrollment.modulos))
+        for idx in range(limite):
+            mod = enrollment.modulos[idx]
+            mod.monto_pagado = mod.costo or 0.0
+            if (mod.costo or 0) > 0 and mod.monto_pagado >= (mod.costo or 0) - 0.01:
+                mod.estado = "Pagado"
+            if (mod.costo or 0) > 0:
+                existing_pago = await Payment.find_one({
+                    "inscripcion_id": enrollment.id,
+                    "numero_cuota": idx + 1
+                })
+                if not existing_pago:
+                    pago_hist = Payment(
+                        inscripcion_id=enrollment.id,
+                        estudiante_id=enrollment.estudiante_id,
+                        curso_id=course.id,
+                        concepto=f"Pago Histórico Módulo {idx + 1}",
+                        detalle=f"Módulo {idx + 1} ({mod.nombre}) pagado pre-migración",
+                        numero_cuota=idx + 1,
+                        metodo_pago="Migración / Saldo Inicial",
+                        numero_transaccion=f"HIST-M{idx+1}-{str(enrollment.id)[-6:]}",
+                        cantidad_pago=float(mod.monto_pagado),
+                        monto_comprobante=float(mod.monto_pagado),
+                        estado_pago=EstadoPago.APROBADO,
+                        verificado_por=current_user.username,
+                        fecha_verificacion=datetime.now(timezone.utc),
+                        fecha_subida=datetime.now(timezone.utc),
+                        banco="Registro Histórico UAGRM",
+                        subido_por="administrador",
+                    )
+                    await pago_hist.insert()
+
+    # Recalcular saldos
+    total_de_modulos = sum((m.monto_pagado or 0.0) for m in (enrollment.modulos or []))
+    total_matricula = (enrollment.costo_matricula or 0.0) if enrollment.matricula_pagada else 0.0
+    enrollment.total_pagado = round(total_de_modulos + total_matricula, 2)
+    enrollment.saldo_pendiente = round(max(0.0, (enrollment.total_a_pagar or 0.0) - enrollment.total_pagado), 2)
+
+    if enrollment.esta_completamente_pagado():
+        enrollment.estado = EstadoInscripcion.ACTIVO.value
+    elif enrollment.matricula_pagada and enrollment.estado == EstadoInscripcion.PENDIENTE_PAGO.value:
+        enrollment.estado = EstadoInscripcion.ACTIVO.value
+
+    await enrollment.save()
+    return await enrollment_service.enrich_enrollment_dates(enrollment)
+
