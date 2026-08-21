@@ -90,7 +90,7 @@ class TestArancel:
 
     def test_solo_las_solicitudes_de_no_deudor_llevan_monto(self):
         src = _fuente("services/certificate_request_service.py")
-        assert "if data.tipo == TipoCertificado.NO_DEUDOR else None" in src
+        assert "monto = _ARANCELES.get(data.tipo)" in src
 
     def test_hay_campo_para_el_comprobante_de_pago(self):
         from models.certificate_request import CertificateRequest

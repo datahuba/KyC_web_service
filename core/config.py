@@ -123,6 +123,18 @@ class Settings(BaseSettings):
     # tocar codigo ni redeployar la imagen.
     MONTO_CERTIFICADO_NO_DEUDOR: float = Field(default=150.0, env="MONTO_CERTIFICADO_NO_DEUDOR")
 
+    # F-TARIFARIO-OFICIAL (Kevin 2026-08-21): aranceles de los nuevos tipos
+    # de certificado. Fuente: nota manuscrita de la reunión del 25/02/2026.
+    #
+    # NOTAS = Bs 100 (componente avance académico del paquete compuesto).
+    # El paquete completo "Certificado de Notas" que el estudiante paga es
+    # Bs 150 (= Bs 50 certificado + Bs 100 avance académico), pero eso lo
+    # define la suma de conceptos, no una sola variable.
+    MONTO_CERTIFICADO_NOTAS: float = Field(default=100.0, env="MONTO_CERTIFICADO_NOTAS")
+
+    # ALUMNO_REGULAR = Bs 50 (certificado suelto, mismo formato que No Deudor).
+    MONTO_CERTIFICADO_ALUMNO_REGULAR: float = Field(default=50.0, env="MONTO_CERTIFICADO_ALUMNO_REGULAR")
+
     # F-CORREOS-REGISTRO (Kevin 2026-08-17): control de cupo diario de correo.
     #
     # Brevo en el plan gratis admite 300/dia, y solo los estudiantes ya son

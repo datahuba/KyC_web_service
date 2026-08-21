@@ -27,12 +27,12 @@ class CertificateEmitRequest(BaseModel):
     - Para 'notas': solo se envía `tipo` y `enrollment_id`.
     - Para 'no_deudor': se envía también `hasta_modulo_n` (1..N).
     """
-    tipo: TipoCertificado = Field(..., description="Tipo de certificado: 'notas' o 'no_deudor'")
+    tipo: TipoCertificado = Field(..., description="Tipo de certificado: 'notas', 'no_deudor' o 'alumno_regular'")
     enrollment_id: str = Field(..., description="ID de la inscripción para la cual se emite el certificado")
     hasta_modulo_n: Optional[int] = Field(
         default=None,
         ge=1,
-        description="Solo para 'no_deudor': hasta qué módulo cubre (1..N). Ignorado para 'notas'.",
+        description="Solo para 'no_deudor': hasta qué módulo cubre (1..N). Ignorado para 'notas' y 'alumno_regular'.",
     )
 
     @field_validator("enrollment_id")

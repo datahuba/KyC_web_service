@@ -68,7 +68,7 @@ def puede_aprobar_solicitud_cert(
     Devuelve True si el usuario puede APROBAR/RECHAZAR/REVISAR solicitudes
     de certificado del programa course_id.
 
-    Certificado de NOTAS (regla original, Kevin 2026-07-30):
+    Certificado de NOTAS y ALUMNO_REGULAR (Kevin 2026-07-30 / 2026-08-21):
     - ADMIN, SUPERADMIN: pueden aprobar CUALQUIER solicitud (backup)
     - ENCARGADO_CURSO: solo si course_id está en sus cursos_asignados
     - CPD, COORDINADOR, MAE, COBRANZA: NO pueden aprobar
@@ -93,6 +93,7 @@ def puede_aprobar_solicitud_cert(
             return True
         return es_coordinador_financiero(user)
 
+    # NOTAS, ALUMNO_REGULAR y cualquier tipo futuro: admin/superadmin/encargado
     if user.rol in (UserRole.ADMIN, UserRole.SUPERADMIN):
         return True
     if user.rol == UserRole.ENCARGADO_CURSO:
@@ -260,16 +261,16 @@ async def crear_solicitud(
     if not course:
         raise HTTPException(status_code=404, detail="Curso del enrollment no encontrado.")
 
-    # 3. Si es no_deudor, validar hasta_modulo_n
+    # 3. Validar hasta_modulo_n según tipo
     if data.tipo == TipoCertificado.NO_DEUDOR and data.hasta_modulo_n is None:
         raise HTTPException(
             status_code=422,
             detail="Para 'no_deudor' debes indicar 'hasta_modulo_n' (1..N).",
         )
-    if data.tipo == TipoCertificado.NOTAS and data.hasta_modulo_n is not None:
+    if data.tipo in (TipoCertificado.NOTAS, TipoCertificado.ALUMNO_REGULAR) and data.hasta_modulo_n is not None:
         raise HTTPException(
             status_code=422,
-            detail="Para 'notas' NO se debe enviar 'hasta_modulo_n'.",
+            detail=f"Para '{data.tipo}' NO se debe enviar 'hasta_modulo_n'.",
         )
 
     # 4. Verificar que no haya solicitud ACTIVA para el mismo (enrollment, tipo, hasta_modulo_n)
@@ -294,29 +295,33 @@ async def crear_solicitud(
 
     # 5. Crear la solicitud
     #
-    # F-CERT-NO-DEUDOR-COBRO (2026-08-17): el arancel se guarda como SNAPSHOT
+    # F-TARIFARIO-OFICIAL (2026-08-21): el arancel se guarda como SNAPSHOT
     # en la solicitud, no se lee de config al momento de cobrar. Si Kevin
-    # cambia el monto (hoy Bs 150, provisorio), las solicitudes ya creadas
-    # conservan el que se le informó al estudiante cuando la hizo.
-    monto = settings.MONTO_CERTIFICADO_NO_DEUDOR if data.tipo == TipoCertificado.NO_DEUDOR else None
+    # cambia el monto, las solicitudes ya creadas conservan el que se le
+    # informó al estudiante cuando la hizo.
+    _ARANCELES = {
+        TipoCertificado.NO_DEUDOR: settings.MONTO_CERTIFICADO_NO_DEUDOR,
+        TipoCertificado.NOTAS: settings.MONTO_CERTIFICADO_NOTAS,
+        TipoCertificado.ALUMNO_REGULAR: settings.MONTO_CERTIFICADO_ALUMNO_REGULAR,
+    }
+    monto = _ARANCELES.get(data.tipo)
 
-    # F-CERT-COMPROBANTE-OBLIGATORIO (2026-08-18, Kevin): sin comprobante no
-    # se envia la solicitud. Textual: "hay que solicitar obviamente el
-    # comprobante al estudiante. Una vez sube el comprobante, recien se pueda
-    # dejar enviar la solicitud".
+    # F-CERT-COMPROBANTE-OBLIGATORIO (2026-08-18 + 2026-08-21): sin comprobante
+    # no se envía la solicitud. Aplica a TODOS los tipos con arancel > 0.
     #
-    # Se bloquea el ENVIO y no la aprobacion a proposito. Bloquear la
-    # aprobacion dejaba sin camino al cobro en ventanilla: el estudiante paga
-    # en caja, no tiene comprobante digital, y el coordinador no podia aprobar
-    # aunque le constara el pago. Exigirlo al enviar no tiene ese problema:
-    # el alumno le saca una foto a su recibo de caja igual.
-    #
-    # Solo aplica a 'no_deudor', el unico tipo con arancel.
-    if data.tipo == TipoCertificado.NO_DEUDOR and not (data.comprobante_url or "").strip():
+    # Se bloquea el ENVÍO y no la aprobación a propósito: el estudiante paga
+    # en caja, le saca foto al recibo, y sube la foto al solicitar.
+    if monto and monto > 0 and not (data.comprobante_url or "").strip():
+        _NOMBRES_TIPO = {
+            TipoCertificado.NO_DEUDOR: "Certificado de No Deudor",
+            TipoCertificado.NOTAS: "Certificado de Notas",
+            TipoCertificado.ALUMNO_REGULAR: "Certificado de Alumno Regular",
+        }
+        nombre_tipo = _NOMBRES_TIPO.get(data.tipo, str(data.tipo))
         raise HTTPException(
             status_code=422,
             detail=(
-                f"Para solicitar el Certificado de No Deudor tenes que adjuntar "
+                f"Para solicitar el {nombre_tipo} tenes que adjuntar "
                 f"el comprobante del pago del arancel (Bs {monto:g}). Si pagaste "
                 f"en caja, sirve una foto del recibo."
             ),
@@ -546,6 +551,12 @@ async def aprobar_solicitud(
             cert = await certificate_service.emitir_certificado_notas(
                 enrollment_id=str(req.enrollment_id),
                 current_user=current_user,
+            )
+        elif req.tipo == TipoCertificado.ALUMNO_REGULAR:
+            cert = await certificate_service.emitir_certificado_alumno_regular(
+                enrollment_id=str(req.enrollment_id),
+                current_user=current_user,
+                tratamiento=req.tratamiento,
             )
         else:  # no_deudor
             cert = await certificate_service.emitir_certificado_no_deudor(

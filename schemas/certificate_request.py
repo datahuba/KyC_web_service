@@ -22,27 +22,20 @@ class CertificateRequestCreate(BaseModel):
     El estudiante autenticado pide emisión de su certificado. La solicitud
     queda en estado 'pendiente' hasta que el encargado del programa la apruebe.
     """
-    tipo: str = Field(..., description="TipoCertificado: 'notas' | 'no_deudor'")
+    tipo: str = Field(..., description="TipoCertificado: 'notas' | 'no_deudor' | 'alumno_regular'")
     enrollment_id: str = Field(..., description="ID de la inscripción para la cual se solicita el certificado")
     hasta_modulo_n: Optional[int] = Field(
         default=None, ge=1,
-        description="Solo 'no_deudor': hasta qué módulo cubre (1..N). Ignorado para 'notas'.",
+        description="Solo 'no_deudor': hasta qué módulo cubre (1..N). Ignorado para 'notas' y 'alumno_regular'.",
     )
     motivo: str = Field(
         ..., min_length=5, max_length=2000,
         description="Motivo o comentario del estudiante (mín 5 caracteres)",
     )
 
-    # F-CERT-COMPROBANTE-OBLIGATORIO (2026-08-18, Kevin): "hay que solicitar
-    # obviamente el comprobante al estudiante. Una vez sube el comprobante,
-    # recien se pueda dejar enviar la solicitud".
-    #
-    # Solo se exige para 'no_deudor', que es el unico tipo con arancel
-    # (MONTO_CERTIFICADO_NO_DEUDOR). Para 'notas' no hay nada que pagar.
-    # La validacion vive en crear_solicitud(), que es donde se conoce el tipo.
     comprobante_url: Optional[str] = Field(
         default=None,
-        description="URL del comprobante de pago del arancel. Obligatorio para 'no_deudor'.",
+        description="URL del comprobante de pago del arancel. Obligatorio para todos los tipos con arancel > 0.",
     )
 
     @field_validator("enrollment_id")
@@ -60,8 +53,8 @@ class CertificateRequestCreate(BaseModel):
     @classmethod
     def validar_tipo(cls, v: str) -> str:
         v = v.strip().lower()
-        if v not in {"notas", "no_deudor"}:
-            raise ValueError("tipo debe ser 'notas' o 'no_deudor'")
+        if v not in {"notas", "no_deudor", "alumno_regular"}:
+            raise ValueError("tipo debe ser 'notas', 'no_deudor' o 'alumno_regular'")
         return v
 
 

@@ -72,9 +72,9 @@ class TestSeExigeAlEnviarNoAlAprobar:
         assert "TipoCertificado.NO_DEUDOR" in bloque
 
     def test_solo_se_exige_para_no_deudor(self):
-        """El certificado de notas no tiene arancel: no debe pedir nada."""
+        """Los tipos con arancel > 0 exigen comprobante al enviar."""
         bloque = _crear_solicitud_sin_comentarios()
-        assert "data.tipo == TipoCertificado.NO_DEUDOR and not" in bloque
+        assert "if monto and monto > 0 and not (data.comprobante_url or \"\").strip():" in bloque
 
     def test_el_comprobante_queda_guardado_en_la_solicitud(self):
         """

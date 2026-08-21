@@ -125,15 +125,17 @@ class TipoTitulo(str, Enum):
 
 # F-CERTIFICADOS (2026-07-29): tipos de certificado que la Unidad de Postgrado
 # emite a los estudiantes a través de KYC DataHub.
-# - NOTAS: constancia de calificaciones módulo por módulo. Solo se emite una
-#   vez al finalizar el programa (todos los módulos con nota válida y saldo
-#   cero).
+# - NOTAS: paquete compuesto (Avance Académico + No Deudor + Boleta de
+#   Matrícula) emitido al finalizar o avanzar en el programa. Bs 150.
 # - NO_DEUDOR: constancia de que el estudiante no tiene deuda pendiente
-#   hasta un módulo N específico. Se puede emitir múltiples veces a lo
-#   largo del programa.
+#   hasta un módulo N específico. Se puede emitir múltiples veces. Bs 150.
+# - ALUMNO_REGULAR (2026-08-21): constancia de que el estudiante es alumno
+#   regular del programa. Mismo formato que No Deudor pero con texto
+#   diferente. Bs 50.
 class TipoCertificado(str, Enum):
     NOTAS = "notas"
     NO_DEUDOR = "no_deudor"
+    ALUMNO_REGULAR = "alumno_regular"
 
 
 class Sexo(str, Enum):

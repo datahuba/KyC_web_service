@@ -1007,6 +1007,437 @@ def render_pdf_no_deudor_membretado(
 
 
 # ========================================================================
+# PDF: render del Certificado de Alumno Regular
+# ========================================================================
+
+def render_pdf_alumno_regular(
+    *,
+    student: Student,
+    course: Course,
+    enrollment: Enrollment,
+    folio: str,
+    emitido_en: datetime,
+) -> bytes:
+    """
+    Genera el PDF del Certificado de Alumno Regular (formato estándar A4).
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+
+    styles = _make_pdf_styles()
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        leftMargin=20 * mm,
+        rightMargin=20 * mm,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm,
+        title=f"Certificado de Alumno Regular - {student.nombre or ''}",
+    )
+
+    elements = []
+    ancho_util_a4 = 170 * mm
+    elements.append(_header_table(folio, styles, ancho_total=ancho_util_a4))
+    elements.append(_linea_horizontal(ancho_util_a4))
+    elements.append(Spacer(1, 6 * mm))
+
+    elements.append(Paragraph("CERTIFICADO DE ALUMNO REGULAR", styles["titulo_doc"]))
+
+    elements.append(Paragraph(
+        f"La Unidad de Postgrado de la {UAGRM_FACULTAD} de la {UAGRM_UNIVERSIDAD}.",
+        styles["cuerpo"],
+    ))
+
+    elements.append(Paragraph("CERTIFICA:", styles["certifica_label"]))
+
+    ci_full = _format_ci_full(student.carnet, student.extension, student.complemento_carnet)
+    elements.append(Paragraph("Que el o la postgraduante:", styles["cuerpo"]))
+    elements.append(Paragraph(
+        f"<b>{(student.nombre or '').upper()}</b><br/>"
+        f"CI. {ci_full} | Registro: {student.registro or '—'}",
+        styles["cuerpo_centrado"],
+    ))
+
+    nombre_programa = re.sub(r"\s+", " ", (course.nombre_programa or "").strip()).upper()
+    partes_programa = [nombre_programa]
+    if course.codigo:
+        partes_programa.append(f"CÓDIGO {course.codigo}")
+
+    elements.append(Paragraph("Se encuentra debidamente inscrito/a y es <b>ALUMNO(A) REGULAR</b> del programa:", styles["cuerpo"]))
+    elements.append(Paragraph(" ".join(partes_programa), styles["caja_programa"]))
+    elements.append(Spacer(1, 4 * mm))
+
+    elements.append(Paragraph(
+        "Se extiende el presente certificado a solicitud del interesado/a para los fines legales y administrativos que convengan.",
+        styles["cuerpo"],
+    ))
+
+    elements.append(Spacer(1, 4 * mm))
+    elements.append(Paragraph(
+        f"{UAGRM_CIUDAD}, {_format_fecha_larga_es(emitido_en)}.",
+        styles["cuerpo"],
+    ))
+
+    elements.append(Spacer(1, 10 * mm))
+    elements.append(_seccion_firmas(styles, ancho_columna=85 * mm))
+    elements.append(Spacer(1, 8 * mm))
+    elements.append(_footer(styles))
+
+    doc.build(elements)
+    return buf.getvalue()
+
+
+def render_pdf_alumno_regular_membretado(
+    *,
+    student: Student,
+    course: Course,
+    enrollment: Enrollment,
+    folio: str,
+    emitido_en: datetime,
+    tratamiento: Optional[str] = None,
+    formato: str = MEMBRETE_FORMATO_DEFAULT,
+) -> bytes:
+    """
+    Certificado de Alumno Regular sobre la hoja membretada de la Unidad.
+    Mismo diseño visual que el de No Deudor pero indicando la condición de alumno regular.
+    """
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+
+    layout = MEMBRETE_LAYOUT[(formato or MEMBRETE_FORMATO_DEFAULT).upper()]
+    styles = _make_pdf_styles()
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=(layout["ancho_pt"], layout["alto_pt"]),
+        leftMargin=MEMBRETE_MARGEN_LATERAL_MM * mm,
+        rightMargin=MEMBRETE_MARGEN_LATERAL_MM * mm,
+        topMargin=layout["top_mm"] * mm,
+        bottomMargin=layout["bottom_mm"] * mm,
+        title=f"Certificado de Alumno Regular - {student.nombre or ''}",
+    )
+
+    elements = []
+    elements.append(Paragraph(folio, styles["folio"]))
+    elements.append(Spacer(1, 4 * mm))
+
+    elements.append(Paragraph("CERTIFICADO DE ALUMNO REGULAR", styles["titulo_doc"]))
+
+    elements.append(Paragraph(
+        f"La Unidad de Postgrado de la {UAGRM_FACULTAD} de la {UAGRM_UNIVERSIDAD}.",
+        styles["cuerpo"],
+    ))
+
+    elements.append(Paragraph("CERTIFICA:", styles["certifica_label"]))
+
+    ci_full = _format_ci_full(student.carnet, student.extension, student.complemento_carnet)
+
+    elements.append(Paragraph("Que el o la postgraduante:", styles["cuerpo"]))
+    elements.append(Paragraph(
+        f"<b>{_nombre_con_tratamiento(student.nombre or '', tratamiento)}</b><br/>"
+        f"CI. {ci_full} | Reg. Univ.: {student.registro or '—'}",
+        styles["cuerpo_centrado"],
+    ))
+
+    nombre_programa = re.sub(r"\s+", " ", (course.nombre_programa or "").strip()).upper()
+    partes_programa = [nombre_programa]
+    if course.codigo:
+        partes_programa.append(f"CÓDIGO {course.codigo}")
+
+    elements.append(Paragraph("Se encuentra cursando activamente y es <b>ALUMNO(A) REGULAR</b> del programa:", styles["cuerpo"]))
+    elements.append(Paragraph(" ".join(partes_programa), styles["caja_programa"]))
+    elements.append(Spacer(1, 4 * mm))
+
+    elements.append(Paragraph(
+        "<b>ES ALUMNO REGULAR</b> de la Unidad de Postgrado, encontrándose al día en sus actividades académicas.",
+        styles["no_deudor_enfasis"],
+    ))
+
+    elements.append(Paragraph(
+        f"{UAGRM_CIUDAD}, {_format_fecha_larga_es(emitido_en)}.",
+        styles["cuerpo"],
+    ))
+
+    elements.append(Spacer(1, 10 * mm))
+    ancho_util = layout["ancho_pt"] - 2 * MEMBRETE_MARGEN_LATERAL_MM * mm
+    elements.append(_seccion_firmas(styles, ancho_columna=ancho_util / 2))
+
+    doc.build(elements)
+    return _componer_sobre_membrete(buf.getvalue(), formato=formato)
+
+
+# ========================================================================
+# PDF: render del Borrador de Avance Académico (Página 1 del paquete Notas)
+# ========================================================================
+
+def render_pdf_avance_academico(
+    *,
+    student: Student,
+    course: Course,
+    enrollment: Enrollment,
+    emitido_en: datetime,
+) -> bytes:
+    """
+    Genera la página 1: Borrador de Avance Académico estilo SIF UAGRM.
+    Calcula el PPAC (Promedio Ponderado Acumulado por Carrera).
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib import colors
+
+    styles = _make_pdf_styles()
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        leftMargin=15 * mm,
+        rightMargin=15 * mm,
+        topMargin=15 * mm,
+        bottomMargin=15 * mm,
+        title=f"Avance Académico - {student.nombre or ''}",
+    )
+
+    elements = []
+
+    # Encabezado SIF
+    header_data = [
+        [
+            Paragraph("<b>U.A.G.R.M.<br/>S.I.F.<br/>SANTA CRUZ</b>", styles["cuerpo"]),
+            Paragraph("<b>* AVANCE ACADEMICO *<br/>VALIDEZ INSTITUCIONAL</b>", styles["titulo_doc"]),
+            Paragraph(f"<b>Pag. : 1</b><br/>Fecha:{emitido_en.strftime('%d/%b/%Y')}<br/>Hora :{emitido_en.strftime('%H:%M')}", styles["folio"]),
+        ]
+    ]
+    t_header = Table(header_data, colWidths=[45 * mm, 90 * mm, 45 * mm])
+    t_header.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ALIGN", (1, 0), (1, 0), "CENTER"),
+        ("ALIGN", (2, 0), (2, 0), "RIGHT"),
+    ]))
+    elements.append(t_header)
+    elements.append(_linea_horizontal(180 * mm))
+    elements.append(Spacer(1, 3 * mm))
+
+    # Cálculo de PPAC
+    notas_validas = [m.nota for m in enrollment.modulos if m.nota is not None]
+    ppac_val = round(sum(notas_validas) / len(notas_validas)) if notas_validas else 0
+
+    info_estudiante = (
+        f"<b>Registro:</b>{student.registro or '—'} &nbsp;&nbsp;&nbsp;&nbsp; "
+        f"<b>Nombre:</b>{(student.nombre or '').upper()}<br/>"
+        f"<b>Programa:</b>{course.codigo or '—'} {course.nombre_programa or ''}<br/>"
+        f"<b>Promedio Ponderado Acumulado por Carrera (PPAC):</b> <font color='#8a1f2f'><b>{ppac_val}</b></font> &nbsp;&nbsp;&nbsp;&nbsp; "
+        f"<b>Estado:</b> MATRICULADO"
+    )
+    elements.append(Paragraph(info_estudiante, styles["cuerpo"]))
+    elements.append(Spacer(1, 3 * mm))
+
+    # Tabla de Materias/Módulos
+    headers = ["Nivel", "Sigla", "Nombre de la Materia / Módulo", "Nota", "P.Cur", "Tipo", "CR", "OK", "Prerequisitos"]
+    rows = [[Paragraph(f"<b>{h}</b>", styles["cuerpo_centrado"]) for h in headers]]
+
+    for i, m in enumerate(enrollment.modulos, start=1):
+        nota_str = str(int(m.nota)) if m.nota is not None else "—"
+        sigla_dummy = f"MOD{i:03d}"
+        rows.append([
+            Paragraph(f"1( {i} )", styles["cuerpo_centrado"]),
+            Paragraph(sigla_dummy, styles["cuerpo_centrado"]),
+            Paragraph((m.nombre or "—").upper(), styles["cuerpo"]),
+            Paragraph(nota_str, styles["cuerpo_centrado"]),
+            Paragraph("5", styles["cuerpo_centrado"]),
+            Paragraph("O", styles["cuerpo_centrado"]),
+            Paragraph("4", styles["cuerpo_centrado"]),
+            Paragraph("✓" if m.nota and m.nota >= 64 else "—", styles["cuerpo_centrado"]),
+            Paragraph("—", styles["cuerpo_centrado"]),
+        ])
+
+    t_modulos = Table(
+        rows,
+        colWidths=[16 * mm, 20 * mm, 75 * mm, 14 * mm, 12 * mm, 12 * mm, 10 * mm, 10 * mm, 21 * mm],
+    )
+    t_modulos.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#023273")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#dddddd")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    elements.append(t_modulos)
+    elements.append(Spacer(1, 4 * mm))
+
+    # Resumen NSA
+    aprobados_cnt = sum(1 for m in enrollment.modulos if m.nota and m.nota >= 64)
+    resumen_text = (
+        f"<b>Resumen de materias aprobadas:</b> Nivel: 1 | Tipo: O (Obligatoria) | #Aprobadas: {aprobados_cnt} / {len(enrollment.modulos)}"
+    )
+    elements.append(Paragraph(resumen_text, styles["cuerpo"]))
+    elements.append(Spacer(1, 6 * mm))
+    elements.append(_seccion_firmas(styles, ancho_columna=85 * mm))
+
+    doc.build(elements)
+    return buf.getvalue()
+
+
+# ========================================================================
+# PDF: render del Duplicado Boleta de Matrícula (Página 3 del paquete Notas)
+# ========================================================================
+
+def render_pdf_boleta_matricula(
+    *,
+    student: Student,
+    course: Course,
+    enrollment: Enrollment,
+    emitido_en: datetime,
+) -> bytes:
+    """
+    Genera la página 3: Duplicado Boleta de Matrícula del Estudiante.
+    Replica el formato oficial del SIF UAGRM.
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib import colors
+
+    styles = _make_pdf_styles()
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        leftMargin=20 * mm,
+        rightMargin=20 * mm,
+        topMargin=20 * mm,
+        bottomMargin=20 * mm,
+        title=f"Boleta de Matrícula - {student.nombre or ''}",
+    )
+
+    elements = []
+
+    # Encabezado
+    elements.append(Paragraph("<b>UNIVERSIDAD AUTONOMA GABRIEL RENE MORENO</b>", styles["uagrm_header_top"]))
+    elements.append(Paragraph(f"<b>{UAGRM_FACULTAD}</b>", styles["uagrm_header_sub"]))
+    elements.append(Paragraph("<b>DUPLICADO BOLETA DE MATRICULA DEL ESTUDIANTE</b>", styles["titulo_doc"]))
+    elements.append(_linea_horizontal(170 * mm))
+    elements.append(Spacer(1, 6 * mm))
+
+    # Desglose de datos estilo boleta SIF
+    ci_full = _format_ci_full(student.carnet, student.extension, student.complemento_carnet)
+    monto_mat = enrollment.costo_matricula
+    monto_mod = enrollment.costo_total - enrollment.costo_matricula
+    desc = enrollment.descuento_curso_aplicado + (enrollment.descuento_personalizado or 0.0)
+
+    rows_boleta = [
+        [Paragraph("<b>Estudiante</b>", styles["cuerpo"]), Paragraph(f": {(student.nombre or '').upper()}", styles["cuerpo"])],
+        [Paragraph("<b>Número C.I.</b>", styles["cuerpo"]), Paragraph(f": {ci_full}", styles["cuerpo"])],
+        [Paragraph("<b>#Registro</b>", styles["cuerpo"]), Paragraph(f": {student.registro or '—'}", styles["cuerpo"])],
+        [Paragraph("<b>Programa</b>", styles["cuerpo"]), Paragraph(f": {course.codigo or '1479'} {course.nombre_programa or ''}", styles["cuerpo"])],
+        [Paragraph("<b>Versión</b>", styles["cuerpo"]), Paragraph(f": 1/{emitido_en.year}", styles["cuerpo"])],
+        [Paragraph("<b>Importe Matrícula</b>", styles["cuerpo"]), Paragraph(f": {monto_mat:.2f} Bs.", styles["cuerpo"])],
+        [Paragraph("<b>Código de Caja Matrícula</b>", styles["cuerpo"]), Paragraph(f": 1479 {course.nombre_programa or 'POSTGRADO'}", styles["cuerpo"])],
+        [Paragraph("<b>Importe Módulos</b>", styles["cuerpo"]), Paragraph(f": {monto_mod:.2f} Bs.", styles["cuerpo"])],
+        [Paragraph("<b>Código de Caja Módulos</b>", styles["cuerpo"]), Paragraph(f": 1479 {course.nombre_programa or 'POSTGRADO'}", styles["cuerpo"])],
+        [Paragraph("<b>Descuento Aplicado</b>", styles["cuerpo"]), Paragraph(f": {desc:.2f}%", styles["cuerpo"])],
+        [Paragraph("<b>Total a Cancelar</b>", styles["cuerpo"]), Paragraph(f": <b>{enrollment.total_a_pagar:.2f} Bs.</b>", styles["cuerpo"])],
+        [Paragraph("<b>Total Pagado</b>", styles["cuerpo"]), Paragraph(f": {enrollment.total_pagado:.2f} Bs.", styles["cuerpo"])],
+        [Paragraph("<b>Saldo Pendiente</b>", styles["cuerpo"]), Paragraph(f": {enrollment.saldo_pendiente:.2f} Bs.", styles["cuerpo"])],
+        [Paragraph("<b>Observación</b>", styles["cuerpo"]), Paragraph(": EMISIÓN OFICIAL DE BOLETA DIGITAL KYC DATAHUB", styles["cuerpo"])],
+    ]
+
+    t_boleta = Table(rows_boleta, colWidths=[55 * mm, 115 * mm])
+    t_boleta.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.HexColor("#f0f0f0")),
+    ]))
+    elements.append(t_boleta)
+
+    elements.append(Spacer(1, 8 * mm))
+    elements.append(Paragraph(f"{UAGRM_CIUDAD}, {_format_fecha_larga_es(emitido_en)}.", styles["cuerpo"]))
+    elements.append(Spacer(1, 10 * mm))
+    elements.append(_seccion_firmas(styles, ancho_columna=85 * mm))
+
+    doc.build(elements)
+    return buf.getvalue()
+
+
+# ========================================================================
+# PDF COMPUESTO: Certificado de Notas de 3 Páginas
+# ========================================================================
+
+def render_pdf_notas_compuesto(
+    *,
+    student: Student,
+    course: Course,
+    enrollment: Enrollment,
+    folio: str,
+    emitido_en: datetime,
+    tratamiento: Optional[str] = None,
+    formato_membrete: str = MEMBRETE_FORMATO_DEFAULT,
+) -> bytes:
+    """
+    F-TARIFARIO-OFICIAL (2026-08-21, Kevin):
+    El "Certificado de Notas" es un paquete compuesto de 3 páginas (Bs 150):
+      - Página 1: Avance Académico (estilo SIF con PPAC).
+      - Página 2: Certificado de No Deudor (sobre hoja membretada CARTA/OFICIO).
+      - Página 3: Duplicado Boleta de Matrícula del Estudiante.
+    """
+    from pypdf import PdfReader, PdfWriter
+
+    # Generar las 3 partes
+    pag1_bytes = render_pdf_avance_academico(
+        student=student,
+        course=course,
+        enrollment=enrollment,
+        emitido_en=emitido_en,
+    )
+
+    if hay_membrete(formato_membrete):
+        pag2_bytes = render_pdf_no_deudor_membretado(
+            student=student,
+            course=course,
+            enrollment=enrollment,
+            hasta_modulo_n=len(enrollment.modulos),
+            folio=folio,
+            emitido_en=emitido_en,
+            tratamiento=tratamiento,
+            formato=formato_membrete,
+        )
+    else:
+        pag2_bytes = render_pdf_no_deudor(
+            student=student,
+            course=course,
+            enrollment=enrollment,
+            hasta_modulo_n=len(enrollment.modulos),
+            folio=folio,
+            emitido_en=emitido_en,
+        )
+
+    pag3_bytes = render_pdf_boleta_matricula(
+        student=student,
+        course=course,
+        enrollment=enrollment,
+        emitido_en=emitido_en,
+    )
+
+    writer = PdfWriter()
+    for b in [pag1_bytes, pag2_bytes, pag3_bytes]:
+        reader = PdfReader(io.BytesIO(b))
+        for page in reader.pages:
+            writer.add_page(page)
+
+    salida = io.BytesIO()
+    writer.write(salida)
+    return salida.getvalue()
+
+
+# ========================================================================
 # CLOUDINARY: subir PDF
 # ========================================================================
 
@@ -1266,8 +1697,8 @@ async def emitir_certificado_notas(
             fecha_fin=getattr(m, "fecha_fin", None),
         ))
 
-    # Generar PDF
-    pdf_bytes = render_pdf_notas(
+    # Generar PDF Compuesto (3 páginas: Avance + No Deudor sobre membrete + Boleta)
+    pdf_bytes = render_pdf_notas_compuesto(
         student=student,
         course=course,
         enrollment=enrollment,
@@ -1306,6 +1737,92 @@ async def emitir_certificado_notas(
         emitido_en=emitido_en,
         emitido_por=str(getattr(current_user, "registro", "") or getattr(current_user, "username", "")),
         verificacion_code=verificacion_code,
+        pdf_url=pdf_url,
+        pdf_filename=pdf_filename,
+    )
+    await cert.insert()
+    return cert
+
+
+async def emitir_certificado_alumno_regular(
+    enrollment_id: str,
+    current_user,
+    tratamiento: Optional[str] = None,
+    formato_membrete: str = MEMBRETE_FORMATO_DEFAULT,
+) -> Certificate:
+    """
+    Emite un Certificado de Alumno Regular. Valida que la inscripción esté activa,
+    genera PDF, sube a Cloudinary y persiste el Certificate.
+    """
+    student, course, enrollment = await _obtener_curso_estudiante_enrollment(
+        enrollment_id, current_user
+    )
+
+    anio = datetime.now(timezone.utc).year
+    numero = await next_correlativo(anio)
+    folio = _format_folio(numero, anio)
+    emitido_en = datetime.now(timezone.utc)
+
+    modulos_snapshot: List[ModuloCertificado] = []
+    for m in enrollment.modulos:
+        modulos_snapshot.append(ModuloCertificado(
+            nombre=m.nombre,
+            nota=int(m.nota) if m.nota is not None else None,
+            literal=None,
+            estado=m.estado_academico,
+            fecha_inicio=getattr(m, "fecha_inicio", None),
+            fecha_fin=getattr(m, "fecha_fin", None),
+        ))
+
+    usar_membrete = hay_membrete(formato_membrete)
+    if usar_membrete:
+        pdf_bytes = render_pdf_alumno_regular_membretado(
+            student=student,
+            course=course,
+            enrollment=enrollment,
+            folio=folio,
+            emitido_en=emitido_en,
+            tratamiento=tratamiento,
+            formato=formato_membrete,
+        )
+    else:
+        pdf_bytes = render_pdf_alumno_regular(
+            student=student,
+            course=course,
+            enrollment=enrollment,
+            folio=folio,
+            emitido_en=emitido_en,
+        )
+
+    slug = _slug_nombre(student.nombre or student.registro or "estudiante")
+    public_id = f"cert_alumnoregular_{numero:03d}_{anio}_{slug}"
+    pdf_filename = f"certificado_alumno_regular_N{numero:03d}_{anio}_{slug}.pdf"
+    pdf_url = await _subir_pdf_a_cloudinary(pdf_bytes, public_id=public_id)
+    verificacion_code = uuid.uuid4().hex[:12]
+
+    cert = Certificate(
+        tipo=TipoCertificado.ALUMNO_REGULAR,
+        numero=numero,
+        anio=anio,
+        student_id=student.id,
+        course_id=course.id,
+        enrollment_id=enrollment.id,
+        modulos_snapshot=modulos_snapshot,
+        hasta_modulo_n=None,
+        programa_nombre=course.nombre_programa or "",
+        programa_codigo=course.codigo or "",
+        programa_version="",
+        programa_edicion="",
+        estudiante_nombre=(student.nombre or "").upper(),
+        estudiante_registro=student.registro or "",
+        estudiante_ci=student.carnet or "",
+        estudiante_extension=student.extension,
+        estudiante_complemento=student.complemento_carnet,
+        emitido_en=emitido_en,
+        emitido_por=str(getattr(current_user, "registro", "") or getattr(current_user, "username", "")),
+        verificacion_code=verificacion_code,
+        tratamiento=tratamiento,
+        membrete=(formato_membrete.upper() if usar_membrete else None),
         pdf_url=pdf_url,
         pdf_filename=pdf_filename,
     )
@@ -1460,7 +1977,27 @@ async def descargar_pdf_bytes(cert: Certificate) -> bytes:
         emitido_en = cert.emitido_en
 
         if cert.tipo == TipoCertificado.NOTAS:
-            return render_pdf_notas(
+            return render_pdf_notas_compuesto(
+                student=student,
+                course=course,
+                enrollment=enrollment,
+                folio=folio,
+                emitido_en=emitido_en,
+                tratamiento=cert.tratamiento,
+                formato_membrete=cert.membrete or MEMBRETE_FORMATO_DEFAULT,
+            )
+        elif cert.tipo == TipoCertificado.ALUMNO_REGULAR:
+            if cert.membrete and hay_membrete(cert.membrete):
+                return render_pdf_alumno_regular_membretado(
+                    student=student,
+                    course=course,
+                    enrollment=enrollment,
+                    folio=folio,
+                    emitido_en=emitido_en,
+                    tratamiento=cert.tratamiento,
+                    formato=cert.membrete,
+                )
+            return render_pdf_alumno_regular(
                 student=student,
                 course=course,
                 enrollment=enrollment,
