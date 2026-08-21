@@ -55,6 +55,10 @@ class EnrollmentCxCOut(BaseModel):
     estado: str
     total_a_pagar: float
     total_pagado: float
+    recaudacion_efectiva: float = 0.0
+    total_devengado: float = 0.0
+    cxc_devengada: float = 0.0
+    proyeccion_futura: float = 0.0
     saldo_estimado: float
     saldo_a_la_fecha: float
     modulos: List[ModuloCxCOut]
@@ -65,11 +69,19 @@ class CursoCxCOut(BaseModel):
     curso_nombre: str
     curso_codigo: Optional[str] = None
     cantidad_estudiantes: int
+    recaudacion_efectiva: float = 0.0
+    total_devengado: float = 0.0
+    cxc_devengada: float = 0.0
+    proyeccion_futura: float = 0.0
     total_estimado: float
     total_a_la_fecha: float
 
 
 class CxCResumenOut(BaseModel):
+    recaudacion_efectiva: float = 0.0
+    total_devengado: float = 0.0
+    cxc_devengada: float = 0.0
+    proyeccion_futura: float = 0.0
     total_estimado: float
     total_a_la_fecha: float
     total_modulos_iniciados: int
@@ -83,9 +95,13 @@ class CxCResumenOut(BaseModel):
 
 class CxCResumenReducidoOut(BaseModel):
     """Solo totales, para tarjetas del dashboard."""
+    recaudacion_efectiva: float = 0.0
+    total_devengado: float = 0.0
+    cxc_devengada: float = 0.0
+    proyeccion_futura: float = 0.0
     total_estimado: float
     total_a_la_fecha: float
-    diferencia: float = Field(..., description="estimado - real")
+    diferencia: float = Field(..., description="estimado - cxc_devengada")
     total_modulos_iniciados: int
     total_modulos_no_iniciados: int
     cantidad_enrollments: int
@@ -96,6 +112,10 @@ class CxCResumenReducidoOut(BaseModel):
 def _to_out(resumen: CxCResumen) -> CxCResumenOut:
     """Convierte CxCResumen (servicio) a CxCResumenOut (Pydantic)."""
     return CxCResumenOut(
+        recaudacion_efectiva=resumen.recaudacion_efectiva,
+        total_devengado=resumen.total_devengado,
+        cxc_devengada=resumen.cxc_devengada,
+        proyeccion_futura=resumen.proyeccion_futura,
         total_estimado=resumen.total_estimado,
         total_a_la_fecha=resumen.total_a_la_fecha,
         total_modulos_iniciados=resumen.total_modulos_iniciados,
@@ -117,6 +137,10 @@ def _to_out(resumen: CxCResumen) -> CxCResumenOut:
                 estado=d.estado,
                 total_a_pagar=d.total_a_pagar,
                 total_pagado=d.total_pagado,
+                recaudacion_efectiva=d.recaudacion_efectiva,
+                total_devengado=d.total_devengado,
+                cxc_devengada=d.cxc_devengada,
+                proyeccion_futura=d.proyeccion_futura,
                 saldo_estimado=d.saldo_estimado,
                 saldo_a_la_fecha=d.saldo_a_la_fecha,
                 modulos=[
@@ -149,13 +173,6 @@ async def get_cuentas_por_cobrar(
     curso_id: Optional[str] = Query(None, description="Filtrar por curso específico"),
     current_user: User = Depends(require_staff),
 ) -> CxCResumenOut:
-    """
-    F-CUENTAS-POR-COBRAR: devuelve el resumen completo de CxC con desglose
-    por curso y por enrollment. Excluye automáticamente:
-    - Enrollments SUSPENDIDO, RETIRADO, CANCELADO, COMPLETADO.
-
-    Aplica filtro de cursos_asignados si el usuario es encargado segmentado.
-    """
     resumen = await cuentas_por_cobrar_service.generar_resumen_cxc(
         current_user=current_user,
         curso_id=curso_id,
@@ -171,17 +188,17 @@ async def get_cuentas_por_cobrar(
 async def get_cuentas_por_cobrar_resumen(
     current_user: User = Depends(require_staff),
 ) -> CxCResumenReducidoOut:
-    """
-    F-CUENTAS-POR-COBRAR: totales agregados sin desglose. Optimizado para
-    tarjetas del dashboard staff (no carga el detalle de enrollments).
-    """
     resumen = await cuentas_por_cobrar_service.generar_resumen_cxc(
         current_user=current_user,
     )
     return CxCResumenReducidoOut(
+        recaudacion_efectiva=resumen.recaudacion_efectiva,
+        total_devengado=resumen.total_devengado,
+        cxc_devengada=resumen.cxc_devengada,
+        proyeccion_futura=resumen.proyeccion_futura,
         total_estimado=resumen.total_estimado,
         total_a_la_fecha=resumen.total_a_la_fecha,
-        diferencia=round(resumen.total_estimado - resumen.total_a_la_fecha, 2),
+        diferencia=round(resumen.total_estimado - resumen.cxc_devengada, 2),
         total_modulos_iniciados=resumen.total_modulos_iniciados,
         total_modulos_no_iniciados=resumen.total_modulos_no_iniciados,
         cantidad_enrollments=resumen.cantidad_enrollments,

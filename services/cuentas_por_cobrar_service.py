@@ -70,8 +70,13 @@ class CxCResumenEnrollment:
     estado: str  # EstadoInscripcion.value
     total_a_pagar: float
     total_pagado: float
-    saldo_estimado: float  # CxC estimada
-    saldo_a_la_fecha: float  # CxC real
+    # Capas contables (2026-08-21, Kevin: Principio de Devengado)
+    recaudacion_efectiva: float  # Pagos aprobados en esta inscripción
+    total_devengado: float       # Matrícula + Módulos iniciados
+    cxc_devengada: float         # Exigible real en mora: max(0, total_devengado - recaudacion_efectiva)
+    proyeccion_futura: float     # Módulos no iniciados (no devengado aún)
+    saldo_estimado: float        # Saldo contrato total: max(0, total_a_pagar - recaudacion_efectiva)
+    saldo_a_la_fecha: float      # Mantener compatibilidad: igual a cxc_devengada
     modulos: List[CxCResumenModulo]
 
 
@@ -82,15 +87,23 @@ class CxCResumenCurso:
     curso_nombre: str
     curso_codigo: Optional[str]
     cantidad_estudiantes: int
-    total_estimado: float
-    total_a_la_fecha: float
+    recaudacion_efectiva: float
+    total_devengado: float
+    cxc_devengada: float         # Exigible real en mora del curso
+    proyeccion_futura: float     # Módulos no iniciados del curso
+    total_estimado: float        # Saldo contrato total
+    total_a_la_fecha: float      # Mantener compatibilidad: igual a cxc_devengada
 
 
 @dataclass
 class CxCResumen:
-    """Resumen global del reporte de CxC."""
-    total_estimado: float
-    total_a_la_fecha: float
+    """Resumen global del reporte de CxC (Capas Contables Devengado vs Proyección)."""
+    recaudacion_efectiva: float
+    total_devengado: float
+    cxc_devengada: float         # VERDADERA CUENTA POR COBRAR EN MORA (Exigible)
+    proyeccion_futura: float     # PROYECCIÓN FUTURA NO DEVENGADA
+    total_estimado: float        # CONTRATOS TOTALES PENDIENTES
+    total_a_la_fecha: float      # Mantener compatibilidad: igual a cxc_devengada
     total_modulos_iniciados: int
     total_modulos_no_iniciados: int
     cantidad_enrollments: int
@@ -207,21 +220,15 @@ async def generar_resumen_cxc(
 
     # Construir detalle
     detalle: List[CxCResumenEnrollment] = []
-    total_estimado = 0.0
-    total_a_la_fecha = 0.0
+    global_recaudacion_efectiva = 0.0
+    global_total_devengado = 0.0
+    global_cxc_devengada = 0.0
+    global_proyeccion_futura = 0.0
+    global_total_estimado = 0.0
     total_modulos_iniciados = 0
     total_modulos_no_iniciados = 0
 
-    # F-FIX-CXC-N1 (2026-08-16): antes se consultaba `Payment.find(...)` DENTRO
-    # del bucle de enrollments — una query por inscripcion. Con 296
-    # inscripciones activas eso son 296 round-trips a Atlas (~115ms cada uno),
-    # y el reporte tardaba ~36s: el frontend lo abortaba por timeout y la
-    # pagina de Cuentas por Cobrar quedaba inutilizable.
-    # Medido en el contenedor de produccion: las 3 queries batch tardan 2.55s
-    # en total, o sea que los ~34s restantes eran exclusivamente este N+1.
-    # Ahora se traen TODOS los pagos aprobados de una sola vez y se agrupan
-    # en memoria, mismo patron que ya usaban courses y students mas arriba
-    # (y que F-076 aplico al informe de habilitados: 600 queries -> 5).
+    # F-FIX-CXC-N1 (2026-08-16): ya vienen precargados arriba en una sola query
     pagos_por_inscripcion: dict = {}
     if enrollments:
         todos_los_pagos = await Payment.find(
@@ -242,19 +249,32 @@ async def generar_resumen_cxc(
         curso_nombre = c.nombre_programa if c else "Curso desconocido"
         curso_codigo = c.codigo if c else None
 
-        # Saldo del enrollment
-        saldo_estimado = e.saldo_pendiente
-        # F-CUENTAS-POR-COBRAR v2 (2026-08-03, Kevin): CxC real ahora es
-        # "Inscripción total - Pagos aprobados", NO depende de los módulos
-        # marcados como iniciados. Recalculamos en tiempo real con los pagos
-        # de la tabla payments (estado_pago=APROBADO) para corregir
-        # automáticamente cualquier desincronización del campo
-        # enrollment.total_pagado.
-        # F-FIX-CXC-N1 (2026-08-16): ya vienen precargados arriba en una sola
-        # query; antes esto era un `await Payment.find(...)` por inscripcion.
+        # 1. Recaudación Efectiva (Pagos Aprobados)
         pagos_aprobados = pagos_por_inscripcion.get(e.id, [])
-        total_pagado_real = sum(p.cantidad_pago for p in pagos_aprobados)
-        saldo_a_la_fecha = max(0.0, e.total_a_pagar - total_pagado_real)
+        recaudacion_efectiva = sum(p.cantidad_pago for p in pagos_aprobados)
+
+        # 2. Total Devengado (Matrícula + Módulos Iniciados)
+        costo_matricula = float(getattr(e, "matricula_monto", 0) or 0)
+        costo_modulos_iniciados = sum(
+            float(getattr(m, "costo", 0) or 0)
+            for m in e.modulos
+            if _modulo_cuenta_cxc(m)
+        )
+        total_devengado = costo_matricula + costo_modulos_iniciados
+
+        # 3. CxC Devengada (Exigible Real en Mora por servicio iniciado/en curso)
+        cxc_devengada = max(0.0, total_devengado - recaudacion_efectiva)
+
+        # 4. Proyección Futura No Devengada (Módulos no iniciados)
+        proyeccion_futura = sum(
+            float(getattr(m, "costo", 0) or 0)
+            for m in e.modulos
+            if not _modulo_cuenta_cxc(m)
+        )
+
+        # 5. Saldo Estimado Total del Contrato
+        saldo_estimado = max(0.0, e.total_a_pagar - recaudacion_efectiva)
+        saldo_a_la_fecha = cxc_devengada  # Mantiene retrocompatibilidad
 
         # Contar módulos
         for m in e.modulos:
@@ -270,13 +290,21 @@ async def generar_resumen_cxc(
                 "curso_nombre": curso_nombre,
                 "curso_codigo": curso_codigo,
                 "cantidad_estudiantes": 0,
+                "recaudacion_efectiva": 0.0,
+                "total_devengado": 0.0,
+                "cxc_devengada": 0.0,
+                "proyeccion_futura": 0.0,
                 "total_estimado": 0.0,
                 "total_a_la_fecha": 0.0,
             }
         acc = curso_acc[e.curso_id]
         acc["cantidad_estudiantes"] += 1
+        acc["recaudacion_efectiva"] += recaudacion_efectiva
+        acc["total_devengado"] += total_devengado
+        acc["cxc_devengada"] += cxc_devengada
+        acc["proyeccion_futura"] += proyeccion_futura
         acc["total_estimado"] += saldo_estimado
-        acc["total_a_la_fecha"] += saldo_a_la_fecha
+        acc["total_a_la_fecha"] += cxc_devengada
 
         # Detalle de módulos
         modulos_detalle: List[CxCResumenModulo] = []
@@ -294,35 +322,37 @@ async def generar_resumen_cxc(
         detalle.append(CxCResumenEnrollment(
             enrollment_id=str(e.id),
             estudiante_id=str(e.estudiante_id),
-            # F-FIX-CXC-NOMBRE-NULO (2026-08-16): antes era `s.nombre if s else "—"`.
-            # Esa guarda cubre que el estudiante NO EXISTA, pero no que exista
-            # con `nombre = None` — y `Student.nombre` es opcional en el modelo.
-            # Con 2 estudiantes asi en produccion (registros 99001 y 99100), el
-            # schema de salida `EnrollmentCxCOut.estudiante_nombre: str` tiraba
-            # ValidationError y el reporte COMPLETO respondia 500. Un nombre
-            # faltante en una fila no puede tumbar el reporte financiero entero.
-            # El bug estaba tapado por el timeout: antes del fix del N+1 la
-            # request nunca llegaba a serializar.
             estudiante_nombre=_nombre_estudiante(s),
             estudiante_registro=s.registro if s else None,
             curso_id=str(e.curso_id),
             curso_nombre=curso_nombre,
             estado=e.estado.value if hasattr(e.estado, "value") else str(e.estado),
             total_a_pagar=e.total_a_pagar,
-            total_pagado=e.total_pagado,
+            total_pagado=recaudacion_efectiva,
+            recaudacion_efectiva=recaudacion_efectiva,
+            total_devengado=total_devengado,
+            cxc_devengada=cxc_devengada,
+            proyeccion_futura=proyeccion_futura,
             saldo_estimado=saldo_estimado,
             saldo_a_la_fecha=saldo_a_la_fecha,
             modulos=modulos_detalle,
         ))
 
-        total_estimado += saldo_estimado
-        total_a_la_fecha += saldo_a_la_fecha
+        global_recaudacion_efectiva += recaudacion_efectiva
+        global_total_devengado += total_devengado
+        global_cxc_devengada += cxc_devengada
+        global_proyeccion_futura += proyeccion_futura
+        global_total_estimado += saldo_estimado
 
     por_curso = [CxCResumenCurso(**acc) for acc in curso_acc.values()]
 
     return CxCResumen(
-        total_estimado=round(total_estimado, 2),
-        total_a_la_fecha=round(total_a_la_fecha, 2),
+        recaudacion_efectiva=round(global_recaudacion_efectiva, 2),
+        total_devengado=round(global_total_devengado, 2),
+        cxc_devengada=round(global_cxc_devengada, 2),
+        proyeccion_futura=round(global_proyeccion_futura, 2),
+        total_estimado=round(global_total_estimado, 2),
+        total_a_la_fecha=round(global_cxc_devengada, 2),
         total_modulos_iniciados=total_modulos_iniciados,
         total_modulos_no_iniciados=total_modulos_no_iniciados,
         cantidad_enrollments=len(enrollments),
