@@ -799,7 +799,8 @@ def _build_resumen_economico_from_memory(
     pagos_por_inscripcion: Optional[dict] = None,
 ) -> dict:
     """
-    F-PERF-DASHBOARD-V2: replica en memoria de get_resumen_economico.
+    F-PERF-DASHBOARD-V2: replica en memoria de get_resumen_economico
+    con soporte del Principio de Devengado (Capas Financiales 2026-08-21).
     """
     ingreso_matricula = 0.0
     ingreso_colegiatura = 0.0
@@ -814,7 +815,6 @@ def _build_resumen_economico_from_memory(
 
     total_ingresos = ingreso_matricula + ingreso_colegiatura
 
-    # Por Cobrar: formula de Sandra (costo_modulos - pagos_modulos, cap a 0)
     estados_excluidos = {
         EstadoInscripcion.SUSPENDIDO.value,
         EstadoInscripcion.COMPLETADO.value,
@@ -823,28 +823,49 @@ def _build_resumen_economico_from_memory(
     }
 
     total_esperado = 0.0
-    por_cobrar = 0.0
+    cxc_devengada_total = 0.0
+    proyeccion_futura_total = 0.0
+    saldo_estimado_total = 0.0
     cobros_pendientes = 0
+
     for e in enrollments:
-        total_esperado += float(getattr(e, "total_a_pagar", 0) or 0)
-        if e.estado in estados_excluidos:
-            continue
-        if getattr(e, "excluir_por_cobrar", False):
-            continue
-        # F-FIX-DASHBOARD-CXC-DIFF (2026-08-17, Kevin): igual que
-        # generar_resumen_cxc (la fuente de verdad del reporte real), el
-        # costo es `total_a_pagar` y los pagos se recalculan sumando los
-        # Payment aprobados de esa inscripcion — NO se confia en el campo
-        # cacheado `enrollment.total_pagado` / `modulos[].monto_pagado`,
-        # que puede desincronizarse del estado real de pagos.
         costo_total = float(getattr(e, "total_a_pagar", 0) or 0)
+        total_esperado += costo_total
+
+        if e.estado in estados_excluidos or getattr(e, "excluir_por_cobrar", False):
+            continue
+
         if pagos_por_inscripcion is not None:
             pagos_total = sum(float(p.cantidad_pago or 0.0) for p in pagos_por_inscripcion.get(e.id, []))
         else:
             pagos_total = float(getattr(e, "total_pagado", 0) or 0)
-        saldo = max(0, costo_total - pagos_total)
-        por_cobrar += saldo
-        if saldo > 0.01:
+
+        # Calculo de capas bajo Principio de Devengado
+        costo_matricula = float(getattr(e, "costo_matricula", 0.0) or 0.0)
+        modulos = getattr(e, "modulos", []) or []
+
+        dev_mod = 0.0
+        proy_mod = 0.0
+        for m in modulos:
+            costo_m = float(getattr(m, "costo", 0.0) or 0.0)
+            if getattr(m, "iniciado_en", None) is not None:
+                dev_mod += costo_m
+            else:
+                proy_mod += costo_m
+
+        if not modulos:
+            dev_mod = max(0.0, costo_total - costo_matricula)
+
+        dev_enrollment = costo_matricula + dev_mod
+        cxc_dev_e = max(0.0, dev_enrollment - pagos_total)
+        proy_fut_e = proy_mod
+        saldo_est_e = max(0.0, costo_total - pagos_total)
+
+        cxc_devengada_total += cxc_dev_e
+        proyeccion_futura_total += proy_fut_e
+        saldo_estimado_total += saldo_est_e
+
+        if cxc_dev_e > 0.01:
             cobros_pendientes += 1
 
     return {
@@ -852,7 +873,12 @@ def _build_resumen_economico_from_memory(
         "ingreso_colegiatura": round(ingreso_colegiatura, 2),
         "total_ingresos": round(total_ingresos, 2),
         "total_esperado": round(total_esperado, 2),
-        "por_cobrar": round(por_cobrar, 2),
+        "recaudacion_efectiva": round(total_ingresos, 2),
+        "cxc_devengada": round(cxc_devengada_total, 2),
+        "proyeccion_futura": round(proyeccion_futura_total, 2),
+        "saldo_estimado": round(saldo_estimado_total, 2),
+        "por_cobrar": round(cxc_devengada_total, 2),  # por_cobrar refleja CxC Devengada Exigible
+        "por_cobrar_estimado": round(saldo_estimado_total, 2),
         "cobros_pendientes": cobros_pendientes,
         "total_inscritos": len(enrollments),
     }
@@ -866,49 +892,57 @@ def _build_cxc_resumen_from_memory(
 ) -> dict:
     """
     F-PERF-DASHBOARD-V2: replica simplificada de CxCResumenReducido.
-
-    Estructura esperada por el frontend (lib/services/cuentas-por-cobrar.service.ts):
-    {
-      total_real_cobrado: number,
-      total_estimado: number,
-      diferencia: number,
-      por_cobrar: number,
-      // ... mas campos segun el servicio original
-    }
     """
-    # Simplificacion: misma logica que resumen economico
     ingreso_total = sum(float(p.cantidad_pago or 0) for p in pagos)
-    por_cobrar = 0.0
+    cxc_devengada_total = 0.0
+    proyeccion_futura_total = 0.0
+    total_estimado = 0.0
+
     estados_excluidos = {
         EstadoInscripcion.SUSPENDIDO.value,
         EstadoInscripcion.COMPLETADO.value,
         EstadoInscripcion.CANCELADO.value,
         EstadoInscripcion.RETIRADO.value,
     }
-    total_estimado = 0.0
+
     for e in enrollments:
-        total_estimado += float(getattr(e, "total_a_pagar", 0) or 0)
-        if e.estado in estados_excluidos:
-            continue
-        # F-FIX-DASHBOARD-CXC-DIFF (2026-08-17, Kevin): mismo criterio que
-        # generar_resumen_cxc (services/cuentas_por_cobrar_service.py, la
-        # fuente de verdad del reporte real de Cuentas por Cobrar): costo =
-        # total_a_pagar, pagos = suma de Payment aprobados de la inscripcion
-        # (NO el campo cacheado total_pagado/monto_pagado). Antes este
-        # calculo en memoria usaba el campo cacheado y podia desincronizarse
-        # del reporte real, dando cifras distintas para lo mismo.
         costo_total = float(getattr(e, "total_a_pagar", 0) or 0)
+        total_estimado += costo_total
+
+        if e.estado in estados_excluidos or getattr(e, "excluir_por_cobrar", False):
+            continue
+
         if pagos_por_inscripcion is not None:
             pagos_total = sum(float(p.cantidad_pago or 0.0) for p in pagos_por_inscripcion.get(e.id, []))
         else:
             pagos_total = float(getattr(e, "total_pagado", 0) or 0)
-        por_cobrar += max(0, costo_total - pagos_total)
+
+        costo_matricula = float(getattr(e, "costo_matricula", 0.0) or 0.0)
+        modulos = getattr(e, "modulos", []) or []
+
+        dev_mod = 0.0
+        proy_mod = 0.0
+        for m in modulos:
+            costo_m = float(getattr(m, "costo", 0.0) or 0.0)
+            if getattr(m, "iniciado_en", None) is not None:
+                dev_mod += costo_m
+            else:
+                proy_mod += costo_m
+
+        if not modulos:
+            dev_mod = max(0.0, costo_total - costo_matricula)
+
+        cxc_devengada_total += max(0.0, (costo_matricula + dev_mod) - pagos_total)
+        proyeccion_futura_total += proy_mod
 
     return {
+        "recaudacion_efectiva": round(ingreso_total, 2),
+        "cxc_devengada": round(cxc_devengada_total, 2),
+        "proyeccion_futura": round(proyeccion_futura_total, 2),
         "total_real_cobrado": round(ingreso_total, 2),
         "total_estimado": round(total_estimado, 2),
-        "diferencia": round(ingreso_total - total_estimado, 2),
-        "por_cobrar": round(por_cobrar, 2),
+        "diferencia": round(total_estimado - cxc_devengada_total, 2),
+        "por_cobrar": round(cxc_devengada_total, 2),
     }
 
 
@@ -919,17 +953,10 @@ async def _build_course_breakdown(
     payment_query: dict,
 ) -> list[dict]:
     """
-    F-DASHBOARD-POR-PROGRAMA (2026-08-05): arma el desglose por programa
-    con 4 indicadores financieros: ingreso_matricula, ingreso_colegiatura,
-    total_ingresos, por_cobrar. Excluye es_historico=True y estado='cerrado'
-    para no inflar los totales de programas pasados / cargados retroactivamente.
-
-    Logica de clasificacion matricula vs colegiatura (consistente con
-    Resumen Economico General en payment_service.get_resumen_economico):
-    - Si el concepto del pago contiene "matricula" (case-insensitive) -> matricula
-    - Si no -> colegiatura
+    F-DASHBOARD-POR-PROGRAMA (2026-08-05 / 2026-08-21): arma el desglose por programa
+    con 4 indicadores financieros (Matrícula, Colegiatura, Total Ingresos, CxC Devengada Exigible)
+    e indicadores de proyección futura bajo el Principio de Devengado.
     """
-    # 1. Traer los cursos del alcance, EXCLUYENDO historicos y cerrados
     cursos = await Course.find(course_query).to_list()
     cursos_visibles: list[Course] = [
         c for c in cursos
@@ -941,9 +968,6 @@ async def _build_course_breakdown(
 
     curso_ids = [c.id for c in cursos_visibles]
 
-    # 2. Traer los enrollments ACTIVOS de esos cursos (para por_cobrar real
-    # excluyendo suspendidos/completados/cancelados/retirados, igual que
-    # payment_service.get_resumen_economico).
     enr_match = {
         "curso_id": {"$in": curso_ids},
         "estado": "activo",
@@ -954,18 +978,19 @@ async def _build_course_breakdown(
         cid = str(e.curso_id)
         enrollment_by_curso.setdefault(cid, []).append(e)
 
-    # 3. Traer los pagos APROBADOS de esos cursos y agrupar por curso
     pag_match = {
         "curso_id": {"$in": curso_ids},
         "estado_pago": {"$in": ["aprobado", "pagado"]},
     }
     pagos = await Payment.find(pag_match).to_list()
     pagos_by_curso: dict[str, list[Payment]] = {}
+    pagos_by_enrollment: dict[str, list[Payment]] = {}
     for p in pagos:
         cid = str(p.curso_id)
         pagos_by_curso.setdefault(cid, []).append(p)
+        if p.enrollment_id:
+            pagos_by_enrollment.setdefault(str(p.enrollment_id), []).append(p)
 
-    # 4. Armar el breakdown
     breakdown: list[dict] = []
     for c in cursos_visibles:
         cid = str(c.id)
@@ -984,9 +1009,34 @@ async def _build_course_breakdown(
                 ingreso_colegiatura += monto
 
         total_ingresos = ingreso_matricula + ingreso_colegiatura
-        por_cobrar = sum(
-            float(e.saldo_pendiente or 0.0) for e in curso_enrollments
-        )
+
+        cxc_devengada_curso = 0.0
+        proyeccion_futura_curso = 0.0
+        saldo_estimado_curso = 0.0
+
+        for e in curso_enrollments:
+            costo_total = float(getattr(e, "total_a_pagar", 0) or 0)
+            pagos_e = sum(float(p.cantidad_pago or 0.0) for p in pagos_by_enrollment.get(str(e.id), []))
+            costo_matricula = float(getattr(e, "costo_matricula", 0.0) or 0.0)
+            modulos = getattr(e, "modulos", []) or []
+
+            dev_mod = 0.0
+            proy_mod = 0.0
+            for m in modulos:
+                costo_m = float(getattr(m, "costo", 0.0) or 0.0)
+                if getattr(m, "iniciado_en", None) is not None:
+                    dev_mod += costo_m
+                else:
+                    proy_mod += costo_m
+
+            if not modulos:
+                dev_mod = max(0.0, costo_total - costo_matricula)
+
+            dev_enrollment = costo_matricula + dev_mod
+            cxc_devengada_curso += max(0.0, dev_enrollment - pagos_e)
+            proyeccion_futura_curso += proy_mod
+            saldo_estimado_curso += max(0.0, costo_total - pagos_e)
+
         inscritos_activos = len(curso_enrollments)
 
         breakdown.append({
@@ -1001,9 +1051,11 @@ async def _build_course_breakdown(
             "ingreso_matricula": round(ingreso_matricula, 2),
             "ingreso_colegiatura": round(ingreso_colegiatura, 2),
             "total_ingresos": round(total_ingresos, 2),
-            "por_cobrar": round(por_cobrar, 2),
+            "cxc_devengada": round(cxc_devengada_curso, 2),
+            "proyeccion_futura": round(proyeccion_futura_curso, 2),
+            "saldo_estimado": round(saldo_estimado_curso, 2),
+            "por_cobrar": round(cxc_devengada_curso, 2),
         })
 
-    # Ordenar por inscritos activos desc (mas relevantes arriba)
     breakdown.sort(key=lambda x: (-x["inscritos"], x["nombre"]))
     return breakdown
