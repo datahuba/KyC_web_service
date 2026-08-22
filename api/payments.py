@@ -1414,7 +1414,7 @@ async def generar_reporte_pdf_caja(
             fecha_str,
             f"{monto:,.2f}",
             Paragraph(str(_g2("concepto") or "")[:50], styles["BodyText"]),
-            str(_g2("numero_transaccion") or "Caja / S/N")[:18],
+            str(_g2("numero_transaccion") or "Caja (Ventanilla)")[:18],
             estado_pago_str,
         ])
 
@@ -1631,7 +1631,7 @@ async def get_extracto_bancario(
         course = courses_map.get(p.curso_id)
         codigo_curso = course.codigo if course and course.codigo else (course.nombre_programa if course else "")
         fecha = format_fecha(p.fecha_comprobante, "%Y-%m-%d", fallback="Sin fecha")
-        comprobante = p.numero_transaccion or p.id or "S/N"
+        comprobante = p.numero_transaccion or ("Caja (Ventanilla)" if ("caja" in (p.metodo_pago or "").lower() or "efectivo" in (p.metodo_pago or "").lower()) else "Sin N° Voucher")
         # Construir concepto
         if p.estado_pago == EstadoPago.ANULADO:
             tipo_mov = "ANULACIÓN"

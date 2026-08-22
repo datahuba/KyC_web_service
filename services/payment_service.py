@@ -3151,7 +3151,7 @@ async def generar_lista_habilitados(
             "docente": docente_n,
             "estado_pago": estado_pago,
             "fecha_pago": fecha.isoformat() if fecha else None,
-            "numero_boleta": boleta or ("" if monto_pagado <= 0 else "S/N"),
+            "numero_boleta": boleta or ("" if monto_pagado <= 0 else "Caja (Ventanilla)"),
             "importe": monto_pagado,
             "monto_pendiente": monto_pendiente,
             "costo_total": costo_con_desc,  # F-077: para becados, este es el costo que DEBEN pagar
