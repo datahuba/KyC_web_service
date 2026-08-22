@@ -9,6 +9,7 @@ Auditoría y Algoritmo de Prorrateo.
 from typing import List, Optional
 from collections import defaultdict
 import asyncio
+import logging
 from datetime import datetime, timedelta
 from models.payment import Payment
 from models.enrollment import Enrollment
@@ -902,7 +903,7 @@ async def create_payment(
                     referencia_id=payment.id
                 )
         except Exception as e:
-            print(f"Error notificando nuevo pago pendiente: {str(e)}")
+            logging.getLogger("kyc.payment").warning(f"Error notificando nuevo pago pendiente: {str(e)}")
 
         return payment
 
@@ -1052,7 +1053,7 @@ async def create_payment(
             referencia_id=payment.id
         )
     except Exception as e:
-        print(f"Error al enviar notificación de pago aprobado: {str(e)}")
+        logging.getLogger("kyc.payment").warning(f"Error al enviar notificación de pago aprobado: {str(e)}")
 
     # 4) Email real al estudiante (no bloqueante)
     try:
@@ -1079,7 +1080,7 @@ async def create_payment(
                 destinatario_nombre=getattr(_est, "nombre", None),
             )
     except Exception as e:
-        print(f"Error al enviar correo de pago aprobado: {str(e)}")
+        logging.getLogger("kyc.payment").warning(f"Error al enviar correo de pago aprobado: {str(e)}")
 
     # 5) [NOTIFICACIONES - ISSUE-U-BUZON]
     # Antes: "Nuevo Pago Pendiente" → ahora: "Nuevo Pago Registrado" (INFO, sin
@@ -1117,7 +1118,7 @@ async def create_payment(
                 referencia_id=payment.id
             )
     except Exception as e:
-        print(f"Error al enviar notificación de nuevo pago: {str(e)}")
+        logging.getLogger("kyc.payment").warning(f"Error al enviar notificación de nuevo pago: {str(e)}")
 
     return payment
 
@@ -1338,7 +1339,7 @@ async def aprobar_pago(
             referencia_id=payment.id
         )
     except Exception as e:
-        print(f"Error al enviar notificación de pago aprobado: {str(e)}")
+        logging.getLogger("kyc.payment").warning(f"Error al enviar notificación de pago aprobado: {str(e)}")
 
     # Correo real al estudiante confirmando la aprobación (no bloqueante: si
     # falla el envío o el estudiante no tiene email, el pago ya quedó aprobado).
@@ -1366,7 +1367,7 @@ async def aprobar_pago(
                 destinatario_nombre=getattr(_est, "nombre", None),
             )
     except Exception as e:
-        print(f"Error al enviar correo de pago aprobado: {str(e)}")
+        logging.getLogger("kyc.payment").warning(f"Error al enviar correo de pago aprobado: {str(e)}")
 
     return payment
 
@@ -1413,7 +1414,7 @@ async def rechazar_pago(
                 monto_pago_aprobado=0.0  # el método recalcula desde cero
             )
         except Exception as e:
-            print(f"Error al reversar saldo tras rechazo de pago aprobado: {str(e)}")
+            logging.getLogger("kyc.payment").warning(f"Error al reversar saldo tras rechazo de pago aprobado: {str(e)}")
 
     await _registrar_auditoria_financiera(
         accion="RECHAZAR PAGO",
@@ -1439,7 +1440,7 @@ async def rechazar_pago(
             referencia_id=payment.id
         )
     except Exception as e:
-        print(f"Error al enviar notificación de pago rechazado: {str(e)}")
+        logging.getLogger("kyc.payment").warning(f"Error al enviar notificación de pago rechazado: {str(e)}")
 
     return payment
 
@@ -1500,7 +1501,7 @@ async def anular_pago(
             referencia_id=payment.id
         )
     except Exception as e:
-        print(f"Error al enviar notificación de pago anulado: {str(e)}")
+        logging.getLogger("kyc.payment").warning(f"Error al enviar notificación de pago anulado: {str(e)}")
 
     return payment
 
@@ -1543,7 +1544,7 @@ async def eliminar_pago(
                 monto_pago_aprobado=0.0
             )
         except Exception as e:
-            print(f"Error al recalcular saldo tras eliminar pago {payment_id}: {str(e)}")
+            logging.getLogger("kyc.payment").warning(f"Error al recalcular saldo tras eliminar pago {payment_id}: {str(e)}")
 
     await _registrar_auditoria_financiera(
         accion="ELIMINAR PAGO (BORRADO DEFINITIVO)",
@@ -3573,6 +3574,6 @@ async def create_caja_directo_payment(
             referencia_id=payment.id
         )
     except Exception as e:
-        print(f"Error al notificar pago directo en caja: {str(e)}")
+        logging.getLogger("kyc.payment").warning(f"Error al notificar pago directo en caja: {str(e)}")
 
     return payment

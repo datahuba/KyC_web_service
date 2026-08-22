@@ -219,10 +219,21 @@ async def listar_reportes(
 
 @router.get("/stats", summary="[Staff] Conteo por estado")
 async def stats(current_user: User = Depends(require_staff)) -> Any:
+    """
+    F-FIX-BUG-REPORTS-STATS-LENTO (2026-08-22, encontrado en la auditoria
+    completa): antes hacia un `.count()` secuencial POR CADA estado (4-5
+    round-trips a Atlas, ~250-400ms cada uno con la latencia geografica
+    actual — explicaba el `bug-reports/stats` lento de 1.5-2.3s). Ahora
+    es un solo `$group` de Mongo.
+    """
     base: dict = {} if _puede_gestionar(current_user) else {"reportado_por_id": current_user.id}
-    salida = {}
-    for e in sorted(ESTADOS):
-        salida[e] = await BugReport.find({**base, "estado": e}).count()
+    salida = {e: 0 for e in sorted(ESTADOS)}
+
+    pipeline = [{"$match": base}, {"$group": {"_id": "$estado", "count": {"$sum": 1}}}]
+    async for doc in BugReport.get_motor_collection().aggregate(pipeline):
+        if doc["_id"] in salida:
+            salida[doc["_id"]] = doc["count"]
+
     salida["total"] = sum(salida.values())
     return salida
 

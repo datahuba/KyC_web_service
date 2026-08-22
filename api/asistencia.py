@@ -208,13 +208,19 @@ async def registrar_asistencia_bulk(
 
     username = current_user.nombre_visible if hasattr(current_user, "nombre_visible") else current_user.username
 
+    # F-FIX-N1-ASISTENCIA-BULK (2026-08-22, encontrado en la auditoria
+    # completa): antes hacia un find_one() por cada estudiante del payload
+    # (N+1 — con 30-80 estudiantes por clase, 30-80 round-trips). Se
+    # pre-buscan TODOS los registros existentes de esta sesion de una sola
+    # consulta, indexados por estudiante_id.
+    existentes = await AsistenciaRegistro.find(
+        AsistenciaRegistro.sesion_id == sesion_id
+    ).to_list()
+    existentes_por_estudiante = {str(r.estudiante_id): r for r in existentes}
+
     resultados: List[AsistenciaRegistro] = []
     for item in payload.registros:
-        # Buscar registro existente
-        existing = await AsistenciaRegistro.find_one(
-            AsistenciaRegistro.sesion_id == sesion_id,
-            AsistenciaRegistro.estudiante_id == item.estudiante_id,
-        )
+        existing = existentes_por_estudiante.get(str(item.estudiante_id))
         if existing:
             existing.estado = item.estado.value
             existing.observacion = item.observacion
