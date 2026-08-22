@@ -42,6 +42,7 @@ from schemas.enrollment import (
     BulkNotasDocenteRequest,
     BulkNotasDocenteResultado,
     BulkNotasDocenteResponse,
+    ReincorporacionCreate,
 )
 from services import enrollment_service, payment_service
 from beanie import PydanticObjectId
@@ -2345,4 +2346,32 @@ async def establecer_saldo_inicial_endpoint(
 
     await enrollment.save()
     return await enrollment_service.enrich_enrollment_dates(enrollment)
+
+
+@router.post("/{id}/reincorporar", response_model=EnrollmentWithDetails)
+async def reincorporar_estudiante_endpoint(
+    id: PydanticObjectId,
+    data: ReincorporacionCreate,
+    current_user: User = Depends(require_gestion_academica),
+):
+    """
+    F-REINCORPORACION (Kevin 2026-08-22):
+    Permite reincorporar a un estudiante en estado pasivo o suspendido a una nueva edición del programa,
+    arrastrando notas aprobadas y pagos previos para cobrar únicamente lo faltante.
+    Permisos: CPD, Admin, Superadmin, Coordinador Académico.
+    """
+    try:
+        new_enrollment = await enrollment_service.reincorporar_estudiante(
+            enrollment_id=id,
+            nuevo_curso_id=data.nuevo_curso_id,
+            modulo_inicio=data.modulo_inicio,
+            admin_user=current_user,
+            observaciones=data.observaciones
+        )
+        return await enrollment_service.enrich_enrollment_dates(new_enrollment)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al procesar reincorporación: {str(e)}")
+
 

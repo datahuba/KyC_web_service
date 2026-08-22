@@ -38,6 +38,7 @@ def _recalcular_estado_modulo(mod) -> None:
 from models.enrollment import Enrollment, ModuloEstado, CargoAdicionalItemSnapshot
 from models.student import Student
 from models.course import Course
+from models.user import User
 from models.enums import EstadoInscripcion
 from schemas.enrollment import EnrollmentCreate
 from beanie import PydanticObjectId
@@ -1656,3 +1657,125 @@ async def rechazar_nota_borrador(
     enrollment.updated_at = utcnow_naive()
     await enrollment.save()
     return enrollment
+
+
+async def reincorporar_estudiante(
+    enrollment_id: PydanticObjectId,
+    nuevo_curso_id: PydanticObjectId,
+    modulo_inicio: int,
+    admin_user: User,
+    observaciones: Optional[str] = None
+) -> Enrollment:
+    """
+    F-REINCORPORACION (Kevin 2026-08-22):
+    Permite que un estudiante en estado pasivo/suspendido/abandono en una edición
+    anterior de un programa se reincorpore a una edición más reciente.
+    
+    Reglas de negocio:
+    1. Arrastra las notas de los módulos aprobados previamente (módulos 1 .. modulo_inicio - 1).
+    2. Arrastra los pagos previos (matrícula y módulos 1 .. modulo_inicio - 1) para que solo
+       se cobre los módulos pendientes por cursar (módulo_inicio .. N).
+    3. Marca la inscripción original como referenciada y la vincula con la nueva.
+    4. Registra notificación in-app y auditoría.
+    """
+    old_enrollment = await Enrollment.get(enrollment_id)
+    if not old_enrollment:
+        raise ValueError("Inscripción origen no encontrada")
+    
+    nuevo_curso = await Course.get(nuevo_curso_id)
+    if not nuevo_curso:
+        raise ValueError("Nuevo curso destino no encontrado")
+        
+    student = await Student.get(old_enrollment.estudiante_id)
+    if not student:
+        raise ValueError("Estudiante no encontrado")
+        
+    if modulo_inicio < 1 or (nuevo_curso.modulos and modulo_inicio > len(nuevo_curso.modulos) + 1):
+        raise ValueError(f"Módulo de inicio {modulo_inicio} fuera de rango")
+
+    # Verificar si ya existe inscripción activa en el nuevo curso
+    existing = await Enrollment.find_one({
+        "estudiante_id": old_enrollment.estudiante_id,
+        "curso_id": nuevo_curso_id,
+        "estado": {"$in": [EstadoInscripcion.ACTIVO, EstadoInscripcion.PENDIENTE_PAGO]}
+    })
+    if existing:
+        raise ValueError("El estudiante ya cuenta con una inscripción activa en el curso destino")
+
+    # Crear la nueva inscripción base usando el servicio existente
+    new_enrollment = await create_enrollment(
+        estudiante_id=old_enrollment.estudiante_id,
+        curso_id=nuevo_curso_id,
+        current_user_role=admin_user.role,
+        descuento_id=old_enrollment.descuento_curso_id,
+        descuento_personalizado=old_enrollment.descuento_personalizado
+    )
+    
+    # Transferir notas y pagos para módulos < modulo_inicio
+    total_convalidado_pagado = 0.0
+    for idx, new_mod in enumerate(new_enrollment.modulos):
+        mod_num = idx + 1
+        if mod_num < modulo_inicio:
+            if idx < len(old_enrollment.modulos):
+                old_mod = old_enrollment.modulos[idx]
+                new_mod.nota = old_mod.nota
+                new_mod.estado_academico = old_mod.estado_academico or "Aprobado"
+                new_mod.estado_validacion_nota = old_mod.estado_validacion_nota or "validada"
+                new_mod.estado = "Pagado"
+                new_mod.monto_pagado = new_mod.costo
+                total_convalidado_pagado += new_mod.costo
+            else:
+                new_mod.estado = "Pagado"
+                new_mod.monto_pagado = new_mod.costo
+                total_convalidado_pagado += new_mod.costo
+        else:
+            new_mod.nota = None
+            new_mod.estado_academico = "Cursando"
+            new_mod.estado = "Pendiente"
+            new_mod.monto_pagado = 0.0
+
+    # Si la matrícula ya fue pagada en el origen, marcarla como pagada en el nuevo
+    if old_enrollment.matricula_pagada:
+        new_enrollment.matricula_pagada = True
+        
+    # Recalcular totales
+    new_enrollment.total_pagado = (new_enrollment.costo_matricula if new_enrollment.matricula_pagada else 0.0) + total_convalidado_pagado
+    new_enrollment.saldo_pendiente = max(0.0, new_enrollment.total_a_pagar - new_enrollment.total_pagado)
+    if new_enrollment.matricula_pagada:
+        new_enrollment.estado = EstadoInscripcion.ACTIVO
+    
+    # Recalcular promedio de notas convalidadas
+    notas_aprobadas = [m.nota for m in new_enrollment.modulos if m.nota is not None]
+    if notas_aprobadas:
+        new_enrollment.nota_final = round(sum(notas_aprobadas) / len(notas_aprobadas), 2)
+        
+    # Vincular referencias de reincorporación
+    new_enrollment.reincorporado_de_enrollment_id = old_enrollment.id
+    new_enrollment.modulo_reincorporacion_inicio = modulo_inicio
+    new_enrollment.updated_at = utcnow_naive()
+    await new_enrollment.save()
+    
+    # Vincular en el enrollment anterior
+    old_enrollment.reincorporado_a_enrollment_id = new_enrollment.id
+    old_enrollment.updated_at = utcnow_naive()
+    await old_enrollment.save()
+    
+    # Notificación in-app al estudiante
+    try:
+        from services.notification_service import create_notification
+        await create_notification(
+            destinatario_id=student.id,
+            tipo_destinatario="student",
+            titulo="Reincorporación de Programa Aprobada",
+            mensaje=f"Has sido reincorporado al programa {nuevo_curso.nombre} a partir del Módulo {modulo_inicio}.",
+            tipo_alerta="success",
+            evento="REINCORPORACION_EXITOSA",
+            ruta="/app/enrollments",
+            referencia_tipo="enrollment",
+            referencia_id=new_enrollment.id
+        )
+    except Exception as e:
+        print(f"Error creando notificación de reincorporación: {e}")
+
+    return new_enrollment
+

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Modelo de Inscripción
 ====================
 
@@ -246,7 +246,20 @@ class Enrollment(MongoBaseModel):
     )
     retirado_por: Optional[str] = Field(
         default=None,
-        description="Username del usuario (admin/cpd/superadmin) que registró el retiro. None si fue el estudiante via autoservicio."
+        description="Username del admin/CPD/superadmin que ejecutó el retiro. None si estado != RETIRADO."
+    )
+    # F-REINCORPORACION (Kevin 2026-08-22): trazabilidad de traspaso de programa
+    reincorporado_de_enrollment_id: Optional[PyObjectId] = Field(
+        default=None,
+        description="ID del Enrollment original desde el cual se reincorporó este estudiante (None si es regular)."
+    )
+    reincorporado_a_enrollment_id: Optional[PyObjectId] = Field(
+        default=None,
+        description="ID del nuevo Enrollment al que fue transferido/reincorporado (None si no ha sido reincorporado)."
+    )
+    modulo_reincorporacion_inicio: Optional[int] = Field(
+        default=None,
+        description="Número de módulo (1..N) a partir del cual el estudiante retoma clases en este nuevo programa."
     )
 
     # ISSUE-P-RECALCULO-NOTA: snapshot de la nota mínima exigida por el descuento personal

@@ -108,6 +108,11 @@ class EnrollmentResponse(BaseModel):
     fecha_abandono: Optional[datetime] = None
     multa_reincorporacion_pendiente: Optional[bool] = False
 
+    # F-REINCORPORACION (Kevin 2026-08-22)
+    reincorporado_de_enrollment_id: Optional[PyObjectId] = None
+    reincorporado_a_enrollment_id: Optional[PyObjectId] = None
+    modulo_reincorporacion_inicio: Optional[int] = None
+
     # ISSUE-Q-DOCUMENTOS-KYC (2026-07-09, reportado por el usuario): el
     # sistema de subida/aprobación de documentos (Requisito) ya existía en
     # el backend desde antes (endpoints PUT /requisitos/{index},
@@ -263,4 +268,12 @@ class BulkNotasDocenteResponse(BaseModel):
     fallidos: int
     resultados: List[BulkNotasDocenteResultado] = Field(default_factory=list)
 
-    
+
+class ReincorporacionCreate(BaseModel):
+    """
+    F-REINCORPORACION (Kevin 2026-08-22):
+    Schema para reincorporar a un estudiante pasivo/suspendido/abandono a una nueva edición del programa.
+    """
+    nuevo_curso_id: PyObjectId = Field(..., description="ID del nuevo curso/edición donde se reincorpora el estudiante")
+    modulo_inicio: int = Field(1, ge=1, description="Módulo a partir del cual se reincorpora (1..N)")
+    observaciones: Optional[str] = Field(None, max_length=500, description="Observaciones o notas administrativas del traspaso")
