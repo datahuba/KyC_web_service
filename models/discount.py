@@ -261,6 +261,17 @@ class Discount(MongoBaseModel):
     
     class Settings:
         name = "discounts"
+        # F-FIX-DISCOUNT-SIN-INDICES (2026-08-22, encontrado en la auditoria
+        # completa): unico modelo del proyecto sin indices declarados, pese
+        # a filtrarse por curso_id y lista_estudiantes en payment_service.py/
+        # discount_service.py (buscan descuentos del estudiante, filtran por
+        # curso). Bajo impacto hoy (coleccion chica), pero inconsistente con
+        # la disciplina de indices del resto de los modelos.
+        indexes = [
+            "curso_id",
+            "lista_estudiantes",
+            "activo",
+        ]
 
     class Config:
         """Configuración y ejemplos de uso"""

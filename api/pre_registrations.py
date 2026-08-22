@@ -245,11 +245,6 @@ async def upload_titulo_profesional(slug: str, file: UploadFile = File(...)) -> 
     response_model=PaginatedResponse[PreRegistrationFormResponse],
     summary="Listar Formularios visibles para mi rol"
 )
-@router.get(
-	"/forms",
-	response_model=PaginatedResponse[PreRegistrationFormResponse],
-	summary="Listar Formularios visibles para mi rol"
-)
 async def list_forms(
 	page: int = Query(1, ge=1),
 	per_page: int = Query(20, ge=1, le=100),
