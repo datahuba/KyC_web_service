@@ -125,17 +125,25 @@ class TestVerificarAccesoCertificadoFuncionalmente:
         # No debe lanzar.
         verificar_acceso_certificado(cert, user)
 
-    def test_encargado_curso_sigue_pudiendo_acceder(self):
+    def test_encargado_curso_ahora_puede_acceder(self):
+        """
+        F-FIX-ENCARGADO-CERT-403-INCONSISTENTE (2026-08-22, encontrado en
+        la auditoria completa): al 2026-08-19, ENCARGADO_CURSO NO estaba
+        en STAFF_ROLES y este test documentaba que quedaba bloqueado a
+        proposito (el fix de esa sesion era especifico a coordinador).
+        El 2026-08-22 se le dio a encargado_curso acceso de LECTURA a
+        certificados en listas (F-2026-08-22-EC-CERTIFICADOS-READONLY),
+        lo que dejo una inconsistencia: podia ver el certificado en una
+        lista pero no descargarlo (403). Se agrego encargado_curso a
+        STAFF_ROLES para que sea consistente — este test se actualiza
+        para reflejar el comportamiento correcto actual.
+        """
         from services.certificate_service import verificar_acceso_certificado
 
         user = self._UserFake(UserRole.ENCARGADO_CURSO)
         cert = self._CertFake()
-        with pytest.raises(HTTPException):
-            # ENCARGADO_CURSO no esta en STAFF_ROLES ni es coordinador:
-            # este es el comportamiento YA existente, no algo que este fix
-            # deba cambiar. Se deja documentado para que quede claro que
-            # el fix es especifico a coordinador.
-            verificar_acceso_certificado(cert, user)
+        # No debe lanzar.
+        verificar_acceso_certificado(cert, user)
 
     def test_estudiante_ajeno_sigue_sin_poder_acceder(self):
         from services.certificate_service import verificar_acceso_certificado

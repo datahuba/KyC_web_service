@@ -263,10 +263,25 @@ class TestResolucionMismoCriterioQueEdicion:
         src = _fuente("api", "courses.py")
         cuerpo = _cuerpo_funcion(src, "put_resolucion")
 
-        assert "require_encargado_curso" in cuerpo, (
+        # F-FIX-RESOLUCION-INCLUIA-FINANCIERO (2026-08-22, auditoria
+        # completa): put_resolucion paso de require_encargado_curso a
+        # require_gestion_academica (excluye a coordinador financiero,
+        # que no deberia poder tocar esto). require_gestion_academica
+        # sigue envolviendo require_encargado_curso por dentro
+        # (api/dependencies.py), asi que el EC normal sigue teniendo
+        # acceso — se verifica eso en la segunda mitad de este test.
+        assert "require_gestion_academica" in cuerpo, (
             "put_resolucion volvio a exigir CPD; el EC no puede reemplazar "
             "la resolucion de su propio programa"
         )
         assert "cursos_asignados" in cuerpo, (
             "put_resolucion debe seguir limitando al EC/COORD a sus cursos"
+        )
+
+        deps_src = _fuente("api", "dependencies.py")
+        idx_dep = deps_src.index("def require_gestion_academica")
+        cuerpo_dep = deps_src[idx_dep: idx_dep + 800]
+        assert "require_encargado_curso" in cuerpo_dep, (
+            "require_gestion_academica debe seguir envolviendo "
+            "require_encargado_curso (que SI incluye al EC)"
         )
