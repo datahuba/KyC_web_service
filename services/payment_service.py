@@ -3027,7 +3027,7 @@ async def generar_lista_habilitados(
     estudiante_ids = list({e.estudiante_id for e in enrollments if e.estudiante_id})
     estudiantes_map = {}
     if estudiante_ids:
-        estudiantes = await Student.find({"_id": {"$in": [str(s) for s in estudiante_ids]}}).to_list()
+        estudiantes = await Student.find(In(Student.id, estudiante_ids)).to_list()
         estudiantes_map = {e.id: e for e in estudiantes}
 
     # 3.6) BATCH LOADING: cargar TODOS los pagos aprobados de todos los enrollments
@@ -3054,7 +3054,7 @@ async def generar_lista_habilitados(
             discount_ids_set.add(enr.descuento_estudiante_id)
     discounts_map = {}
     if discount_ids_set:
-        descuentos = await Discount.find({"_id": {"$in": [str(d) for d in discount_ids_set]}}).to_list()
+        descuentos = await Discount.find(In(Discount.id, list(discount_ids_set))).to_list()
         for d in descuentos:
             discounts_map[d.id] = d
 
