@@ -986,7 +986,7 @@ async def patch_estado_override(
 async def put_resolucion(
     id: PydanticObjectId,
     file: UploadFile = File(..., description="PDF de la resolución"),
-    current_user: User = Depends(require_encargado_curso)
+    current_user: User = Depends(require_gestion_academica)
 ) -> Any:
     """
     Sube el PDF de la resolución que respalda el programa y guarda la URL.
@@ -1001,6 +1001,15 @@ async def put_resolucion(
     (`update_course`, FIX-ISSUE-258). Era el mismo documento y la misma
     persona, con dos criterios distintos segun el momento. Se unifica con el
     criterio de update_course: EC/COORD solo sobre sus cursos_asignados.
+
+    F-FIX-RESOLUCION-INCLUIA-FINANCIERO (2026-08-22, encontrado en la
+    auditoria completa): el comentario de arriba decia "se unifica con
+    update_course", pero update_course ya usaba `require_gestion_academica`
+    (excluye a coordinador financiero) mientras este endpoint se quedo en
+    `require_encargado_curso` (lo incluye) — nunca se completo esa
+    unificacion. El coordinador financiero podia subir/reemplazar la
+    resolucion de cualquier programa, algo puramente academico fuera de
+    su alcance economico. Ahora si usa require_gestion_academica.
     """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Solo se aceptan archivos PDF")
@@ -1206,7 +1215,7 @@ async def create_course(
 )
 async def upload_resolucion_temp(
     file: UploadFile = File(..., description="PDF de la resolucion"),
-    current_user: User = Depends(require_encargado_curso),
+    current_user: User = Depends(require_gestion_academica),
 ) -> Any:
     """
     Sube un PDF de resolucion a cloudinary y devuelve la URL temporal
@@ -1216,6 +1225,12 @@ async def upload_resolucion_temp(
     Para programas en ejecucion la resolucion es OBLIGATORIA (se
     valida en create_course). Para historicos y programados es
     opcional.
+
+    F-FIX-RESOLUCION-INCLUIA-FINANCIERO (2026-08-22, encontrado en la
+    auditoria completa): create_course (el flujo que usa esta URL
+    temporal) ya excluye a coordinador financiero via
+    require_gestion_academica — este endpoint subia el PDF de todas
+    formas antes de llegar ahi. Alineado con el mismo dependency.
     """
     if file.content_type != "application/pdf":
         raise HTTPException(400, "Solo se aceptan archivos PDF")

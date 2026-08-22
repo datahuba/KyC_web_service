@@ -91,7 +91,7 @@ FIRMANTE_DIRECTORA_CARGO = (
 # ("admin", "cpd", etc). El set anterior estaba en MAYÚSCULAS, lo que
 # provocaba que NUNCA matcheara y los staff no pudieran ver certs de
 # otros estudiantes (siempre caía al 403).
-STAFF_ROLES = {"superadmin", "admin", "cpd", "cobranza", "mae"}
+STAFF_ROLES = {"superadmin", "admin", "cpd", "cobranza", "mae", "encargado_curso"}
 
 
 # ========================================================================
@@ -1558,6 +1558,14 @@ def verificar_acceso_certificado(cert: Certificate, current_user) -> None:
     - Estudiante: solo si es el dueño (cert.student_id == current_user.id).
     - Staff: cualquier cert (los roles en STAFF_ROLES o COORDINADOR).
     Lanza HTTPException 403 si no tiene acceso.
+
+    F-FIX-ENCARGADO-CERT-403-INCONSISTENTE (2026-08-22, encontrado en la
+    auditoria completa): `list_by_enrollment`/`admin/list` en
+    api/certificates.py ya le dan a encargado_curso acceso de lectura a
+    certificados (F-2026-08-22-EC-CERTIFICADOS-READONLY), pero
+    STAFF_ROLES no lo incluia — podia VER un certificado en una lista y
+    recibir 403 al tocar "descargar". Se agrega encargado_curso a
+    STAFF_ROLES para que sea consistente con lo que ya se le permite ver.
 
     LECCIÓN (2026-07-30): no usar `isinstance(current_user, User)` porque
     en los tests y en algunos callers el user es un Mock/spec. Usar

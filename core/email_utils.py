@@ -153,7 +153,16 @@ def build_nota_validada_email(nombre: str, curso_nombre: str, modulo_nombre: str
 
 
 def build_recordatorio_pago_email(nombre: str, mensaje: str, portal_link: str) -> str:
-    """Plantilla HTML del recordatorio de pago manual enviado por Cobranza (ISSUE-P-RECORDATORIO-PAGO)."""
+    """Plantilla HTML del recordatorio de pago manual enviado por Cobranza (ISSUE-P-RECORDATORIO-PAGO).
+
+    F-FIX-COMUNICADOS-XSS (2026-08-22): `mensaje` es texto libre de
+    Cobranza, escapado antes de interpolar — ver docstring de
+    `build_comunicado_email` para el detalle completo del hallazgo.
+    """
+    import html as _html
+
+    nombre = _html.escape(nombre)
+    mensaje = _html.escape(mensaje)
     return f"""
     <div style="font-family: Arial, Helvetica, sans-serif; max-width: 520px; margin: 0 auto; color: #1f2937;">
       <div style="background: #8a1f2f; padding: 20px; text-align: center; border-radius: 12px 12px 0 0;">
@@ -209,7 +218,26 @@ def build_pago_aprobado_email(nombre: str, concepto: str, monto: float, portal_l
 
 
 def build_comunicado_email(nombre: str, asunto: str, mensaje: str, programa: str, portal_link: str) -> str:
-    """Plantilla HTML de un comunicado del Encargado de Programa/CPD a los estudiantes."""
+    """Plantilla HTML de un comunicado del Encargado de Programa/CPD a los estudiantes.
+
+    F-FIX-COMUNICADOS-XSS (2026-08-22, encontrado en la auditoria completa):
+    `asunto`/`mensaje` son texto libre de cualquier cuenta de staff con
+    acceso a /app/comunicados (encargado_curso, cobranza, superadmin —
+    ver api/comunicados.py), interpolados sin escapar en un f-string HTML
+    que se manda a TODOS los estudiantes que matchean el filtro, desde
+    una direccion institucional. Una cuenta de staff comprometida o
+    descuidada podia inyectar HTML/script en un correo oficial. Se
+    escapan `asunto`, `mensaje`, `programa` y `nombre` con html.escape()
+    antes de interpolarlos — `white-space: pre-line` en el CSS sigue
+    preservando los saltos de linea de `mensaje` normalmente, escape no
+    los toca.
+    """
+    import html as _html
+
+    nombre = _html.escape(nombre)
+    asunto = _html.escape(asunto)
+    mensaje = _html.escape(mensaje)
+    programa = _html.escape(programa)
     return f"""
     <div style="font-family: Arial, Helvetica, sans-serif; max-width: 520px; margin: 0 auto; color: #1f2937;">
       <div style="background: #8a1f2f; padding: 20px; text-align: center; border-radius: 12px 12px 0 0;">
