@@ -12,9 +12,9 @@ from beanie import PydanticObjectId
 from sse_starlette.sse import EventSourceResponse
 from models.user import User
 from models.student import Student
+from models.notification import Notification
 from schemas.notification import NotificationResponse, NotificationUnreadCount
 from services import notification_service
-from services.sse_bus import sse_bus
 from services.sse_ticket_service import sse_ticket_service
 from api.dependencies import get_current_user
 
@@ -159,17 +159,33 @@ async def stream_notifications(
 ):
     """Stream persistente SSE. Heartbeat cada 30s para mantener viva la
     conexión a través de proxies intermedios. Se desconecta automáticamente
-    cuando el cliente cierra la pestaña."""
+    cuando el cliente cierra la pestaña.
+
+    F-FIX-SSE-BUS-MULTIWORKER (2026-08-22, encontrado en la auditoria
+    completa): antes esto leía de un "bus" de asyncio.Queue en memoria de
+    proceso (`services/sse_bus.py`). Con `uvicorn --workers 4`, si la
+    request que crea la notificación caía en un worker distinto al de
+    esta conexión (lo más probable, 3 de cada 4 veces), el mensaje se
+    perdía sin ningún error visible. Ahora se abre un MongoDB Change
+    Stream directo sobre la colección `notifications`, filtrado por
+    `destinatario_id` — todos los workers observan la MISMA colección en
+    Atlas, así que funciona sin importar en qué worker se creó la
+    notificación. Verificado en vivo contra Atlas real: insertar un
+    Notification en un proceso separado dispara el `next()` del change
+    stream abierto en otro."""
 
     current_user = await _resolve_user_from_ticket(ticket) if ticket else None
     if current_user is None:
         raise HTTPException(status_code=401, detail="Se requiere un ticket de autenticación válido")
 
     user_id = current_user.id
-    queue = await sse_bus.subscribe(user_id)
-    _sse_logger.info(f"[sse] user={user_id} subscribed (bus={sse_bus.stats()})")
+    _sse_logger.info(f"[sse] user={user_id} conectado (change stream)")
 
     async def event_generator():
+        collection = Notification.get_motor_collection()
+        pipeline = [
+            {"$match": {"operationType": "insert", "fullDocument.destinatario_id": user_id}}
+        ]
         try:
             # Enviar evento inicial de "conectado" con el unread_count actual
             unread = await notification_service.get_unread_count(destinatario_id=user_id)
@@ -178,32 +194,43 @@ async def stream_notifications(
                 "data": json.dumps({"unread_count": unread}),
             }
             last_heartbeat = asyncio.get_event_loop().time()
-            while True:
-                # Heartbeat cada 30s para mantener viva la conexión
-                now = asyncio.get_event_loop().time()
-                if now - last_heartbeat > 30:
-                    yield {"event": "heartbeat", "data": "{}"}
-                    last_heartbeat = now
+            async with collection.watch(pipeline=pipeline, full_document="updateLookup") as stream:
+                while True:
+                    now = asyncio.get_event_loop().time()
+                    if now - last_heartbeat > 30:
+                        yield {"event": "heartbeat", "data": "{}"}
+                        last_heartbeat = now
 
-                # Si el cliente se desconecta, salir
-                if await request.is_disconnected():
-                    break
+                    if await request.is_disconnected():
+                        break
 
-                # Esperar un mensaje con timeout corto para chequear disconnect
-                try:
-                    data = await asyncio.wait_for(queue.get(), timeout=1.0)
+                    try:
+                        change = await asyncio.wait_for(stream.next(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue
+
+                    doc = change.get("fullDocument")
+                    if not doc:
+                        continue
+                    notif_dict = {
+                        "id": str(doc.get("_id")),
+                        "titulo": doc.get("titulo"),
+                        "mensaje": doc.get("mensaje"),
+                        "tipo_alerta": doc.get("tipo_alerta"),
+                        "ruta": doc.get("ruta"),
+                        "referencia_tipo": doc.get("referencia_tipo"),
+                        "referencia_id": str(doc["referencia_id"]) if doc.get("referencia_id") else None,
+                        "leido": doc.get("leido", False),
+                        "created_at": doc.get("created_at").isoformat() if doc.get("created_at") else None,
+                    }
                     yield {
                         "event": "notification",
-                        "data": json.dumps(data, default=str),
+                        "data": json.dumps(notif_dict, default=str),
                     }
-                except asyncio.TimeoutError:
-                    # No había mensaje, seguir el loop para chequear disconnect
-                    continue
         except asyncio.CancelledError:
             # Cliente desconectó abruptamente
             pass
         finally:
-            await sse_bus.unsubscribe(user_id, queue)
-            _sse_logger.info(f"[sse] user={user_id} unsubscribed (bus={sse_bus.stats()})")
+            _sse_logger.info(f"[sse] user={user_id} desconectado")
 
     return EventSourceResponse(event_generator())

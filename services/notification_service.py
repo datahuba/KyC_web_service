@@ -26,9 +26,18 @@ async def create_notification(
     navega a esa ruta (ej. '/app/payments'). `referencia_tipo`/`referencia_id`
     permiten resaltar/abrir la entidad concreta (pago, inscripción, etc.).
 
-    TECH-003: después de insertar, publica en el SSE bus para notificar en
-    tiempo real a los clientes conectados (elimina el polling cada 45s del
-    frontend).
+    F-FIX-SSE-BUS-MULTIWORKER (2026-08-22, encontrado en la auditoria
+    completa): antes, después de insertar, esta función publicaba en un
+    "SSE bus" en memoria (`services/sse_bus.py`) que un endpoint separado
+    leía. Con `uvicorn --workers 4`, el publish y el subscribe casi nunca
+    caían en el mismo proceso — la notificación se perdía en silencio
+    ~3 de cada 4 veces. Se eliminó el bus: el endpoint `GET
+    /notifications/stream` ahora abre directamente un MongoDB Change
+    Stream sobre esta misma colección, filtrado por destinatario — eso sí
+    funciona entre los 4 workers, porque todos observan la misma
+    colección compartida en Atlas, no memoria de proceso. No hay nada que
+    publicar acá: simplemente insertar el documento ya dispara el evento
+    en cualquier worker que tenga a este usuario conectado.
     """
     notification = Notification(
         destinatario_id=destinatario_id,
@@ -42,29 +51,6 @@ async def create_notification(
         evento=evento
     )
     await notification.insert()
-
-    # TECH-003: push en tiempo real via SSE. No bloquea: si nadie está
-    # conectado, se ignora. Si la queue está llena, descarta.
-    try:
-        from services.sse_bus import sse_bus
-        # Serializar a dict para que el JSON sea estable
-        notif_dict = {
-            "id": str(notification.id),
-            "titulo": notification.titulo,
-            "mensaje": notification.mensaje,
-            "tipo_alerta": notification.tipo_alerta,
-            "ruta": notification.ruta,
-            "referencia_tipo": notification.referencia_tipo,
-            "referencia_id": str(notification.referencia_id) if notification.referencia_id else None,
-            "leido": notification.leido,
-            "created_at": notification.created_at.isoformat() if notification.created_at else None,
-        }
-        await sse_bus.publish(destinatario_id, notif_dict)
-    except Exception as e:
-        # No fallar la creación de la notificación por un error en el bus
-        import logging
-        logging.getLogger("kyc.sse").warning(f"[sse] publish failed: {e}")
-
     return notification
 
 

@@ -47,7 +47,7 @@ async def forgot_password(data: ForgotPasswordRequest, request: Request) -> Any:
     """
     # AUDITORÍA (ALTO): sin límite, un atacante podía disparar envíos de
     # correo masivos/spam a cualquier email con solo probar direcciones.
-    check_rate_limit(request, "forgot-password", max_intentos=5, ventana_segundos=15 * 60)
+    await check_rate_limit(request, "forgot-password", max_intentos=5, ventana_segundos=15 * 60)
 
     email = data.email.strip().lower()
 
@@ -162,7 +162,7 @@ async def resend_verification(
     un nuevo correo de verificación para su email actual. Protegido con
     rate limit para no permitir espamear el buzón de un tercero.
     """
-    check_rate_limit(request, "resend-verification", max_intentos=3, ventana_segundos=15 * 60)
+    await check_rate_limit(request, "resend-verification", max_intentos=3, ventana_segundos=15 * 60)
 
     if not current_user.email:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Tu cuenta no tiene un correo registrado.")
@@ -221,7 +221,7 @@ async def login_user(login_data: LoginRequest, request: Request) -> Any:
     """
     # AUDITORÍA (ALTO #8 - seguridad): sin límite, fuerza bruta de contraseñas
     # era completamente viable contra este endpoint. Ver core/rate_limit.py.
-    check_rate_limit(request, "login", max_intentos=10, ventana_segundos=15 * 60)
+    await check_rate_limit(request, "login", max_intentos=10, ventana_segundos=15 * 60)
 
     # ISSUE-Q-LOGIN-MULTIPLE (2026-07-09): el personal (docentes principalmente)
     # puede iniciar sesión indistintamente con su username, su email o su carnet
@@ -343,7 +343,7 @@ async def login_student(login_data: LoginRequest, request: Request) -> Any:
     **Retorna:** JWT Token de acceso
     """
     # AUDITORÍA (ALTO #8 - seguridad): ver nota equivalente en login_user.
-    check_rate_limit(request, "login-student", max_intentos=10, ventana_segundos=15 * 60)
+    await check_rate_limit(request, "login-student", max_intentos=10, ventana_segundos=15 * 60)
 
     # ISSUE-Q-LOGIN-MULTIPLE (2026-07-09): el estudiante puede iniciar sesión
     # indistintamente con su número de registro, su correo o su carnet (CI).

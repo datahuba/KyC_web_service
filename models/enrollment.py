@@ -261,6 +261,15 @@ class Enrollment(MongoBaseModel):
         default=None,
         description="Número de módulo (1..N) a partir del cual el estudiante retoma clases en este nuevo programa."
     )
+    # F-FIX-REINCORPORACION-SIN-FECHA (2026-08-22, encontrado en la auditoria
+    # completa): cada otra transicion de estado de este modelo
+    # (congelamiento, abandono, retiro) guarda su propia fecha junto al
+    # campo/motivo — esta no la tenia, la unica forma indirecta de saber
+    # cuando paso era el created_at de la inscripcion nueva.
+    fecha_reincorporacion: Optional[datetime] = Field(
+        default=None,
+        description="Fecha (UTC) en que se ejecutó la reincorporación. None si no aplica."
+    )
 
     # ISSUE-P-RECALCULO-NOTA: snapshot de la nota mínima exigida por el descuento personal
     nota_minima_beca: Optional[float] = Field(

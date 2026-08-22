@@ -27,12 +27,20 @@ from datetime import datetime
 from pydantic import Field
 from beanie import Document
 
+from core.timezone_utils import utcnow_naive
+
 
 class SSETicket(Document):
     ticket: str = Field(..., description="Token de un solo uso, indexado unico")
     user_id: str
     user_type: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    # F-FIX-DATETIME-UTCNOW-DEPRECADO (2026-08-22, encontrado en la
+    # auditoria completa): este archivo arreglo el bug de multi-worker
+    # pero seguia usando `datetime.utcnow()`, exactamente el patron
+    # deprecado que AGENTS.md prohibe para codigo nuevo. `utcnow_naive()`
+    # es el helper que ya usa el resto del proyecto para timestamps
+    # naive-pero-UTC — se alinea con eso en vez de con datetime.utcnow().
+    created_at: datetime = Field(default_factory=utcnow_naive)
 
     class Settings:
         name = "sse_tickets"

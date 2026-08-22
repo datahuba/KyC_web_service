@@ -2358,8 +2358,31 @@ async def reincorporar_estudiante_endpoint(
     F-REINCORPORACION (Kevin 2026-08-22):
     Permite reincorporar a un estudiante en estado pasivo o suspendido a una nueva edición del programa,
     arrastrando notas aprobadas y pagos previos para cobrar únicamente lo faltante.
-    Permisos: CPD, Admin, Superadmin, Coordinador Académico.
+    Permisos: CPD, Admin, Superadmin, Coordinador Académico, Encargado de Curso.
+
+    F-FIX-REINCORPORACION-SIN-SCOPE (2026-08-22, encontrado en la auditoria
+    completa): a diferencia de CADA otra accion de este archivo
+    (create_enrollment, create_enrollments_bulk, etc.), este endpoint no
+    restringia a encargado_curso/coordinador a sus `cursos_asignados` — un
+    encargado podia reincorporar cualquier estudiante en cualquier programa
+    del sistema. Se agrega el mismo chequeo que usan los demas endpoints,
+    sobre AMBOS cursos (el de origen y el de destino).
     """
+    old_enrollment = await Enrollment.get(id)
+    if not old_enrollment:
+        raise HTTPException(status_code=404, detail="Inscripción origen no encontrada")
+
+    if current_user.rol in (UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR):
+        cursos_asignados = current_user.cursos_asignados or []
+        if (
+            old_enrollment.curso_id not in cursos_asignados
+            or data.nuevo_curso_id not in cursos_asignados
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="No tienes asignado el curso de origen o el curso destino de esta reincorporación",
+            )
+
     try:
         new_enrollment = await enrollment_service.reincorporar_estudiante(
             enrollment_id=id,

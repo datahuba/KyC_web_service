@@ -23,10 +23,11 @@ los tickets viven en MongoDB (`SSETicket`, compartido por los 4 workers) y
 de Motor — no vía Beanie ORM — para que el "de un solo uso" siga
 garantizado incluso con requests concurrentes en distintos workers.
 """
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Optional, Tuple
 
 from models.sse_ticket import SSETicket
+from core.timezone_utils import utcnow_naive
 
 _TICKET_TTL_SECONDS = 30
 
@@ -55,7 +56,7 @@ class SSETicketService:
             return None
 
         created_at = doc.get("created_at")
-        if created_at is not None and datetime.utcnow() - created_at > timedelta(seconds=_TICKET_TTL_SECONDS):
+        if created_at is not None and utcnow_naive() - created_at > timedelta(seconds=_TICKET_TTL_SECONDS):
             return None
 
         return doc["user_id"], doc["user_type"]

@@ -53,6 +53,11 @@ from models.asistencia import Sesion, AsistenciaRegistro
 # handshake del stream SSE, ahora en Mongo (compartido por los 4 workers)
 # en vez de un dict en memoria por-proceso.
 from models.sse_ticket import SSETicket
+# F-FIX-AUDITORIA-FINANCIERA-NO-PERSISTIA (2026-08-22): la auditoria
+# inmutable de AGENTS.md nunca se habia persistido, solo hacia print().
+from models.audit_log import AuditLogFinanciero
+# F-FIX-RATE-LIMIT-MULTIWORKER (2026-08-22)
+from models.rate_limit_attempt import RateLimitAttempt
 
 
 async def _sanitize_legacy_database(db):
@@ -239,6 +244,10 @@ async def init_db():
             AsistenciaRegistro,
             # F-FIX-SSE-TICKET-MULTIWORKER (2026-08-19)
             SSETicket,
+            # F-FIX-AUDITORIA-FINANCIERA-NO-PERSISTIA (2026-08-22)
+            AuditLogFinanciero,
+            # F-FIX-RATE-LIMIT-MULTIWORKER (2026-08-22)
+            RateLimitAttempt,
         ]
     )
     print(f"[OK] Conectado a MongoDB ({settings.DATABASE_NAME}) y Beanie inicializado con Connection Pool optimizado.")
