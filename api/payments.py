@@ -1174,18 +1174,26 @@ async def generar_reporte_excel_pagos(
         if payment.estado_pago in (EstadoPago.ANULADO, EstadoPago.RECHAZADO) and monto_exportar > 0:
             monto_exportar = -monto_exportar
 
+        metodo_str = (payment.metodo_pago or "").lower()
+        if payment.numero_transaccion:
+            trans_str = payment.numero_transaccion
+        elif "caja" in metodo_str or "efectivo" in metodo_str:
+            trans_str = "Caja (Ventanilla)"
+        else:
+            trans_str = "Sin N° Voucher"
+
         row = [
             nombre_estudiante,
             estudiante_ci,
             nombre_curso,
-            payment.metodo_pago,
+            payment.metodo_pago or "Sin registrar",
             fecha_comprobante_bolivia,
             fecha_registro_bolivia,
             "Bs",
             monto_exportar,
             payment.concepto or "",
             total_cuotas,
-            payment.numero_transaccion or "Caja / S/N",
+            trans_str,
             payment.estado_pago.value if payment.estado_pago else "",
             payment.motivo_reversion or ""
         ]
@@ -1962,6 +1970,15 @@ async def export_payments_excel(
         course_name = (course.codigo if course and course.codigo else (course.nombre_programa if course and course.nombre_programa else "Sin curso"))
         modulo = p.get("numero_cuota") or "N/A"
 
+        num_trans = p.get("numero_transaccion")
+        met_str = (p.get("metodo_pago") or "").lower()
+        if num_trans:
+            trans_str = str(num_trans)
+        elif "caja" in met_str or "efectivo" in met_str:
+            trans_str = "Caja (Ventanilla)"
+        else:
+            trans_str = "Sin N° Voucher"
+
         row = [
             str(p.get("_id", "")),
             format_fecha(p.get("fecha_comprobante"), "%Y-%m-%d", fallback="Sin registrar"),
@@ -1972,9 +1989,6 @@ async def export_payments_excel(
             p.get("concepto") or "",
             p.get("detalle") or "",  # F-COBRANZA-020: desglose separado
             modulo,
-            # F-COBRANZA-037 (2026-07-22): Sandra pidio columnas Debito/Credito
-            # para ver la diferencia entre pagos y anulaciones. Los rechazos
-            # tambien van a Debito. Los pagos aprobados van a Credito.
             p.get("tipo_movimiento") or "PAGO",
             float(p.get("debito") or 0),
             float(p.get("credito") or 0),
@@ -1982,12 +1996,7 @@ async def export_payments_excel(
             p.get("metodo_pago") or "Transferencia",
             p.get("banco") or "Caja UAGRM",
             p.get("remitente") or "",
-            p.get("numero_transaccion") or "S/N",
-            # F-COBRANZA-016 fix (2026-07-22): el campo se llama `estado` en
-            # el dict enriquecido (devuelto por enrich_payments_with_details_bulk
-            # que ya lo convierte a .value del enum). Antes usaba `estado_pago`
-            # que devolvía el enum crudo y se mostraba como "EstadoPago.APROBADO"
-            # en el XLSX. Bug detectado por Joel al abrir el Excel descargado.
+            trans_str,
             p.get("estado") or "",
             p.get("comprobante_url") or "",
         ]
