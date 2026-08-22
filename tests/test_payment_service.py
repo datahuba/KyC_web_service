@@ -275,34 +275,76 @@ class TestRechazoDePagosLegacy:
         assert puede_rechazar is False
 
 
+def _fake_payment(cantidad_pago, estado_pago):
+    """
+    F-FIX-TESTS-PAYMENT-SERVICE-FALSOS (2026-08-22, encontrado en la
+    auditoria completa): antes, TestIntegridadContable/TestReverisonConNegativo
+    NUNCA importaban ni llamaban services/payment_service.py — reimplementaban
+    la aritmetica en Python local y se comparaban consigo mismas.
+    `test_total_neto_caso_bug_588` incluso hardcodeaba
+    `22386.0 - 588.0 == 21798.0`, que pasa aunque el codigo real rompa la
+    exclusion de ANULADOS.
+
+    Estos tests ahora llaman a las funciones puras REALES
+    `_calcular_resumen_caja`/`_serializar_payments_reporte`. No se puede
+    instanciar el `Payment` real de Beanie sin haber llamado
+    `init_beanie()` primero (este proyecto no tiene harness de MongoDB
+    para tests, ver AGENTS.md) — `Payment(...)` directo revienta con
+    `CollectionWasNotInitialized` incluso sin tocar la DB. Se usa en
+    cambio un `BaseModel` minimo con exactamente los dos campos que
+    `_calcular_resumen_caja`/`_serializar_payments_reporte` de verdad
+    leen (`cantidad_pago`, `estado_pago`) — mismo contrato, sin Beanie.
+    """
+    from pydantic import BaseModel
+    from models.enums import EstadoPago as _EstadoPago
+
+    class _FakePayment(BaseModel):
+        cantidad_pago: float
+        estado_pago: _EstadoPago
+
+    return _FakePayment(cantidad_pago=cantidad_pago, estado_pago=estado_pago)
+
+
 class TestIntegridadContable:
-    """Garantías de integridad tras la aprobación automática."""
+    """Garantías de integridad tras la aprobación automática. Llama al
+    código real (`_calcular_resumen_caja`), no una reimplementación."""
 
     def test_total_aprobados_incluye_autoaprobados(self):
         """Los pagos auto-aprobados cuentan en el reporte de caja igual
-        que los manuales. No hay distinción contable."""
+        que los manuales — no hay campo que los distinga, así que si
+        estado_pago == APROBADO, el monto real ya los incluye."""
         from models.enums import EstadoPago
-        # El reporte de caja suma todos los pagos con estado_pago == APROBADO,
-        # sin importar si fueron auto-aprobados o manuales.
-        # Por lo tanto: el total cuadra con el extracto bancario.
-        estados_para_reporte = [EstadoPago.APROBADO]
-        assert EstadoPago.APROBADO in estados_para_reporte
-        # Pendientes, rechazados y anulados NO cuentan como ingreso
-        assert EstadoPago.PENDIENTE not in estados_para_reporte
-        assert EstadoPago.RECHAZADO not in estados_para_reporte
-        assert EstadoPago.ANULADO not in estados_para_reporte
+        from services.payment_service import _calcular_resumen_caja
 
-    def test_anulado_no_suma_al_reporte(self):
-        """F-COBRANZA-005: los pagos anulados NO deben sumar al reporte
-        (este es el bug actual de los 588 BOB que no cuadran).
-        El test verifica que ANULADO está excluido del reporte de caja."""
+        pagos = [_fake_payment(1000.0, EstadoPago.APROBADO), _fake_payment(500.0, EstadoPago.APROBADO)]
+        resumen = _calcular_resumen_caja(pagos)
+        assert resumen["total_aprobado"] == 1500.0
+
+    def test_anulado_no_suma_al_total_aprobado(self):
+        """F-COBRANZA-005 (bug de los 588 BOB): un pago ANULADO no debe
+        sumar a total_aprobado, aunque sí aparece en total_anulado."""
         from models.enums import EstadoPago
-        # El reporte de caja usa: estado_pago == APROBADO
-        # Por lo tanto ANULADO queda excluido
-        # (F-COBRANZA-005 lo arregla con reversión con negativo)
-        estados_excluidos = [EstadoPago.ANULADO, EstadoPago.RECHAZADO, EstadoPago.PENDIENTE]
-        assert EstadoPago.APROBADO not in estados_excluidos
-        assert EstadoPago.ANULADO in estados_excluidos
+        from services.payment_service import _calcular_resumen_caja
+
+        pagos = [_fake_payment(1000.0, EstadoPago.APROBADO), _fake_payment(588.0, EstadoPago.ANULADO)]
+        resumen = _calcular_resumen_caja(pagos)
+        assert resumen["total_aprobado"] == 1000.0
+        assert resumen["total_anulado"] == 588.0
+
+    def test_pendiente_y_rechazado_no_alteran_total_aprobado(self):
+        from models.enums import EstadoPago
+        from services.payment_service import _calcular_resumen_caja
+
+        pagos = [
+            _fake_payment(1000.0, EstadoPago.APROBADO),
+            _fake_payment(300.0, EstadoPago.PENDIENTE),
+            _fake_payment(200.0, EstadoPago.RECHAZADO),
+        ]
+        resumen = _calcular_resumen_caja(pagos)
+        assert resumen["total_aprobado"] == 1000.0
+        assert resumen["total_pendiente"] == 300.0
+        # F-068: rechazado cuenta como "anulado" para el desglose de débitos
+        assert resumen["total_anulado"] == 200.0
 
 
 # ========================================================================
@@ -313,98 +355,94 @@ class TestIntegridadContable:
 # el extracto bancario.
 
 class TestReverisonConNegativo:
-    """F-COBRANZA-005: los pagos anulados se muestran como monto negativo."""
+    """F-COBRANZA-005: los pagos anulados se muestran como monto negativo.
+    Llama a `_serializar_payments_reporte` real, no una reimplementación."""
 
     def test_pago_anulado_cantidad_se_invierte(self):
-        """Si un pago está ANULADO y su cantidad_pago era positivo,
-        al reportarlo se debe invertir a negativo."""
         from models.enums import EstadoPago
-        # Simular el caso real
-        cantidad_original = 1000.0
-        estado = EstadoPago.ANULADO
+        from services.payment_service import _serializar_payments_reporte
 
-        # Lógica del fix: si es ANULADO y cantidad > 0 → cantidad = -cantidad
-        if estado == EstadoPago.ANULADO and cantidad_original > 0:
-            cantidad_reportada = -cantidad_original
-        else:
-            cantidad_reportada = cantidad_original
-
-        assert cantidad_reportada == -1000.0
+        pagos = [_fake_payment(1000.0, EstadoPago.ANULADO)]
+        serializados = _serializar_payments_reporte(pagos)
+        assert serializados[0]["cantidad_pago"] == -1000.0
 
     def test_pago_aprobado_no_se_invierte(self):
-        """Los pagos APROBADOS NO se modifican: su cantidad sigue siendo positiva."""
         from models.enums import EstadoPago
-        cantidad_original = 1000.0
-        estado = EstadoPago.APROBADO
+        from services.payment_service import _serializar_payments_reporte
 
-        if estado == EstadoPago.ANULADO and cantidad_original > 0:
-            cantidad_reportada = -cantidad_original
-        else:
-            cantidad_reportada = cantidad_original
-
-        assert cantidad_reportada == 1000.0
+        pagos = [_fake_payment(1000.0, EstadoPago.APROBADO)]
+        serializados = _serializar_payments_reporte(pagos)
+        assert serializados[0]["cantidad_pago"] == 1000.0
 
     def test_total_neto_resta_anulados(self):
-        """El total_neto del reporte = total_aprobado - total_anulado.
-        Si hay 5000 aprobados y 1000 anulados, neto = 4000."""
-        total_aprobado = 5000.0
-        total_anulado = 1000.0
-        total_neto = round(total_aprobado - total_anulado, 2)
-        assert total_neto == 4000.0
+        """total_neto = total_aprobado - total_anulado. Real, vía
+        `_calcular_resumen_caja`, no una copia local de la resta."""
+        from models.enums import EstadoPago
+        from services.payment_service import _calcular_resumen_caja
+
+        pagos = [_fake_payment(5000.0, EstadoPago.APROBADO), _fake_payment(1000.0, EstadoPago.ANULADO)]
+        resumen = _calcular_resumen_caja(pagos)
+        assert resumen["total_neto"] == 4000.0
 
     def test_total_neto_caso_bug_588(self):
-        """Reproduce el caso real de producción: 22,386 aprobados, 588 anulados.
-        El neto debe ser 21,798 (lo que cuadra con el extracto)."""
-        total_aprobado = 22386.0
-        total_anulado = 588.0
-        total_neto = round(total_aprobado - total_anulado, 2)
-        assert total_neto == 21798.0
-        # Esto es lo que el usuario (Joel) quería: que el reporte cuadre
+        """Reproduce el caso real de producción: 22,386 aprobados, 588
+        anulados. Antes este test hardcodeaba el resultado esperado en
+        Python puro y pasaría aunque `_calcular_resumen_caja` estuviera
+        rota; ahora construye los Payment reales y llama al código real."""
+        from models.enums import EstadoPago
+        from services.payment_service import _calcular_resumen_caja
+
+        pagos = [_fake_payment(22386.0, EstadoPago.APROBADO), _fake_payment(588.0, EstadoPago.ANULADO)]
+        resumen = _calcular_resumen_caja(pagos)
+        assert resumen["total_neto"] == 21798.0
 
     def test_total_neto_sin_anulados(self):
-        """Si no hay anulados, total_neto = total_aprobado."""
-        total_aprobado = 5000.0
-        total_anulado = 0.0
-        total_neto = round(total_aprobado - total_anulado, 2)
-        assert total_neto == 5000.0
+        from models.enums import EstadoPago
+        from services.payment_service import _calcular_resumen_caja
+
+        pagos = [_fake_payment(5000.0, EstadoPago.APROBADO)]
+        resumen = _calcular_resumen_caja(pagos)
+        assert resumen["total_neto"] == 5000.0
 
     def test_total_neto_redondeo_2_decimales(self):
-        """El total_neto se redondea a 2 decimales (centavos)."""
-        total_aprobado = 100.005
-        total_anulado = 33.333
-        total_neto = round(total_aprobado - total_anulado, 2)
-        assert total_neto == 66.67  # round(66.672, 2) = 66.67
+        from models.enums import EstadoPago
+        from services.payment_service import _calcular_resumen_caja
+
+        pagos = [_fake_payment(100.005, EstadoPago.APROBADO), _fake_payment(33.333, EstadoPago.ANULADO)]
+        resumen = _calcular_resumen_caja(pagos)
+        assert resumen["total_neto"] == 66.67  # round(66.672, 2) = 66.67
 
 
 class TestReporteCajaConsistenciaContable:
-    """Garantías de integridad contable en el reporte de caja."""
+    """Garantías de integridad contable en el reporte de caja. Real."""
 
     def test_suma_pagos_lista_iguala_total_neto(self):
-        """La suma de la columna 'cantidad_pago' de los payments en la lista
-        debe ser igual a total_neto. Esto valida que la transformación
-        (anulados → negativos) se aplicó correctamente."""
-        # Simular lista de pagos
+        """La suma de 'cantidad_pago' de los payments serializados debe
+        igualar total_neto — valida que la transformación (anulados →
+        negativos) y el cálculo del neto usan la misma regla."""
+        from models.enums import EstadoPago
+        from services.payment_service import _calcular_resumen_caja, _serializar_payments_reporte
+
         pagos = [
-            {"cantidad": 1000.0, "estado": "aprobado"},
-            {"cantidad": 500.0, "estado": "aprobado"},
-            {"cantidad": 200.0, "estado": "anulado"},  # se vuelve -200
+            _fake_payment(1000.0, EstadoPago.APROBADO),
+            _fake_payment(500.0, EstadoPago.APROBADO),
+            _fake_payment(200.0, EstadoPago.ANULADO),
         ]
-        total_neto = 0
-        for p in pagos:
-            if p["estado"] == "anulado":
-                total_neto += -p["cantidad"]
-            else:
-                total_neto += p["cantidad"]
-        assert total_neto == 1300.0  # 1000 + 500 - 200
+        resumen = _calcular_resumen_caja(pagos)
+        serializados = _serializar_payments_reporte(pagos)
+        suma_lista = sum(p["cantidad_pago"] for p in serializados)
+        assert suma_lista == 1300.0  # 1000 + 500 - 200
+        assert suma_lista == resumen["total_neto"]
 
     def test_anulado_con_monto_cero_no_se_invierte(self):
-        """Si un pago anulado tiene cantidad 0 (raro pero posible), no se
-        convierte en 0 negativo."""
-        cantidad = 0.0
-        if cantidad > 0:
-            cantidad = -cantidad
-        # -0.0 == 0.0 en Python, pero queremos que sea estable
-        assert abs(cantidad) == 0.0
+        """Si un pago anulado tiene cantidad 0 (raro pero posible), la
+        condición `cantidad_pago > 0` del código real no lo invierte."""
+        from models.enums import EstadoPago
+        from services.payment_service import _serializar_payments_reporte
+
+        pagos = [_fake_payment(0.0, EstadoPago.ANULADO)]
+        serializados = _serializar_payments_reporte(pagos)
+        assert serializados[0]["cantidad_pago"] == 0.0
 
 
 # ========================================================================
@@ -1326,15 +1364,25 @@ class TestF031EnrichAceptaDicts:
         )
 
     def test_reporte_caja_pasa_lista_a_enrich(self, service_src):
-        """get_reporte_caja debe poder pasar su lista (de dicts) a enrich."""
-        # Verificar que get_reporte_caja retorna dicts y enrich los acepta
-        idx = service_src.read_text(encoding="utf-8").find("async def get_reporte_caja")
-        bloque = service_src.read_text(encoding="utf-8")[idx:idx + 3000]
+        """get_reporte_caja debe poder pasar su lista (de dicts) a enrich.
+
+        F-FIX-TESTS-PAYMENT-SERVICE-FALSOS (2026-08-22): la conversion a
+        dict se extrajo de get_reporte_caja a la funcion pura
+        `_serializar_payments_reporte` (para poder testearla sin DB, ver
+        TestReverisonConNegativo) — el ancla de este test se actualiza
+        para buscar ahi en vez del cuerpo de get_reporte_caja.
+        """
+        src = service_src.read_text(encoding="utf-8")
+        idx = src.find("def _serializar_payments_reporte")
+        assert idx > 0, "No se encontró _serializar_payments_reporte"
+        bloque = src[idx:idx + 1000]
         assert "p_dict = p.model_dump" in bloque, (
-            "get_reporte_caja convierte a dicts (esto era lo que causaba el 500)"
+            "_serializar_payments_reporte convierte a dicts (esto era lo que causaba el 500)"
         )
-        # Pero enrich ahora debe aceptar dicts (verificado arriba)
-        # Asi que el endpoint puede pasar la lista de dicts directamente
+        # get_reporte_caja debe usar esa funcion, no reimplementar la conversion inline
+        idx_reporte = src.find("async def get_reporte_caja")
+        bloque_reporte = src[idx_reporte:idx_reporte + 2000]
+        assert "_serializar_payments_reporte(" in bloque_reporte
 
 
 class TestF034ByStaffSkipOwnershipCheck:
@@ -1579,30 +1627,27 @@ class TestF068TotalAnuladoIncluyeRechazados:
     ANULADO = 876 Bs total.
     """
 
-    @pytest.fixture
-    def get_reporte_caja_src(self):
-        from pathlib import Path
-        return Path("services/payment_service.py").read_text(encoding="utf-8")
+    def test_get_reporte_caja_incluye_rechazados_en_total_anulado(self):
+        """La función debe sumar tanto ANULADO como RECHAZADO.
 
-    def test_get_reporte_caja_incluye_rechazados_en_total_anulado(self, get_reporte_caja_src):
-        """La función debe sumar tanto ANULADO como RECHAZADO."""
-        # Buscar la sección de "Totales agregados"
-        idx = get_reporte_caja_src.find("Totales agregados sobre TODO el rango")
-        assert idx > 0, "No se encontró la sección de totales en get_reporte_caja"
-        bloque = get_reporte_caja_src[idx:idx + 2000]
-        # Debe chequear AMBOS
-        assert "EstadoPago.ANULADO" in bloque, (
-            "F-068: Falta la suma de ANULADO en total_anulado."
-        )
-        assert "EstadoPago.RECHAZADO" in bloque, (
-            "F-068: Falta la suma de RECHAZADO en total_anulado. "
-            "Sin esto, la UI muestra 588 Bs pero el PDF 876 Bs "
-            "(288 del rechazado de Luis Valdez no se cuenta)."
-        )
-        # Debe ser `in (ANULADO, RECHAZADO)` (tupla), no dos ifs separados
-        assert "EstadoPago.ANULADO, EstadoPago.RECHAZADO" in bloque, (
-            "F-068: El chequeo debe ser `in (EstadoPago.ANULADO, EstadoPago.RECHAZADO)`, "
-            "no dos ifs separados."
+        F-FIX-TESTS-PAYMENT-SERVICE-FALSOS (2026-08-22): antes esto era
+        inspección de fuente (buscar los literales "ANULADO"/"RECHAZADO"
+        cerca de un comentario). Ahora reproduce el caso real reportado
+        (Luis Valdez 288 Bs RECHAZADO + Jerry Fletcher 2x 294 Bs ANULADO
+        = 876 Bs) llamando la función real `_calcular_resumen_caja`.
+        """
+        from models.enums import EstadoPago
+        from services.payment_service import _calcular_resumen_caja
+
+        pagos = [
+            _fake_payment(288.0, EstadoPago.RECHAZADO),
+            _fake_payment(294.0, EstadoPago.ANULADO),
+            _fake_payment(294.0, EstadoPago.ANULADO),
+        ]
+        resumen = _calcular_resumen_caja(pagos)
+        assert resumen["total_anulado"] == 876.0, (
+            "F-068: sin sumar RECHAZADO junto con ANULADO, la UI mostraría "
+            "588 Bs en vez de 876 Bs (288 del rechazado de Luis Valdez no contaría)."
         )
 
 

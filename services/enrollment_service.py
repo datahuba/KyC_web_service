@@ -1711,23 +1711,45 @@ async def reincorporar_estudiante(
         descuento_personalizado=old_enrollment.descuento_personalizado
     )
     
-    # Transferir notas y pagos para módulos < modulo_inicio
+    # Transferir notas y pagos para módulos < modulo_inicio.
+    #
+    # F-FIX-REINCORPORACION-PAGO-FANTASMA (2026-08-22, encontrado en la
+    # auditoria completa): esta funcion marcaba estos modulos como
+    # "Pagado" con monto_pagado = costo SOLO por su posicion en la lista,
+    # sin mirar si el modulo original realmente estaba pagado. Un
+    # estudiante que debia los modulos 1-2 podia "reincorporarse" desde
+    # el modulo 3 y el sistema le regalaba esos dos modulos como pagados,
+    # de la nada. La rama `else` (modulo nuevo sin equivalente en la
+    # inscripcion vieja) hacia lo mismo, todavia peor: ni siquiera tenia
+    # una base vieja de la cual copiar.
+    #
+    # Fix: solo se convalida como pagado lo que el modulo original
+    # REALMENTE tiene pagado (estado == "Pagado" y monto_pagado > 0). Si
+    # el modulo original seguia pendiente, el modulo nuevo tambien queda
+    # pendiente — el estudiante lo sigue debiendo, la reincorporacion no
+    # es un mecanismo para condonar deuda.
     total_convalidado_pagado = 0.0
     for idx, new_mod in enumerate(new_enrollment.modulos):
         mod_num = idx + 1
-        if mod_num < modulo_inicio:
-            if idx < len(old_enrollment.modulos):
-                old_mod = old_enrollment.modulos[idx]
+        old_mod = old_enrollment.modulos[idx] if idx < len(old_enrollment.modulos) else None
+        old_mod_pagado = bool(old_mod and old_mod.estado == "Pagado" and (old_mod.monto_pagado or 0) > 0)
+
+        if mod_num < modulo_inicio and old_mod_pagado:
+            new_mod.nota = old_mod.nota
+            new_mod.estado_academico = old_mod.estado_academico or "Aprobado"
+            new_mod.estado_validacion_nota = old_mod.estado_validacion_nota or "validada"
+            new_mod.estado = "Pagado"
+            new_mod.monto_pagado = new_mod.costo
+            total_convalidado_pagado += new_mod.costo
+        elif mod_num < modulo_inicio:
+            # Módulo previo al inicio pero NO pagado en el origen: se
+            # arrastra la nota/estado académico si existe (para no perder
+            # trabajo académico ya hecho), pero sigue debiéndose.
+            if old_mod:
                 new_mod.nota = old_mod.nota
-                new_mod.estado_academico = old_mod.estado_academico or "Aprobado"
-                new_mod.estado_validacion_nota = old_mod.estado_validacion_nota or "validada"
-                new_mod.estado = "Pagado"
-                new_mod.monto_pagado = new_mod.costo
-                total_convalidado_pagado += new_mod.costo
-            else:
-                new_mod.estado = "Pagado"
-                new_mod.monto_pagado = new_mod.costo
-                total_convalidado_pagado += new_mod.costo
+                new_mod.estado_academico = old_mod.estado_academico or new_mod.estado_academico
+            new_mod.estado = "Pendiente"
+            new_mod.monto_pagado = 0.0
         else:
             new_mod.nota = None
             new_mod.estado_academico = "Cursando"
@@ -1752,6 +1774,7 @@ async def reincorporar_estudiante(
     # Vincular referencias de reincorporación
     new_enrollment.reincorporado_de_enrollment_id = old_enrollment.id
     new_enrollment.modulo_reincorporacion_inicio = modulo_inicio
+    new_enrollment.fecha_reincorporacion = utcnow_naive()
     new_enrollment.updated_at = utcnow_naive()
     await new_enrollment.save()
     
@@ -1760,6 +1783,31 @@ async def reincorporar_estudiante(
     old_enrollment.updated_at = utcnow_naive()
     await old_enrollment.save()
     
+    # F-FIX-REINCORPORACION-SIN-AUDITORIA (2026-08-22, encontrado en la
+    # auditoria completa): esta funcion muta plata real (matricula_pagada,
+    # monto_pagado por modulo, total_pagado) sin dejar rastro en la
+    # auditoria inmutable que exige AGENTS.md para cualquier accion
+    # financiera. Import local para evitar import circular
+    # (payment_service ya importa enrollment_service).
+    try:
+        from services.payment_service import _registrar_auditoria_financiera
+
+        await _registrar_auditoria_financiera(
+            accion="reincorporar_estudiante",
+            payment_id=None,
+            enrollment_id=new_enrollment.id,
+            estudiante_id=student.id,
+            monto=total_convalidado_pagado,
+            admin_username=admin_user.username,
+            detalles=(
+                f"Reincorporación de enrollment {old_enrollment.id} a {new_enrollment.id} "
+                f"(curso destino {nuevo_curso_id}), módulo de inicio {modulo_inicio}. "
+                f"Convalidado como pagado (real, verificado contra el origen): Bs. {total_convalidado_pagado}."
+            ),
+        )
+    except Exception as e:
+        print(f"Error registrando auditoría de reincorporación: {e}")
+
     # Notificación in-app al estudiante
     try:
         from services.notification_service import create_notification

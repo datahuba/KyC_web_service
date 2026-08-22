@@ -155,14 +155,22 @@ STUDENT_MATRIZ_PROJECTION = {
 # ========================================================================
 async def _registrar_auditoria_financiera(
     accion: str,
-    payment_id: PydanticObjectId,
+    payment_id: Optional[PydanticObjectId],
     estudiante_id: PydanticObjectId,
     monto: float,
     admin_username: str,
-    detalles: str
+    detalles: str,
+    enrollment_id: Optional[PydanticObjectId] = None,
 ):
     """
     Función auxiliar para registrar los movimientos financieros en un log inmutable.
+
+    F-FIX-AUDITORIA-FINANCIERA-NO-PERSISTIA (2026-08-22, encontrado en la
+    auditoria completa): esta funcion decia ser el log inmutable que
+    documenta AGENTS.md, pero nunca persistia nada — solo hacia print(),
+    que se pierde apenas rota el log del contenedor. Ahora inserta en
+    `AuditLogFinanciero` (Mongo), ademas del print para seguir viendolo
+    en los logs en vivo.
     """
     try:
         print(
@@ -172,7 +180,22 @@ async def _registrar_auditoria_financiera(
             f"DETALLE: {detalles}"
         )
     except Exception as e:
-        print(f"Error guardando auditoría: {str(e)}")
+        print(f"Error imprimiendo auditoría: {str(e)}")
+
+    try:
+        from models.audit_log import AuditLogFinanciero
+
+        await AuditLogFinanciero(
+            accion=accion,
+            payment_id=payment_id,
+            enrollment_id=enrollment_id,
+            estudiante_id=estudiante_id,
+            monto=monto,
+            admin_username=admin_username,
+            detalles=detalles,
+        ).insert()
+    except Exception as e:
+        print(f"Error guardando auditoría en Mongo: {str(e)}")
 
 
 async def enrich_payment_with_details(payment: Payment) -> dict:
@@ -3294,6 +3317,48 @@ async def generar_lista_habilitados(
     }
 
 
+def _calcular_resumen_caja(payments: List[Payment]) -> dict:
+    """
+    F-FIX-TESTS-PAYMENT-SERVICE-FALSOS (2026-08-22, encontrado en la
+    auditoria completa): esta aritmetica vivia inline dentro de
+    `get_reporte_caja()` (que necesita DB para traer los payments), asi
+    que los tests existentes la REIMPLEMENTABAN localmente en vez de
+    llamar al codigo real — podian pasar aunque este calculo real se
+    rompiera. Se extrae a una funcion pura (sin DB) precisamente para que
+    los tests puedan importarla y llamarla de verdad.
+    """
+    total_aprobado = sum(p.cantidad_pago for p in payments if p.estado_pago == EstadoPago.APROBADO)
+    total_pendiente = sum(p.cantidad_pago for p in payments if p.estado_pago == EstadoPago.PENDIENTE)
+    # F-068 (2026-07-22, Kevin): "Total Anulado" debe incluir TANTO anulados
+    # como rechazados (regla F-023: Débitos = anulados/rechazados).
+    total_anulado = sum(
+        p.cantidad_pago for p in payments
+        if p.estado_pago in (EstadoPago.ANULADO, EstadoPago.RECHAZADO)
+    )
+    # F-COBRANZA-005 (2026-07-21): total_neto = aprobado - anulado, para que
+    # cuadre con el extracto bancario sin resta mental del usuario.
+    total_neto = round(total_aprobado - total_anulado, 2)
+
+    return {
+        "cantidad_pagos": len(payments),
+        "total_aprobado": round(total_aprobado, 2),
+        "total_pendiente": round(total_pendiente, 2),
+        "total_anulado": round(total_anulado, 2),
+        "total_neto": total_neto,
+    }
+
+
+def _serializar_payments_reporte(payments: List[Payment]) -> List[dict]:
+    """Ver docstring de `_calcular_resumen_caja` — mismo motivo de extracción."""
+    resultado = []
+    for p in payments:
+        p_dict = p.model_dump(by_alias=True)
+        if p.estado_pago == EstadoPago.ANULADO and p.cantidad_pago > 0:
+            p_dict["cantidad_pago"] = -float(p.cantidad_pago)
+        resultado.append(p_dict)
+    return resultado
+
+
 async def get_reporte_caja(
     fecha_desde_dt: datetime,
     fecha_hasta_dt: Optional[datetime] = None,
@@ -3325,44 +3390,15 @@ async def get_reporte_caja(
     pagos_pagina_raw = await Payment.find(criteria).sort("-fecha_comprobante").skip(skip).limit(per_page).to_list()
     todos_los_pagos_del_rango = await Payment.find(criteria).to_list()
 
-    total_aprobado = sum(p.cantidad_pago for p in todos_los_pagos_del_rango if p.estado_pago == EstadoPago.APROBADO)
-    total_pendiente = sum(p.cantidad_pago for p in todos_los_pagos_del_rango if p.estado_pago == EstadoPago.PENDIENTE)
-    # F-068 (2026-07-22, Kevin): "Total Anulado" debe incluir TANTO anulados
-    # como rechazados (regla F-023: Débitos = anulados/rechazados).
-    # Antes: solo contaba ANULADO, lo que daba 588 Bs en la UI vs 876 Bs en el PDF.
-    total_anulado = sum(
-        p.cantidad_pago for p in todos_los_pagos_del_rango
-        if p.estado_pago in (EstadoPago.ANULADO, EstadoPago.RECHAZADO)
-    )
-
-    # F-COBRANZA-005 (2026-07-21): los pagos ANULADOS ahora se reportan con
-    # monto negativo (en la lista) y se restan del total. Esto hace que el
-    # reporte cuadre con el extracto bancario sin que el usuario tenga que
-    # hacer la resta mentalmente. Auditoría: se mantienen los campos
-    # `total_aprobado`, `total_anulado` y el nuevo `total_neto` para que el
-    # contable pueda ver el desglose.
-    total_neto = round(total_aprobado - total_anulado, 2)
-
+    resumen = _calcular_resumen_caja(todos_los_pagos_del_rango)
     # En la lista de payments, los anulados se serializan con cantidad_pago
     # en negativo. El frontend los muestra como "-X" automáticamente.
-    payments = []
-    for p in pagos_pagina_raw:
-        # to_dict para no mutar el documento persistido
-        p_dict = p.model_dump(by_alias=True)
-        if p.estado_pago == EstadoPago.ANULADO and p.cantidad_pago > 0:
-            p_dict["cantidad_pago"] = -float(p.cantidad_pago)
-        payments.append(p_dict)
+    payments = _serializar_payments_reporte(pagos_pagina_raw)
 
     return {
         "payments": payments,
         "total_count": total_count,
-        "resumen": {
-            "cantidad_pagos": len(todos_los_pagos_del_rango),
-            "total_aprobado": round(total_aprobado, 2),
-            "total_pendiente": round(total_pendiente, 2),
-            "total_anulado": round(total_anulado, 2),
-            "total_neto": total_neto,  # F-COBRANZA-005: cuadra con extracto bancario
-        }
+        "resumen": resumen,
     }
 
 
