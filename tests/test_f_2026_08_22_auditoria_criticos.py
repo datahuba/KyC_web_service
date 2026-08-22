@@ -180,3 +180,38 @@ class TestPaymentServiceTestsLlamanCodigoReal:
         cuerpo = src[ini:fin]
         assert "_calcular_resumen_caja(" in cuerpo
         assert "_serializar_payments_reporte(" in cuerpo
+
+
+class TestSanitizeLegacyDatabaseIdempotente:
+    """Ítem ambiguo #3 de la auditoría, resuelto por Kevin: el saneamiento
+    de duplicados en core/database.py corría sin control en cada uno de
+    los 4 workers al arrancar. Kevin autorizó el fix con la condición
+    explícita de que no sea agresivo ni dañe datos — se agregó solo un
+    lock de Mongo con TTL, sin tocar la lógica de qué se borra.
+
+    Verificado en vivo contra Atlas de producción real (4 llamadas
+    concurrentes a la función real, vía SSH+docker exec): solo 1 de 4
+    corrió el saneamiento completo, las otras 3 salieron por
+    DuplicateKeyError.
+    """
+
+    def test_usa_lock_con_insert_one_y_duplicate_key_error(self):
+        src = _fuente("core", "database.py")
+        ini = src.index("async def _sanitize_legacy_database")
+        fin = src.index("\n\nasync def init_db", ini)
+        cuerpo = src[ini:fin]
+        assert "_startup_locks" in cuerpo
+        assert "insert_one(" in cuerpo
+        assert "DuplicateKeyError" in cuerpo
+        assert "expireAfterSeconds=600" in cuerpo
+
+    def test_no_modifico_la_logica_de_deduplicacion(self):
+        src = _fuente("core", "database.py")
+        ini = src.index("async def _sanitize_legacy_database")
+        fin = src.index("\n\nasync def init_db", ini)
+        cuerpo = src[ini:fin]
+        assert "dup_registros" in cuerpo
+        assert "dup_carnets" in cuerpo
+        assert "dup_emails" in cuerpo
+        assert "dup_courses" in cuerpo
+        assert "drop_indexes()" in cuerpo

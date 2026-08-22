@@ -5,7 +5,9 @@ Conexión a Base de Datos
 Manejo de la conexión asíncrona a MongoDB usando Motor y Beanie ODM.
 """
 
+from datetime import datetime, timezone
 import motor.motor_asyncio
+from pymongo.errors import DuplicateKeyError
 from beanie import init_beanie
 from .config import settings
 
@@ -64,7 +66,31 @@ async def _sanitize_legacy_database(db):
     """
     Sanea de forma asíncrona la base de datos de registros duplicados y conflictos
     de índices legacy antes de la construcción e inicialización de índices de Beanie.
+
+    F-FIX-SANITIZE-SIN-IDEMPOTENCIA (2026-08-22, encontrado en la auditoria
+    completa, revisado y arreglado con confirmacion explicita de Kevin):
+    esto corria en CADA arranque del backend, en los 4 workers de
+    `uvicorn --workers 4`, sin ningun control de si ya se habia hecho.
+    Kevin: "revisalo y si es algo que pueda dañar los datos cambiemoslo por
+    algo que si sirva y no sea agresivo ni dañe datos ni el sistema" — la
+    logica de QUE se borra (duplicados reales por registro/carnet/email) no
+    se toco, sigue igual. Lo que se agrega es un lock corto en Mongo: el
+    primer worker que llega hace el trabajo, los otros 3 lo saltan. TTL de
+    10 minutos en el lock, asi que un deploy nuevo (o un reinicio real mas
+    tarde) puede volver a correrlo si hiciera falta — no es un "solo una
+    vez para siempre", es "solo una vez por arranque".
     """
+    lock_col = db["_startup_locks"]
+    await lock_col.create_index("locked_at", expireAfterSeconds=600, name="ttl_locked_at_10min")
+    try:
+        await lock_col.insert_one({
+            "_id": "sanitize_legacy_database",
+            "locked_at": datetime.now(timezone.utc),
+        })
+    except DuplicateKeyError:
+        print("[STARTUP-CLEANUP] Otro worker ya esta saneando la base en este arranque, se omite.")
+        return
+
     student_col = db["students"]
     course_col = db["courses"]
 
