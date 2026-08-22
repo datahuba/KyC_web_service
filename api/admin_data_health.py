@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException
 from beanie import PydanticObjectId
+from beanie.operators import In
 from collections import Counter
 
 from models import (
@@ -843,16 +844,21 @@ async def fix_inconsistencia(
             raise HTTPException(400, "Se necesitan al menos 2 IDs")
         keep_id = ids[0]
         anulados = 0
+        # F-FIX-N1-ANULAR-DUPLICADOS (2026-08-22, encontrado en la
+        # auditoria completa): un Payment.get() por id dentro del loop.
+        # Se pre-buscan todos de una sola consulta.
+        ids_validos = []
         for pid in ids[1:]:
             try:
-                pago = await Payment.get(PydanticObjectId(pid))
+                ids_validos.append(PydanticObjectId(pid))
             except Exception:
                 continue
-            if pago:
-                pago.estado_pago = EstadoPago.ANULADO
-                pago.motivo_rechazo = f"Anulado por R35-FASE-3 (duplicado de {keep_id})"
-                await pago.save()
-                anulados += 1
+        pagos_a_anular = await Payment.find(In(Payment.id, ids_validos)).to_list()
+        for pago in pagos_a_anular:
+            pago.estado_pago = EstadoPago.ANULADO
+            pago.motivo_rechazo = f"Anulado por R35-FASE-3 (duplicado de {keep_id})"
+            await pago.save()
+            anulados += 1
         _invalidate_cache()
         return {"ok": True, "message": f"{anulados} pagos anulados, 1 mantenido", "mantenido": keep_id}
 

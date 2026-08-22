@@ -10,7 +10,7 @@ from beanie import PydanticObjectId
 from models.user import User
 from schemas.user import UserCreate, UserUpdate
 from models.enums import UserRole, MAX_PROGRAMAS_POR_ENCARGADO
-from beanie.operators import Or
+from beanie.operators import Or, In
 
 async def get_users(page: int = 1, per_page: int = 10) -> tuple[List[User], int]:
     """
@@ -158,12 +158,20 @@ async def assign_course_to_users(course_id: PydanticObjectId, encargados_ids: Li
             u.cursos_asignados.remove(course_id)
             await u.save()
             
-    # Usuarios a los que se les debe agregar el curso
+    # Usuarios a los que se les debe agregar el curso.
+    # F-FIX-N1-ASSIGN-COURSE (2026-08-22, encontrado en la auditoria
+    # completa): antes hacia un `User.get()` por cada uid dentro del loop
+    # (N+1). Se pre-buscan todos de una sola consulta con `In()`.
+    ids_a_agregar = [PydanticObjectId(uid) for uid in new_ids if uid not in current_ids]
+    usuarios_a_agregar = {
+        str(u.id): u for u in await User.find(In(User.id, ids_a_agregar)).to_list()
+    } if ids_a_agregar else {}
+
     for uid in new_ids:
         if uid in current_ids:
             continue # ya lo tiene
-            
-        u = await User.get(PydanticObjectId(uid))
+
+        u = usuarios_a_agregar.get(uid)
         if not u or u.rol not in [UserRole.ENCARGADO_CURSO, UserRole.COORDINADOR]:
             continue
             

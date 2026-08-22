@@ -17,6 +17,7 @@ Permisos (Según Jerarquía UAGRM):
 """
 
 import asyncio
+import logging
 from typing import List, Any, Optional, Union
 from datetime import datetime
 from pydantic import BaseModel, Field
@@ -708,7 +709,7 @@ async def editar_nota_validada(
                 referencia_id=enrollment.id,
             )
         except Exception as e:
-            print(f"Error notificando edición de nota: {str(e)}")
+            logging.getLogger("kyc.enrollments").warning(f"Error notificando edición de nota: {str(e)}")
 
         return await enrollment_service.enrich_enrollment_dates(enrollment)
     except HTTPException:
@@ -1326,7 +1327,7 @@ async def update_modulo_nota(
                         referencia_id=id
                     )
             except Exception as e:
-                print(f"Error notificando borrador de nota a CPD: {str(e)}")
+                logging.getLogger("kyc.enrollments").warning(f"Error notificando borrador de nota a CPD: {str(e)}")
 
         else:
             updated_enrollment = await enrollment_service.actualizar_nota_modulo(
@@ -1379,7 +1380,7 @@ async def validar_modulo_nota(
                     referencia_id=id
                 )
         except Exception as e:
-            print(f"Error notificando validación de borrador al docente: {str(e)}")
+            logging.getLogger("kyc.enrollments").warning(f"Error notificando validación de borrador al docente: {str(e)}")
 
         return await enrollment_service.enrich_enrollment_dates(updated)
     except ValueError as e:
@@ -1428,7 +1429,7 @@ async def rechazar_modulo_nota(
                     referencia_id=id
                 )
         except Exception as e:
-            print(f"Error notificando rechazo de borrador al docente: {str(e)}")
+            logging.getLogger("kyc.enrollments").warning(f"Error notificando rechazo de borrador al docente: {str(e)}")
 
         return await enrollment_service.enrich_enrollment_dates(updated)
     except ValueError as e:
@@ -1548,7 +1549,7 @@ async def subir_requisito(
                     referencia_id=enrollment.id
                 )
         except Exception as e:
-            print(f"Error notificando subida de documento a revisores: {str(e)}")
+            logging.getLogger("kyc.enrollments").warning(f"Error notificando subida de documento a revisores: {str(e)}")
 
         return enrollment.requisitos[index]
     except HTTPException:
@@ -1599,7 +1600,7 @@ async def aprobar_requisito(
             referencia_id=enrollment.id
         )
     except Exception as e:
-        print(f"Error notificando aprobación de documento al estudiante: {str(e)}")
+        logging.getLogger("kyc.enrollments").warning(f"Error notificando aprobación de documento al estudiante: {str(e)}")
 
     return enrollment.requisitos[index]
 
@@ -1643,7 +1644,7 @@ async def rechazar_requisito(
             referencia_id=enrollment.id
         )
     except Exception as e:
-        print(f"Error notificando rechazo de documento al estudiante: {str(e)}")
+        logging.getLogger("kyc.enrollments").warning(f"Error notificando rechazo de documento al estudiante: {str(e)}")
 
     return enrollment.requisitos[index]
 
@@ -1766,7 +1767,7 @@ async def subir_formulario_inscripcion(
                     referencia_id=enrollment.id
                 )
         except Exception as e:
-            print(f"Error notificando formulario de inscripcion a revisores: {str(e)}")
+            logging.getLogger("kyc.enrollments").warning(f"Error notificando formulario de inscripcion a revisores: {str(e)}")
 
         return await enrollment_service.enrich_enrollment_dates(enrollment)
     except HTTPException:
@@ -2302,16 +2303,19 @@ async def establecer_saldo_inicial_endpoint(
     # Marcar módulos pagados
     if payload.hasta_modulo_index is not None and enrollment.modulos:
         limite = min(payload.hasta_modulo_index + 1, len(enrollment.modulos))
+        # F-FIX-N1-PAGOS-HISTORICOS (2026-08-22, encontrado en la auditoria
+        # completa): antes hacia un Payment.find_one() por cada modulo
+        # dentro del loop. Se pre-buscan todos los pagos existentes de
+        # este enrollment de una sola consulta.
+        pagos_existentes = await Payment.find({"inscripcion_id": enrollment.id}).to_list()
+        pagos_por_cuota = {p.numero_cuota: p for p in pagos_existentes if p.numero_cuota is not None}
         for idx in range(limite):
             mod = enrollment.modulos[idx]
             mod.monto_pagado = mod.costo or 0.0
             if (mod.costo or 0) > 0 and mod.monto_pagado >= (mod.costo or 0) - 0.01:
                 mod.estado = "Pagado"
             if (mod.costo or 0) > 0:
-                existing_pago = await Payment.find_one({
-                    "inscripcion_id": enrollment.id,
-                    "numero_cuota": idx + 1
-                })
+                existing_pago = pagos_por_cuota.get(idx + 1)
                 if not existing_pago:
                     pago_hist = Payment(
                         inscripcion_id=enrollment.id,

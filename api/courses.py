@@ -728,12 +728,20 @@ async def post_initial_enrollments(
             # F-PAGOS-HISTORICOS: Crear registros de Payment para auditoría y trazabilidad contable
             from datetime import timezone
             from models.enums import EstadoPago
+
+            # F-FIX-N1-PAGOS-HISTORICOS (2026-08-22, encontrado en la
+            # auditoria completa): antes hacia un Payment.find_one() por
+            # cada modulo del enrollment (y esta funcion corre dentro de
+            # un loop de importacion masiva por Excel, asi que el N+1 se
+            # multiplicaba por cada estudiante importado). Se pre-buscan
+            # todos los pagos existentes de ESTE enrollment de una sola
+            # consulta, indexados por numero_cuota.
+            pagos_existentes = await Payment.find({"inscripcion_id": enrollment.id}).to_list()
+            pagos_por_cuota = {p.numero_cuota: p for p in pagos_existentes if p.numero_cuota is not None}
+
             for idx, mod in enumerate(enrollment.modulos or []):
                 if (mod.monto_pagado or 0) > 0 and (mod.estado == "Pagado" or mod.monto_pagado >= (mod.costo or 0) - 0.01):
-                    existing_pago = await Payment.find_one({
-                        "inscripcion_id": enrollment.id,
-                        "numero_cuota": idx + 1
-                    })
+                    existing_pago = pagos_por_cuota.get(idx + 1)
                     if not existing_pago:
                         pago_hist = Payment(
                             inscripcion_id=enrollment.id,
