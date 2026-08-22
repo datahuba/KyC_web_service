@@ -987,9 +987,9 @@ async def _build_course_breakdown(
     pagos_by_enrollment: dict[str, list[Payment]] = {}
     for p in pagos:
         cid = str(p.curso_id)
-        pagos_by_curso.setdefault(cid, []).append(p)
-        if p.enrollment_id:
-            pagos_by_enrollment.setdefault(str(p.enrollment_id), []).append(p)
+        enr_id = getattr(p, "inscripcion_id", None) or getattr(p, "enrollment_id", None)
+        if enr_id:
+            pagos_by_enrollment.setdefault(str(enr_id), []).append(p)
 
     breakdown: list[dict] = []
     for c in cursos_visibles:
